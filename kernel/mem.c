@@ -1,0 +1,567 @@
+/**
+ * @file mem.c
+ * @brief TLSF 堆分配器实现
+ * @details Two-Level Segregated Fit（TLSF）堆，malloc/free 摊还 O(1)。
+ *          参考：Masmano et al., EUROMICRO 2004。
+ *
+ * 块头位于用户指针之前；size 低比特标记 FREE；
+ * 合并时需更新物理后继的 prev_phys（正确性关键）。
+ */
+#include "cgrtos.h"
+#include <string.h>
+
+/** @def TLSF_ALIGN 堆块对齐字节数 */
+#define TLSF_ALIGN          8U
+/** @def TLSF_ALIGN_LOG2 log2(TLSF_ALIGN) */
+#define TLSF_ALIGN_LOG2     3U
+/** @def TLSF_ALIGN_MASK 对齐掩码 */
+#define TLSF_ALIGN_MASK     (TLSF_ALIGN - 1U)
+/** @def TLSF_MIN_BLOCK 最小可分配块净荷（字节） */
+#define TLSF_MIN_BLOCK      32U
+/** @def TLSF_FL_BITS 一级索引位数 */
+#define TLSF_FL_BITS        5U
+/** @def TLSF_SL_BITS 二级索引位数 */
+#define TLSF_SL_BITS        5U
+/** @def TLSF_FL_COUNT 一级桶数量 */
+#define TLSF_FL_COUNT       (1U << TLSF_FL_BITS)
+/** @def TLSF_SL_COUNT 二级桶数量 */
+#define TLSF_SL_COUNT       (1U << TLSF_SL_BITS)
+/** @def TLSF_FL_SHIFT 一级/二级分界：SMALL = 1<<FL_SHIFT（须为 SL_BITS+ALIGN_LOG2） */
+#define TLSF_FL_SHIFT       (TLSF_SL_BITS + TLSF_ALIGN_LOG2)
+/** @def TLSF_FL_MAX 最大一级索引 */
+#define TLSF_FL_MAX         (TLSF_FL_COUNT - 1U)
+/** @def TLSF_SL_MAX 最大二级索引 */
+#define TLSF_SL_MAX         (TLSF_SL_COUNT - 1U)
+/** @def TLSF_BLOCK_HDR 块头结构体大小 */
+#define TLSF_BLOCK_HDR      sizeof(tlsf_block_t)
+/** @def TLSF_BLOCK_FREE size 字段空闲位 */
+#define TLSF_BLOCK_FREE     1U
+/** @def TLSF_BLOCK_USED size 字段已用（无空闲位） */
+#define TLSF_BLOCK_USED     0U
+/** @def TLSF_BLOCK_MAGIC 块魔数，用于校验 */
+#define TLSF_BLOCK_MAGIC    0xC0DECAFEU
+
+/** @brief TLSF 内存块头 */
+typedef struct tlsf_block {
+    uint32_t            size;      /**< 净荷大小 + FREE 标志 */
+    uint32_t            magic;     /**< 魔数 TLSF_BLOCK_MAGIC */
+    struct tlsf_block  *prev_phys; /**< 物理前驱块 */
+    struct tlsf_block  *next_free; /**< 空闲链表后继 */
+    struct tlsf_block  *prev_free; /**< 空闲链表前驱 */
+} tlsf_block_t;
+
+/** @brief TLSF 空闲链表池控制结构 */
+typedef struct {
+    uint32_t            fl_bitmap;                          /**< 一级非空位图 */
+    uint32_t            sl_bitmap[TLSF_FL_COUNT];           /**< 各一级二级位图 */
+    tlsf_block_t       *block_list[TLSF_FL_COUNT][TLSF_SL_COUNT]; /**< 空闲链表头 */
+} tlsf_pool_t;
+
+/** @brief 静态堆缓冲区 */
+static uint8_t          g_heap[CONFIG_HEAP_SIZE];
+/** @brief TLSF 池状态 */
+static tlsf_pool_t      g_pool;
+/** @brief 当前已用堆字节数 */
+static uint32_t         g_heap_used;
+/** @brief 历史最小剩余空闲字节 */
+static uint32_t         g_heap_min_free;
+/** @brief 堆是否已初始化 */
+static int              g_heap_init;
+
+#if CONFIG_USE_HOOKS
+extern cgrtos_malloc_failed_hook_t g_malloc_failed_hook;
+#endif
+
+/**
+ * @brief 将字节数向上对齐到 TLSF_ALIGN（8 字节）
+ * @param size 原始请求大小
+ * @return 对齐后的字节数
+ * @details
+ * 1. 加上 TLSF_ALIGN_MASK 后按位与 ~MASK，实现向上取整到 8 字节边界。
+ */
+static inline uint32_t tlsf_align_up(uint32_t size)
+{
+    return (size + TLSF_ALIGN_MASK) & ~TLSF_ALIGN_MASK;
+}
+
+/**
+ * @brief 从块头 size 字段提取净荷大小（清除标志位）
+ * @param block 块头指针
+ * @return 净荷字节数（不含块头与标志位）
+ * @details
+ * 1. 对 block->size 按位与 ~3U，去掉低 2 比特 FREE/USED 标志。
+ */
+static inline uint32_t tlsf_block_size(tlsf_block_t *block)
+{
+    return block->size & ~3U;
+}
+
+/**
+ * @brief 判断内存块当前是否处于空闲状态
+ * @param block 块头指针
+ * @return 非零表示空闲；零表示已分配
+ * @details
+ * 1. 检查 block->size 的 TLSF_BLOCK_FREE 标志位是否置位。
+ */
+static inline int tlsf_block_is_free(tlsf_block_t *block)
+{
+    return (block->size & TLSF_BLOCK_FREE) != 0;
+}
+
+/**
+ * @brief 设置块的净荷大小与空闲/已用标志
+ * @param block 块头指针
+ * @param size  净荷字节数（不含标志位）
+ * @param free  非零则标记 FREE，否则 USED
+ * @details
+ * 1. 将 size 与 free 标志 OR 后写入 block->size。
+ */
+static inline void tlsf_set_block_size(tlsf_block_t *block, uint32_t size, int free)
+{
+    block->size = size | (free ? TLSF_BLOCK_FREE : 0U);
+}
+
+/**
+ * @brief 按物理布局计算当前块的后继块头指针
+ * @param block 当前块头
+ * @return 紧邻其后的下一块块头（物理地址连续）
+ * @details
+ * 1. 后继地址 = block + TLSF_BLOCK_HDR + tlsf_block_size(block)。
+ */
+static inline tlsf_block_t *tlsf_block_next(tlsf_block_t *block)
+{
+    return (tlsf_block_t *)((uint8_t *)block + TLSF_BLOCK_HDR + tlsf_block_size(block));
+}
+
+/**
+ * @brief 由用户可见指针反推块头地址
+ * @param ptr cgrtos_malloc 返回的用户指针
+ * @return 位于 ptr 之前的 tlsf_block_t 块头指针
+ * @details
+ * 1. 用户指针减去 TLSF_BLOCK_HDR 偏移即得块头。
+ */
+static inline tlsf_block_t *tlsf_block_from_ptr(void *ptr)
+{
+    return (tlsf_block_t *)((uint8_t *)ptr - TLSF_BLOCK_HDR);
+}
+
+/**
+ * @brief 将请求净荷大小映射到 TLSF 一级(fl)/二级(sl)桶索引
+ * @param size 请求净荷大小（字节）
+ * @param fl   输出：一级索引
+ * @param sl   输出：二级索引
+ * @details
+ * 1. 小于 TLSF_MIN_BLOCK 的请求提升到 MIN_BLOCK。
+ * 2. 若 size < 2^FL_SHIFT（小块区），fl=0，sl=size>>ALIGN_LOG2（线性分桶）。
+ * 3. 大块区：fls=floor(log2(size))，按 Matt Conte TLSF 公式计算 fl_idx 与 sl_idx。
+ * 4. 对 fl/sl 做上界钳制，写入 *fl 与 *sl。
+ */
+static void tlsf_mapping(uint32_t size, uint32_t *fl, uint32_t *sl)
+{
+    /* 1. 小于 TLSF_MIN_BLOCK 的请求提升到 MIN_BLOCK */
+    if (size < TLSF_MIN_BLOCK) {
+        size = TLSF_MIN_BLOCK;
+    }
+
+    if (size < (1U << TLSF_FL_SHIFT)) {
+        /* 2. 小块区：fl=0，sl=size>>ALIGN_LOG2（线性分桶） */
+        *fl = 0;
+        *sl = size >> TLSF_ALIGN_LOG2;
+        if (*sl >= TLSF_SL_COUNT) {
+            *sl = TLSF_SL_COUNT - 1U;
+        }
+    } else {
+        /* 3. 大块区：对数一级 + 二级细分 */
+        uint32_t fls = 31U - (uint32_t)__builtin_clz(size);
+        uint32_t sl_idx = (size >> (fls - TLSF_SL_BITS)) ^ TLSF_SL_COUNT;
+        uint32_t fl_idx = fls - (TLSF_FL_SHIFT - 1U);
+        if (fl_idx >= TLSF_FL_COUNT) {
+            fl_idx = TLSF_FL_COUNT - 1U;
+        }
+        if (sl_idx >= TLSF_SL_COUNT) {
+            sl_idx = TLSF_SL_COUNT - 1U;
+        }
+        *fl = fl_idx;
+        *sl = sl_idx;
+    }
+}
+
+/**
+ * @brief 从指定 (fl,sl) 空闲链表中移除块
+ * @param pool  TLSF 池控制结构
+ * @param block 待移除块（须在链表中）
+ * @param fl    一级桶索引
+ * @param sl    二级桶索引
+ * @details
+ * 1. 若 block 非链表头，更新 prev_free->next_free；否则更新 block_list[fl][sl]。
+ * 2. 若链表变空，清除 sl_bitmap[fl] 对应位；若该 fl 下无二级桶，清除 fl_bitmap 位。
+ * 3. 更新后继块的 prev_free；清零 block 的 next_free/prev_free。
+ */
+static void tlsf_list_remove(tlsf_pool_t *pool, tlsf_block_t *block,
+                             uint32_t fl, uint32_t sl)
+{
+    if (block->prev_free) {
+        block->prev_free->next_free = block->next_free;
+    } else {
+        pool->block_list[fl][sl] = block->next_free;
+        if (!pool->block_list[fl][sl]) {
+            pool->sl_bitmap[fl] &= ~(1U << sl);
+            if (!pool->sl_bitmap[fl]) {
+                pool->fl_bitmap &= ~(1U << fl);
+            }
+        }
+    }
+    if (block->next_free) {
+        block->next_free->prev_free = block->prev_free;
+    }
+    block->next_free = 0;
+    block->prev_free = 0;
+}
+
+/**
+ * @brief 将空闲块头插入指定 (fl,sl) 链表
+ * @param pool  TLSF 池控制结构
+ * @param block 待插入空闲块
+ * @param fl    一级桶索引
+ * @param sl    二级桶索引
+ * @details
+ * 1. 头插法：block->next_free 指向原链表头，原头 prev_free 指向 block。
+ * 2. 更新 block_list[fl][sl]=block，置位 sl_bitmap[fl] 与 fl_bitmap。
+ */
+static void tlsf_list_insert(tlsf_pool_t *pool, tlsf_block_t *block,
+                             uint32_t fl, uint32_t sl)
+{
+    block->next_free = pool->block_list[fl][sl];
+    block->prev_free = 0;
+    if (block->next_free) {
+        block->next_free->prev_free = block;
+    }
+    pool->block_list[fl][sl] = block;
+    pool->sl_bitmap[fl] |= (1U << sl);
+    pool->fl_bitmap |= (1U << fl);
+}
+
+/**
+ * @brief 在位图辅助下查找不小于 size 的首个合适空闲块
+ * @param size 请求净荷大小（字节）
+ * @return 满足 size 的空闲块指针；堆无足够空间返回 NULL
+ * @details
+ * 1. tlsf_mapping 得到起始 (fl,sl)。
+ * 2. 在当前 fl 内用 sl_bitmap 掩码找 >=sl 的非空二级桶；若无则 fl_bitmap 找更高 fl。
+ * 3. 遍历该桶空闲链表，返回首个 tlsf_block_size >= size 的块。
+ * 4. 当前桶不满足则继续搜索更高 (fl,sl) 直至位图耗尽，返回 NULL。
+ */
+static tlsf_block_t *tlsf_find_suitable(uint32_t size)
+{
+    uint32_t fl, sl;
+    tlsf_mapping(size, &fl, &sl);
+
+    uint32_t sl_map = g_pool.sl_bitmap[fl] & (~0U << sl);
+    if (!sl_map) {
+        uint32_t fl_map = (fl >= 31U) ? 0U :
+                          (g_pool.fl_bitmap & (~0U << (fl + 1U)));
+        if (!fl_map) {
+            return 0;
+        }
+        fl = (uint32_t)__builtin_ctz(fl_map);
+        sl_map = g_pool.sl_bitmap[fl];
+    }
+    sl = (uint32_t)__builtin_ctz(sl_map);
+
+    /* 遍历当前桶，mapping 为 first-fit — 仍须验证实际 size */
+    for (tlsf_block_t *block = g_pool.block_list[fl][sl]; block;
+         block = block->next_free) {
+        if (tlsf_block_size(block) >= size) {
+            return block;
+        }
+    }
+
+    /* 当前桶耗尽：搜索更高索引桶 */
+    sl_map &= ~((1U << (sl + 1U)) - 1U);
+    while (1) {
+        if (!sl_map) {
+            uint32_t fl_map = (fl >= 31U) ? 0U :
+                              (g_pool.fl_bitmap & (~0U << (fl + 1U)));
+            if (!fl_map) {
+                return 0;
+            }
+            fl = (uint32_t)__builtin_ctz(fl_map);
+            sl_map = g_pool.sl_bitmap[fl];
+        }
+        sl = (uint32_t)__builtin_ctz(sl_map);
+        for (tlsf_block_t *block = g_pool.block_list[fl][sl]; block;
+             block = block->next_free) {
+            if (tlsf_block_size(block) >= size) {
+                return block;
+            }
+        }
+        sl_map &= ~(1U << sl);
+    }
+}
+
+/**
+ * @brief 将过大的空闲块拆分为「已分配块 + 剩余空闲块」
+ * @param block 待拆分空闲块（仍标记 FREE）
+ * @param size  目标分配净荷大小
+ * @details
+ * 1. 若 total < size + HDR + MIN_BLOCK，剩余太小无法拆分，整块保留。
+ * 2. 在 block 净荷末尾创建 remain 块，设置 size 与 prev_phys。
+ * 3. 缩小 block 净荷为 size；更新物理后继 next->prev_phys 指向 remain。
+ * 4. 对 remain 做 tlsf_mapping 并 tlsf_list_insert 入空闲链。
+ */
+static void tlsf_split_block(tlsf_block_t *block, uint32_t size)
+{
+    uint32_t total = tlsf_block_size(block);
+    /* 1. 若 total < size + HDR + MIN_BLOCK，剩余太小无法拆分，整块保留 */
+    if (total < size + TLSF_BLOCK_HDR + TLSF_MIN_BLOCK) {
+        return;
+    }
+
+    /* 2. 在 block 净荷末尾创建 remain 块，设置 size 与 prev_phys */
+    tlsf_block_t *remain = (tlsf_block_t *)((uint8_t *)block + TLSF_BLOCK_HDR + size);
+    tlsf_set_block_size(remain, total - size - TLSF_BLOCK_HDR, 1);
+    remain->magic = TLSF_BLOCK_MAGIC;
+    remain->prev_phys = block;
+    tlsf_set_block_size(block, size, 1);
+
+    /* 3. 缩小 block 净荷；更新物理后继 next->prev_phys 指向 remain */
+    tlsf_block_t *next = tlsf_block_next(remain);
+    if ((uint8_t *)next < g_heap + CONFIG_HEAP_SIZE) {
+        next->prev_phys = remain;
+    }
+
+    /* 4. 对 remain 做 tlsf_mapping 并 tlsf_list_insert 入空闲链 */
+    uint32_t fl, sl;
+    tlsf_mapping(tlsf_block_size(remain), &fl, &sl);
+    tlsf_list_insert(&g_pool, remain, fl, sl);
+}
+
+/**
+ * @brief 将空闲块与物理相邻空闲块合并后重新入链
+ * @param block 待合并块（须已标记为 FREE，且尚未在链表中）
+ * @details
+ * 1. 若物理后继 next 空闲：从链中移除 next，扩展 block 净荷，更新 after->prev_phys。
+ * 2. 若物理前驱 prev 空闲：从链中移除 prev，合并到 prev，block 指针改为 prev。
+ * 3. 合并后再次更新物理后继的 prev_phys（吸收 block 时关键）。
+ * 4. tlsf_mapping + tlsf_list_insert 将最终块挂回空闲链。
+ */
+static void tlsf_merge_block(tlsf_block_t *block)
+{
+    /* 1. 若物理后继 next 空闲：从链中移除 next，扩展 block 净荷 */
+    tlsf_block_t *next = tlsf_block_next(block);
+    if ((uint8_t *)next < g_heap + CONFIG_HEAP_SIZE && tlsf_block_is_free(next)) {
+        uint32_t fl, sl;
+        tlsf_mapping(tlsf_block_size(next), &fl, &sl);
+        tlsf_list_remove(&g_pool, next, fl, sl);
+        tlsf_set_block_size(block, tlsf_block_size(block) + TLSF_BLOCK_HDR +
+                            tlsf_block_size(next), 1);
+        tlsf_block_t *after = tlsf_block_next(block);
+        if ((uint8_t *)after < g_heap + CONFIG_HEAP_SIZE) {
+            after->prev_phys = block;
+        }
+    }
+
+    /* 2. 若物理前驱 prev 空闲：从链中移除 prev，合并到 prev */
+    if (block->prev_phys && tlsf_block_is_free(block->prev_phys)) {
+        tlsf_block_t *prev = block->prev_phys;
+        uint32_t fl, sl;
+        tlsf_mapping(tlsf_block_size(prev), &fl, &sl);
+        tlsf_list_remove(&g_pool, prev, fl, sl);
+        tlsf_set_block_size(prev, tlsf_block_size(prev) + TLSF_BLOCK_HDR +
+                            tlsf_block_size(block), 1);
+        block = prev;
+        /* 3. 合并后再次更新物理后继的 prev_phys */
+        tlsf_block_t *after = tlsf_block_next(block);
+        if ((uint8_t *)after < g_heap + CONFIG_HEAP_SIZE) {
+            after->prev_phys = block;
+        }
+    }
+
+    /* 4. tlsf_mapping + tlsf_list_insert 将最终块挂回空闲链 */
+    uint32_t fl, sl;
+    tlsf_mapping(tlsf_block_size(block), &fl, &sl);
+    tlsf_list_insert(&g_pool, block, fl, sl);
+}
+
+/**
+ * @brief 更新历史最小剩余堆字节数 g_heap_min_free
+ * @details
+ * 1. 计算当前空闲字节 free_bytes = CONFIG_HEAP_SIZE - g_heap_used。
+ * 2. 若小于 g_heap_min_free 则更新记录，供 cgrtos_get_min_free_heap 查询。
+ */
+static void heap_update_min_free(void)
+{
+    uint32_t free_bytes = CONFIG_HEAP_SIZE - g_heap_used;
+    if (free_bytes < g_heap_min_free) {
+        g_heap_min_free = free_bytes;
+    }
+}
+
+/**
+ * @brief 初始化 TLSF 池，将整堆作为单块空闲区挂入桶 0
+ * @details
+ * 1. memset 清零 g_pool 位图与链表头。
+ * 2. 在 g_heap 起始处放置首块，净荷 total=HEAP_SIZE-HDR，标记 FREE。
+ * 3. 设置 magic、prev_phys=0，tlsf_mapping + list_insert 入空闲链。
+ * 4. g_heap_used=0，g_heap_min_free=HEAP_SIZE，g_heap_init=1。
+ */
+static void tlsf_init_pool(void)
+{
+    memset(&g_pool, 0, sizeof(g_pool));
+
+    tlsf_block_t *block = (tlsf_block_t *)g_heap;
+    uint32_t total = CONFIG_HEAP_SIZE - TLSF_BLOCK_HDR;
+    tlsf_set_block_size(block, total, 1);
+    block->magic = TLSF_BLOCK_MAGIC;
+    block->prev_phys = 0;
+    block->next_free = 0;
+    block->prev_free = 0;
+
+    uint32_t fl, sl;
+    tlsf_mapping(total, &fl, &sl);
+    tlsf_list_insert(&g_pool, block, fl, sl);
+
+    g_heap_used = 0;
+    g_heap_min_free = CONFIG_HEAP_SIZE;
+    g_heap_init = 1;
+}
+
+/**
+ * @brief 分配堆内存（TLSF O(1) 摊还）
+ * @param size 请求字节数
+ * @return 8 字节对齐的用户指针；失败返回 NULL
+ * @details
+ * 1. 首次调用惰性 tlsf_init_pool；size==0 返回 NULL。
+ * 2. 将 size 对齐并提升到 MIN_BLOCK，进入临界区。
+ * 3. tlsf_find_suitable 找块；失败则可选触发 malloc_failed_hook。
+ * 4. 从空闲链移除，tlsf_split_block 拆分余量，标记 USED，更新 g_heap_used。
+ * 5. heap_update_min_free，返回 block+HDR 的用户指针。
+ * @note 线程安全依赖 cgrtos_enter_critical / exit_critical
+ */
+void *cgrtos_malloc(unsigned long size)
+{
+    /* 1. 首次调用惰性 tlsf_init_pool；size==0 返回 NULL */
+    if (!g_heap_init) {
+        tlsf_init_pool();
+    }
+    if (size == 0) {
+        return 0;
+    }
+
+    uint32_t req = tlsf_align_up((uint32_t)size);
+    if (req < TLSF_MIN_BLOCK) {
+        req = TLSF_MIN_BLOCK;
+    }
+
+    /* 2. 将 size 对齐并提升到 MIN_BLOCK，进入临界区 */
+    cgrtos_enter_critical();
+
+    /* 3. tlsf_find_suitable 找块；失败则可选触发 malloc_failed_hook */
+    tlsf_block_t *block = tlsf_find_suitable(req);
+    if (!block) {
+        cgrtos_exit_critical();
+#if CONFIG_USE_HOOKS
+        if (g_malloc_failed_hook) {
+            g_malloc_failed_hook(size);
+        }
+#endif
+        return 0;
+    }
+
+    uint32_t fl, sl;
+    tlsf_mapping(tlsf_block_size(block), &fl, &sl);
+    tlsf_list_remove(&g_pool, block, fl, sl);
+
+    /* 4. 从空闲链移除，tlsf_split_block 拆分余量，标记 USED，更新 g_heap_used */
+    tlsf_split_block(block, req);
+    tlsf_set_block_size(block, tlsf_block_size(block), 0);
+    block->magic = TLSF_BLOCK_MAGIC;
+
+    g_heap_used += TLSF_BLOCK_HDR + tlsf_block_size(block);
+    /* 5. heap_update_min_free，返回 block+HDR 的用户指针 */
+    heap_update_min_free();
+
+    void *ptr = (void *)((uint8_t *)block + TLSF_BLOCK_HDR);
+    cgrtos_exit_critical();
+    return ptr;
+}
+
+/**
+ * @brief 分配 count*size 字节并清零
+ * @param count 元素个数
+ * @param size  每个元素字节数
+ * @return 用户指针；溢出或 malloc 失败返回 NULL
+ * @details
+ * 1. 检测 count*size 乘法溢出，溢出则返回 NULL。
+ * 2. cgrtos_malloc(total)，成功则 memset 清零 total 字节。
+ * 3. 返回指针或 NULL。
+ */
+void *cgrtos_calloc(unsigned long count, unsigned long size)
+{
+    if (count != 0 && size > (~(unsigned long)0UL) / count) {
+        return 0;
+    }
+    unsigned long total = count * size;
+    void *ptr = cgrtos_malloc(total);
+    if (ptr) {
+        memset(ptr, 0, total);
+    }
+    return ptr;
+}
+
+/**
+ * @brief 释放先前 cgrtos_malloc/calloc 返回的堆内存
+ * @param ptr 用户指针；NULL 安全忽略
+ * @details
+ * 1. ptr 为空或堆未初始化则返回。
+ * 2. 临界区内由 ptr 反推 block，校验 magic 且非 FREE（防 double-free）。
+ * 3. 递减 g_heap_used，标记 FREE，tlsf_merge_block 与邻居合并。
+ * 4. heap_update_min_free，退出临界区。
+ */
+void cgrtos_free(void *ptr)
+{
+    /* 1. ptr 为空或堆未初始化则返回 */
+    if (!ptr || !g_heap_init) {
+        return;
+    }
+
+    cgrtos_enter_critical();
+
+    /* 2. 由 ptr 反推 block，校验 magic 且非 FREE（防 double-free） */
+    tlsf_block_t *block = tlsf_block_from_ptr(ptr);
+    if (block->magic != TLSF_BLOCK_MAGIC || tlsf_block_is_free(block)) {
+        cgrtos_exit_critical();
+        return;
+    }
+
+    /* 3. 递减 g_heap_used，标记 FREE，tlsf_merge_block 与邻居合并 */
+    g_heap_used -= TLSF_BLOCK_HDR + tlsf_block_size(block);
+    tlsf_set_block_size(block, tlsf_block_size(block), 1);
+    tlsf_merge_block(block);
+    /* 4. heap_update_min_free，退出临界区 */
+    heap_update_min_free();
+
+    cgrtos_exit_critical();
+}
+
+/**
+ * @brief 查询当前剩余可用堆字节数
+ * @return CONFIG_HEAP_SIZE - g_heap_used
+ * @details
+ * 1. 用静态堆总大小减去已用计数 g_heap_used 并返回。
+ */
+unsigned long cgrtos_get_free_heap(void)
+{
+    return CONFIG_HEAP_SIZE - g_heap_used;
+}
+
+/**
+ * @brief 查询运行以来出现过的最小剩余堆字节数（高水位反向指标）
+ * @return g_heap_min_free 历史最小空闲量
+ * @details
+ * 1. 直接返回 heap_update_min_free 在每次 alloc/free 时维护的 g_heap_min_free。
+ */
+unsigned long cgrtos_get_min_free_heap(void)
+{
+    return g_heap_min_free;
+}

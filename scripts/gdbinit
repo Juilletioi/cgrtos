@@ -1,0 +1,75 @@
+# CG-RTOS GDB helpers — loaded by scripts/cgrtos.sh (--gdb / gdb)
+# Target: Nuclei UX900 / evalsoc under QEMU gdbstub (:1234)
+#
+# Expectation: cwd is the repo root so DWARF relative paths resolve to C sources.
+# Launched with: gdb -tui -x scripts/gdbinit cgrtos.elf
+
+set architecture riscv:rv64
+set confirm off
+set print pretty on
+set pagination off
+set history save on
+
+# Resolve #line paths from freestanding build
+directory .
+directory kernel
+directory arch/riscv
+directory tests
+directory demo
+
+# target remote is issued by scripts/cgrtos.sh (honors --port)
+
+# C source TUI (works when gdb started with -tui / real tty)
+tui enable
+layout src
+focus cmd
+
+# Useful breakpoints (uncomment as needed):
+# break secondary_main
+# break cgrtos_tick_handler
+# break cgrtos_sched_load_balance
+# break cgrtos_sched_idle_steal
+# break cgrtos_sched_switch_from_trap
+
+# Convenience macros
+define cgrtos-cores
+  printf "=== SMP cores ===\n"
+  printf "secondary_online = %u\n", g_secondary_online
+  printf "ticks            = %llu\n", (unsigned long long)g_ticks
+  printf "cs_total         = %u  c0=%u c1=%u\n", g_cs_count, g_cs_count_core[0], g_cs_count_core[1]
+  printf "lb migrate/steal = %u / %u\n", g_lb_migrate_count, g_lb_steal_count
+end
+document cgrtos-cores
+Print key SMP / scheduler counters.
+end
+
+define cgrtos-tasks
+  set $i = 0
+  printf "=== Tasks ===\n"
+  while $i < 64
+    if g_tasks[$i].id != 0
+      printf "[%2d] id=%llu prio=%u pol=%u st=%u aff=%u run=%u name=%s\n", \
+        $i, (unsigned long long)g_tasks[$i].id, g_tasks[$i].prio, \
+        g_tasks[$i].policy, g_tasks[$i].state, g_tasks[$i].cpu_aff, \
+        g_tasks[$i].run_cpu, g_tasks[$i].name
+    end
+    set $i = $i + 1
+  end
+end
+document cgrtos-tasks
+List living tasks (id, prio, policy, state, affinity, run_cpu).
+end
+
+define cgrtos-src
+  tui enable
+  layout src
+  focus cmd
+end
+document cgrtos-src
+Re-open the C source TUI layout.
+end
+
+echo \n[CG-RTOS] Connected. TUI: layout src | macros: cgrtos-cores / cgrtos-tasks / cgrtos-src\n
+# Stop at main of hart0 by default
+break main
+continue

@@ -1,0 +1,22 @@
+# Build
+*.o
+cgrtos.elf
+cgrtos.bin
+cgrtos.map
+*.bin
+
+# Generated SDK / docs (regenerate: ./scripts/cgrtos.sh sdk)
+sdk/
+docs/doxygen/
+
+# Tooling / local
+.cache/
+.clangd
+compile_commands.json
+.gdb_history
+
+# Editor / OS
+.vscode/
+*.swp
+*~
+.DS_Store
