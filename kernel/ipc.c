@@ -262,37 +262,37 @@ int cgrtos_sem_give(cgrtos_sem_t *sem)
 
 /**
  * @brief 从中断上下文释放信号量
- * 
- * @param sem 信号量指针
- * 
+ *
+ * @param sem   信号量指针
+ * @param woken 可选；非空则唤醒更高优先级时置 pdTRUE，否则自动 yield_from_isr
+ *
  * @return pdPASS 成功；pdFAIL 参数错误
- * 
+ *
  * @details
  * 1. 校验 sem 非空并进入临界区。
  * 2. 若有等待者，唤醒最高优先级任务。
  * 3. 无等待者且 count<max 时递增 count。
- * 4. 退出临界区后若唤醒了任务则调用 sched_yield_from_isr。
+ * 4. 退出临界区后通过 cgrtos_isr_notify_woken 处理调度请求。
  */
-int cgrtos_sem_give_from_isr(cgrtos_sem_t *sem)
+int cgrtos_sem_give_from_isr(cgrtos_sem_t *sem, BaseType_t *woken)
 {
-    /* 1. 参数校验 */
     if (!sem) {
         return pdFAIL;
     }
 
-    /* 2. 进入临界区 */
+    int need_yield = 0;
     cgrtos_enter_critical();
 
-    /* 3. 有等待者则直接唤醒，否则 count++ */
     cgrtos_task_t *waiter = cgrtos_wait_list_pop_highest(&sem->wait_q);
     if (waiter) {
         waiter->wake_ok = 1;
         cgrtos_sched_unblock(waiter);
+        need_yield = 1;
         if (sem->qset) {
             cgrtos_queue_set_poke(sem->qset, sem);
         }
         cgrtos_exit_critical();
-        cgrtos_sched_yield_from_isr();
+        cgrtos_isr_notify_woken(woken, need_yield);
         return pdPASS;
     }
 
@@ -304,6 +304,32 @@ int cgrtos_sem_give_from_isr(cgrtos_sem_t *sem)
     }
     cgrtos_exit_critical();
     return pdPASS;
+}
+
+/**
+ * @brief ISR 中非阻塞获取信号量（不等待）
+ *
+ * @param sem 信号量指针
+ * @return pdPASS 取到令牌；pdFAIL 无令牌或参数错误
+ *
+ * @details
+ * 1. 校验 sem；进入临界区。
+ * 2. count>0 则递减并返回 pdPASS；否则 pdFAIL。
+ * 3. 不唤醒任何任务（take 不会产生 woken）。
+ */
+int cgrtos_sem_take_from_isr(cgrtos_sem_t *sem)
+{
+    if (!sem) {
+        return pdFAIL;
+    }
+    cgrtos_enter_critical();
+    if (sem->count > 0) {
+        sem->count--;
+        cgrtos_exit_critical();
+        return pdPASS;
+    }
+    cgrtos_exit_critical();
+    return pdFAIL;
 }
 
 /**
@@ -941,19 +967,20 @@ int cgrtos_queue_send(cgrtos_queue_t *q, const void *data, tick_t timeout)
 
 /**
  * @brief 从中断上下文向队列发送一条消息
- * 
- * @param q    队列指针
- * @param data 消息数据指针
- * 
+ *
+ * @param q     队列指针
+ * @param data  消息数据指针（长度由队列创建时的 item_sz 决定）
+ * @param woken 可选；非空则唤醒接收等待者时置 pdTRUE，否则自动 yield_from_isr
+ *
  * @return pdPASS 成功；errQUEUE_FULL 队列满；pdFAIL 参数错误
- * 
+ *
  * @details
- * 1. 校验 q、data 非空并进入临界区。
- * 2. 若未满则 queue_send_internal 发送。
- * 3. 若满返回 errQUEUE_FULL。
- * 4. 退出临界区后若唤醒接收者则 sched_yield_from_isr。
+ * 1. 校验 q、data 非空。
+ * 2. 进入临界区；若 cnt < len 则 queue_send_internal（可能唤醒 recv 等待者并置 need_yield）。
+ * 3. 若已满则 rc=errQUEUE_FULL，不阻塞。
+ * 4. 退出临界区后 cgrtos_isr_notify_woken(woken, need_yield)。
  */
-int cgrtos_queue_send_from_isr(cgrtos_queue_t *q, const void *data)
+int cgrtos_queue_send_from_isr(cgrtos_queue_t *q, const void *data, BaseType_t *woken)
 {
     if (!q || !data) {
         return pdFAIL;
@@ -968,9 +995,7 @@ int cgrtos_queue_send_from_isr(cgrtos_queue_t *q, const void *data)
         rc = errQUEUE_FULL;
     }
     cgrtos_exit_critical();
-    if (need_yield) {
-        cgrtos_sched_yield_from_isr();
-    }
+    cgrtos_isr_notify_woken(woken, need_yield);
     return rc;
 }
 
@@ -1032,24 +1057,26 @@ int cgrtos_queue_receive(cgrtos_queue_t *q, void *buf, tick_t timeout)
 
 /**
  * @brief 从中断上下文从队列接收一条消息
- * 
- * @param q   队列指针
- * @param buf 接收缓冲区
- * 
- * @return pdPASS 成功；errQUEUE_EMPTY 队列空
- * 
+ *
+ * @param q     队列指针
+ * @param buf   接收缓冲区（至少 item_sz 字节）
+ * @param woken 可选；非空则唤醒发送等待者时置 pdTRUE，否则自动 yield_from_isr
+ *
+ * @return pdPASS 成功；errQUEUE_EMPTY 队列空（含参数非法时）
+ *
  * @details
- * 1. 校验 q、buf 非空并进入临界区。
- * 2. 若 cnt==0 返回 errQUEUE_EMPTY。
- * 3. queue_pop 取出消息，若有 send_wait_q 等待者则唤醒。
- * 4. 退出临界区后若唤醒发送者则 sched_yield_from_isr。
+ * 1. 校验 q、buf；非法时返回 errQUEUE_EMPTY。
+ * 2. 进入临界区；cnt==0 则立即返回 errQUEUE_EMPTY。
+ * 3. queue_pop 取出一条；若 send_wait_q 有等待者则 unblock 并 need_yield=1。
+ * 4. 退出临界区后 cgrtos_isr_notify_woken。
  */
-int cgrtos_queue_receive_from_isr(cgrtos_queue_t *q, void *buf)
+int cgrtos_queue_receive_from_isr(cgrtos_queue_t *q, void *buf, BaseType_t *woken)
 {
     if (!q || !buf) {
         return errQUEUE_EMPTY;
     }
 
+    int need_yield = 0;
     cgrtos_enter_critical();
     if (q->cnt == 0) {
         cgrtos_exit_critical();
@@ -1060,12 +1087,10 @@ int cgrtos_queue_receive_from_isr(cgrtos_queue_t *q, void *buf)
     if (waiter) {
         waiter->wake_ok = 1;
         cgrtos_sched_unblock(waiter);
+        need_yield = 1;
     }
     cgrtos_exit_critical();
-
-    if (waiter) {
-        cgrtos_sched_yield_from_isr();
-    }
+    cgrtos_isr_notify_woken(woken, need_yield);
     return pdPASS;
 }
 
@@ -1257,25 +1282,28 @@ event_flags_t cgrtos_event_group_set(cgrtos_event_group_t *eg, event_flags_t fla
 
 /**
  * @brief 从中断上下文设置事件组标志位
- * 
+ *
  * @param eg    事件组指针
- * @param flags 要置位的标志掩码
- * 
+ * @param flags 要置位的标志掩码（与现有 flags 按位或）
+ * @param woken 可选；非空则唤醒任一等待者时置 pdTRUE，否则自动 yield_from_isr
+ *
  * @return 设置后的完整 flags 值；eg 为 NULL 时返回 0
- * 
+ *
  * @details
- * 1. 校验 eg 非空并进入临界区。
- * 2. 执行 flags |= 待置位掩码。
- * 3. 遍历 wait_q 唤醒满足条件的等待者。
- * 4. 退出临界区后 sched_yield_from_isr。
+ * 1. 校验 eg；进入临界区。
+ * 2. eg->flags |= flags。
+ * 3. 遍历 wait_q：对满足 event_match 的等待者 remove、wake_ok=1、unblock，并 need_yield=1。
+ * 4. 退出临界区后 cgrtos_isr_notify_woken；返回最新 flags。
  */
 event_flags_t cgrtos_event_group_set_from_isr(cgrtos_event_group_t *eg,
-event_flags_t flags)
+                                              event_flags_t flags,
+                                              BaseType_t *woken)
 {
     if (!eg) {
         return 0;
     }
 
+    int need_yield = 0;
     cgrtos_enter_critical();
     eg->flags |= flags;
 
@@ -1286,13 +1314,41 @@ event_flags_t flags)
             cgrtos_wait_list_remove(&eg->wait_q, waiter);
             waiter->wake_ok = 1;
             cgrtos_sched_unblock(waiter);
+            need_yield = 1;
         }
         waiter = next;
     }
 
     event_flags_t out = eg->flags;
     cgrtos_exit_critical();
-    cgrtos_sched_yield_from_isr();
+    cgrtos_isr_notify_woken(woken, need_yield);
+    return out;
+}
+
+/**
+ * @brief ISR 清除事件组指定标志位（不唤醒等待者）
+ *
+ * @param eg    事件组指针
+ * @param flags 要清除的标志掩码（从当前 flags 中按位清除）
+ *
+ * @return 清除后的完整 flags 值；eg 为 NULL 时返回 0
+ *
+ * @details
+ * 1. 校验 eg；进入临界区。
+ * 2. eg->flags &= ~flags。
+ * 3. 不遍历 wait_q、不 unblock（清位不会使等待条件变为真）。
+ * 4. 退出临界区并返回新 flags；无 woken/yield。
+ */
+event_flags_t cgrtos_event_group_clear_from_isr(cgrtos_event_group_t *eg,
+                                                event_flags_t flags)
+{
+    if (!eg) {
+        return 0;
+    }
+    cgrtos_enter_critical();
+    eg->flags &= ~flags;
+    event_flags_t out = eg->flags;
+    cgrtos_exit_critical();
     return out;
 }
 

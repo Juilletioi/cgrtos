@@ -772,37 +772,40 @@ uint32_t cgrtos_task_notify(cgrtos_task_t *task, uint32_t value,
 
 /**
  * @brief 向目标任务发送通知（ISR 上下文）
+ *
  * @param task   目标任务 TCB
- * @param value  通知载荷
- * @param action 值更新动作
+ * @param value  通知载荷（按 action 解释）
+ * @param action 值更新动作（eSetBits / eSetValueWithOverwrite 等）
+ * @param woken  可选；非空则唤醒阻塞在 notify 上的任务时置 pdTRUE，否则自动 yield
+ *
  * @return 更新前的 notify_value；task 为 NULL 时返回 0
+ *
  * @details
- * 1. 与 task 版本相同：临界区内更新 notify_value 与 notify_pending。
- * 2. 若目标在 BLOCK_NOTIFY 上阻塞，unblock 后退出临界区并 yield_from_isr。
- * 3. 未唤醒任务则仅退出临界区；返回 prev。
+ * 1. 校验 task；进入临界区。
+ * 2. 保存 prev=notify_value，按 action 用 notify_apply 更新，并置 notify_pending=1。
+ * 3. 若目标处于 TASK_BLOCKED 且 block_reason==BLOCK_NOTIFY：wake_ok=1、unblock、need_yield=1。
+ * 4. 退出临界区后 cgrtos_isr_notify_woken；返回 prev。
  */
 uint32_t cgrtos_task_notify_from_isr(cgrtos_task_t *task, uint32_t value,
-                                     eNotifyAction_t action)
+                                     eNotifyAction_t action, BaseType_t *woken)
 {
     if (!task) {
         return 0;
     }
 
-    /* 1. 临界区内更新 notify_value 并置 pending */
+    int need_yield = 0;
     cgrtos_enter_critical();
     uint32_t prev = task->notify_value;
     task->notify_value = notify_apply(prev, value, action);
     task->notify_pending = 1;
 
-    /* 2. 目标在 BLOCK_NOTIFY 上阻塞则 unblock 并 yield_from_isr */
     if (task->state == TASK_BLOCKED && task->block_reason == BLOCK_NOTIFY) {
         task->wake_ok = 1;
         cgrtos_sched_unblock(task);
-        cgrtos_exit_critical();
-        cgrtos_sched_yield_from_isr();
-        return prev;
+        need_yield = 1;
     }
     cgrtos_exit_critical();
+    cgrtos_isr_notify_woken(woken, need_yield);
     return prev;
 }
 

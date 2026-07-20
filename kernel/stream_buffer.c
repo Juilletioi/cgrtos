@@ -323,20 +323,22 @@ size_t cgrtos_stream_buffer_send(cgrtos_stream_buffer_t *sb, const void *data,
 /**
  * @brief ISR 上下文向 StreamBuffer 发送数据（非阻塞，可部分写入）
  *
- * @param sb   StreamBuffer 指针
- * @param data 源数据
- * @param len  期望发送字节数
- * @return 实际写入字节数
+ * @param sb    StreamBuffer 指针
+ * @param data  源数据
+ * @param len   期望发送字节数
+ * @param woken 可选 woken 标志（同 sem_give_from_isr）
+ *
+ * @return 实际写入字节数（0 表示参数非法、未初始化或无空间）
  *
  * @details
- * 1. 校验参数与 in_use。
- * 2. 进入临界区，计算 n = min(len, 空闲空间)。
- * 3. 若 n>0：写入、唤醒接收者、必要时 poke QueueSet。
- * 4. 退出临界区；若唤醒了更高优先级任务则 yield_from_isr。
- * 5. 返回实际写入 n。
+ * 1. 校验 sb/data/len 与 in_use。
+ * 2. 进入临界区，n = min(len, 空闲空间)；n==0 则仅退出。
+ * 3. sb_write_bytes 写入；sb_wake_recv 可能唤醒阻塞接收者并置 need_yield。
+ * 4. 若挂接 QueueSet 则 poke。
+ * 5. 退出临界区后 cgrtos_isr_notify_woken；返回 n。
  */
 size_t cgrtos_stream_buffer_send_from_isr(cgrtos_stream_buffer_t *sb, const void *data,
-                                          size_t len)
+                                          size_t len, BaseType_t *woken)
 {
     if (!sb || !data || len == 0 || !sb->in_use) {
         return 0;
@@ -356,9 +358,7 @@ size_t cgrtos_stream_buffer_send_from_isr(cgrtos_stream_buffer_t *sb, const void
         }
     }
     cgrtos_exit_critical();
-    if (need_yield) {
-        cgrtos_sched_yield_from_isr();
-    }
+    cgrtos_isr_notify_woken(woken, need_yield);
     return n;
 }
 
@@ -445,20 +445,21 @@ size_t cgrtos_stream_buffer_recv(cgrtos_stream_buffer_t *sb, void *buf, size_t l
 /**
  * @brief ISR 上下文从 StreamBuffer 接收数据（非阻塞，可部分读取）
  *
- * @param sb  StreamBuffer 指针
- * @param buf 接收缓冲
- * @param len 最大读取字节数
- * @return 实际读取字节数
+ * @param sb    StreamBuffer 指针
+ * @param buf   接收缓冲
+ * @param len   最大读取字节数
+ * @param woken 可选 woken 标志
+ *
+ * @return 实际读取字节数（0 表示空或参数非法）
  *
  * @details
- * 1. 校验参数。
+ * 1. 校验参数与 in_use。
  * 2. 进入临界区，n = min(avail, len)。
- * 3. 若 n>0：读出、唤醒发送等待者。
- * 4. 退出临界区；必要时 yield_from_isr。
- * 5. 返回 n。
+ * 3. 若 n>0：sb_read_bytes，sb_wake_send 可能唤醒发送等待者。
+ * 4. 退出临界区后 cgrtos_isr_notify_woken；返回 n。
  */
 size_t cgrtos_stream_buffer_recv_from_isr(cgrtos_stream_buffer_t *sb, void *buf,
-                                          size_t len)
+                                          size_t len, BaseType_t *woken)
 {
     if (!sb || !buf || len == 0 || !sb->in_use) {
         return 0;
@@ -474,9 +475,7 @@ size_t cgrtos_stream_buffer_recv_from_isr(cgrtos_stream_buffer_t *sb, void *buf,
         sb_wake_send(sb, &need_yield);
     }
     cgrtos_exit_critical();
-    if (need_yield) {
-        cgrtos_sched_yield_from_isr();
-    }
+    cgrtos_isr_notify_woken(woken, need_yield);
     return n;
 }
 
@@ -631,6 +630,99 @@ size_t cgrtos_message_buffer_send(cgrtos_message_buffer_t *mb, const void *data,
         }
         timeout = 0;
     }
+}
+
+/**
+ * @brief ISR 向 MessageBuffer 发送一条完整消息（非阻塞）
+ *
+ * @param mb    MessageBuffer 指针
+ * @param data  消息载荷
+ * @param len   载荷字节数（最大 0xFFFF）
+ * @param woken 可选 woken 标志
+ *
+ * @return 成功返回 len；空间不足或参数非法返回 0（绝不部分写入）
+ *
+ * @details
+ * 1. 校验 mb/data/len；need = 4 + len 不得超过 mb->size。
+ * 2. 进入临界区；空闲 < need 则返回 0（保持缓冲不变）。
+ * 3. 先写 u32 长度前缀，再写 payload；唤醒接收者并 poke QueueSet。
+ * 4. 退出临界区后 notify_woken；返回 len。
+ */
+size_t cgrtos_message_buffer_send_from_isr(cgrtos_message_buffer_t *mb, const void *data,
+                                           size_t len, BaseType_t *woken)
+{
+    if (!mb || !data || len == 0 || len > 0xFFFFU || !mb->in_use) {
+        return 0;
+    }
+    uint32_t need = (uint32_t)(sizeof(uint32_t) + len);
+    if (need > mb->size) {
+        return 0;
+    }
+
+    int need_yield = 0;
+    cgrtos_enter_critical();
+    if (sb_spaces(mb) < need) {
+        cgrtos_exit_critical();
+        return 0;
+    }
+    uint32_t L = (uint32_t)len;
+    sb_write_bytes(mb, (const uint8_t *)&L, sizeof(L));
+    sb_write_bytes(mb, (const uint8_t *)data, (uint32_t)len);
+    sb_wake_recv(mb, &need_yield);
+    if (mb->qset) {
+        cgrtos_queue_set_poke(mb->qset, mb);
+    }
+    cgrtos_exit_critical();
+    cgrtos_isr_notify_woken(woken, need_yield);
+    return len;
+}
+
+/**
+ * @brief ISR 从 MessageBuffer 接收一条完整消息（非阻塞）
+ *
+ * @param mb      MessageBuffer 指针
+ * @param buf     接收缓冲
+ * @param buf_len 接收缓冲容量
+ * @param woken   可选 woken 标志
+ *
+ * @return 成功返回载荷长度；无完整消息、缓冲过小或参数非法返回 0
+ *
+ * @details
+ * 1. 校验参数；进入临界区。
+ * 2. avail < 4 则无长度前缀，返回 0。
+ * 3. 窥读长度 L；若 avail < 4+L（消息未到齐）或 L > buf_len，返回 0（不消费）。
+ * 4. 否则消费前缀与载荷，唤醒发送者，notify_woken，返回 L。
+ */
+size_t cgrtos_message_buffer_recv_from_isr(cgrtos_message_buffer_t *mb, void *buf,
+                                           size_t buf_len, BaseType_t *woken)
+{
+    if (!mb || !buf || buf_len == 0 || !mb->in_use) {
+        return 0;
+    }
+
+    int need_yield = 0;
+    cgrtos_enter_critical();
+    if (mb->avail < sizeof(uint32_t)) {
+        cgrtos_exit_critical();
+        return 0;
+    }
+    uint32_t L = 0;
+    uint32_t t = mb->tail;
+    for (uint32_t i = 0; i < sizeof(uint32_t); i++) {
+        ((uint8_t *)&L)[i] = mb->buf[t];
+        t = (t + 1U) % mb->size;
+    }
+    if (mb->avail < sizeof(uint32_t) + L || L > buf_len) {
+        cgrtos_exit_critical();
+        return 0;
+    }
+    uint32_t discard;
+    sb_read_bytes(mb, (uint8_t *)&discard, sizeof(discard));
+    sb_read_bytes(mb, (uint8_t *)buf, L);
+    sb_wake_send(mb, &need_yield);
+    cgrtos_exit_critical();
+    cgrtos_isr_notify_woken(woken, need_yield);
+    return L;
 }
 
 /**

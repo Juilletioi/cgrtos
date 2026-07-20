@@ -10,6 +10,14 @@
 
 /** @def TIMER_CMD_EXPIRE 定时器到期命令码 */
 #define TIMER_CMD_EXPIRE  1U
+/** @def TIMER_CMD_START ISR/任务投递的启动命令 */
+#define TIMER_CMD_START   2U
+/** @def TIMER_CMD_STOP 停止命令 */
+#define TIMER_CMD_STOP    3U
+/** @def TIMER_CMD_RESET 复位命令 */
+#define TIMER_CMD_RESET   4U
+/** @def TIMER_CMD_CHANGE 改周期命令（period 字段有效） */
+#define TIMER_CMD_CHANGE  5U
 /** @def TIMER_WHEEL_MASK 时间轮槽位掩码 */
 #define TIMER_WHEEL_MASK  (CONFIG_TIMER_WHEEL_SLOTS - 1U)
 
@@ -168,31 +176,76 @@ static void wheel_insert(cgrtos_timer_t *timer, tick_t ticks)
 }
 
 /**
- * @brief 定时器守护任务入口：阻塞接收命令并执行到期回调
+ * @brief 定时器守护任务入口：阻塞接收命令并执行
  * @param arg 未使用
  * @details
  * 1. 无限循环从 g_timer_cmd_q 阻塞接收 timer_cmd_t。
- * 2. 接收失败则 continue 重试。
- * 3. cmd==TIMER_CMD_EXPIRE 且 timer 与 cb 有效时，在任务上下文调用 cb(arg)。
- * 4. 回调不在 ISR 内执行，可安全使用阻塞 API。
+ * 2. EXPIRE：在任务上下文调用 cb(arg)。
+ * 3. START/STOP/RESET/CHANGE：调用对应任务级 API（可安全阻塞）。
  */
 static void timer_daemon_entry(void *arg)
 {
     (void)arg;
     timer_cmd_t cmd;
 
-    /* 1. 无限循环从 g_timer_cmd_q 阻塞接收 timer_cmd_t */
     while (1) {
-        /* 2. 接收失败则 continue 重试 */
         if (cgrtos_queue_receive(g_timer_cmd_q, &cmd, portMAX_DELAY) != pdPASS) {
             continue;
         }
-
-        /* 3. cmd==TIMER_CMD_EXPIRE 且 timer 与 cb 有效时，在任务上下文调用 cb(arg) */
-        if (cmd.cmd == TIMER_CMD_EXPIRE && cmd.timer && cmd.timer->cb) {
-            cmd.timer->cb(cmd.timer->arg);
+        if (!cmd.timer) {
+            continue;
+        }
+        switch (cmd.cmd) {
+        case TIMER_CMD_EXPIRE:
+            if (cmd.timer->cb) {
+                cmd.timer->cb(cmd.timer->arg);
+            }
+            break;
+        case TIMER_CMD_START:
+            (void)cgrtos_timer_start(cmd.timer);
+            break;
+        case TIMER_CMD_STOP:
+            (void)cgrtos_timer_stop(cmd.timer);
+            break;
+        case TIMER_CMD_RESET:
+            (void)cgrtos_timer_reset(cmd.timer);
+            break;
+        case TIMER_CMD_CHANGE:
+            (void)cgrtos_timer_change_period(cmd.timer, cmd.period);
+            break;
+        default:
+            break;
         }
     }
+}
+
+/**
+ * @brief ISR 向定时器守护队列投递一条控制命令
+ *
+ * @param timer  目标定时器（不得为 NULL）
+ * @param cmd_id TIMER_CMD_START/STOP/RESET/CHANGE 之一
+ * @param period CHANGE 命令的新周期；其它命令传 0
+ * @param woken  可选 woken（队列发送可能唤醒 Tmr Svc）
+ *
+ * @return pdPASS 入队成功；pdFAIL 参数非法、队列未初始化或队列满
+ *
+ * @details
+ * 1. 校验 timer 与 g_timer_cmd_q。
+ * 2. 组装 timer_cmd_t（timer/cmd/period）。
+ * 3. 委托 cgrtos_queue_send_from_isr；实际 start/stop 等在守护任务上下文执行。
+ */
+static int timer_cmd_from_isr(cgrtos_timer_t *timer, uint8_t cmd_id, tick_t period,
+                              BaseType_t *woken)
+{
+    if (!timer || !g_timer_cmd_q) {
+        return pdFAIL;
+    }
+    timer_cmd_t cmd = {
+        .timer = timer,
+        .cmd = cmd_id,
+        .period = period,
+    };
+    return cgrtos_queue_send_from_isr(g_timer_cmd_q, &cmd, woken);
 }
 
 /**
@@ -331,7 +384,6 @@ int cgrtos_timer_change_period(cgrtos_timer_t *timer, tick_t period)
     if (!timer || period == 0) {
         return pdFAIL;
     }
-
     cgrtos_enter_critical();
     timer->period = period;
     if (timer->active) {
@@ -339,6 +391,81 @@ int cgrtos_timer_change_period(cgrtos_timer_t *timer, tick_t period)
     }
     cgrtos_exit_critical();
     return pdPASS;
+}
+
+/**
+ * @brief ISR：请求启动定时器（投递 START 到 Tmr Svc，不阻塞）
+ *
+ * @param timer 定时器句柄
+ * @param woken 可选 woken 标志
+ *
+ * @return pdPASS 命令入队成功；pdFAIL 失败
+ *
+ * @details
+ * 1. 委托 timer_cmd_from_isr(TIMER_CMD_START)。
+ * 2. 守护任务收到后调用 cgrtos_timer_start（插入时间轮）。
+ * 3. 不在 ISR 内直接改时间轮，避免与 tick 路径竞态复杂化。
+ */
+int cgrtos_timer_start_from_isr(cgrtos_timer_t *timer, BaseType_t *woken)
+{
+    return timer_cmd_from_isr(timer, TIMER_CMD_START, 0, woken);
+}
+
+/**
+ * @brief ISR：请求停止定时器（投递 STOP）
+ *
+ * @param timer 定时器句柄
+ * @param woken 可选 woken 标志
+ *
+ * @return pdPASS / pdFAIL
+ *
+ * @details
+ * 1. 委托 timer_cmd_from_isr(TIMER_CMD_STOP)。
+ * 2. 守护任务调用 cgrtos_timer_stop 从时间轮摘除。
+ */
+int cgrtos_timer_stop_from_isr(cgrtos_timer_t *timer, BaseType_t *woken)
+{
+    return timer_cmd_from_isr(timer, TIMER_CMD_STOP, 0, woken);
+}
+
+/**
+ * @brief ISR：请求复位定时器（投递 RESET，等价重新 start）
+ *
+ * @param timer 定时器句柄
+ * @param woken 可选 woken 标志
+ *
+ * @return pdPASS / pdFAIL
+ *
+ * @details
+ * 1. 委托 timer_cmd_from_isr(TIMER_CMD_RESET)。
+ * 2. 守护任务调用 cgrtos_timer_reset（按当前 period 重新挂轮）。
+ */
+int cgrtos_timer_reset_from_isr(cgrtos_timer_t *timer, BaseType_t *woken)
+{
+    return timer_cmd_from_isr(timer, TIMER_CMD_RESET, 0, woken);
+}
+
+/**
+ * @brief ISR：请求修改定时器周期（投递 CHANGE）
+ *
+ * @param timer  定时器句柄
+ * @param period 新周期 tick（须非 0）
+ * @param woken  可选 woken 标志
+ *
+ * @return pdPASS 入队成功；pdFAIL 参数非法或队列满
+ *
+ * @details
+ * 1. 校验 timer 与 period!=0。
+ * 2. 将 period 写入命令结构，投递 TIMER_CMD_CHANGE。
+ * 3. 守护任务调用 cgrtos_timer_change_period；若已 active 则按新周期重装。
+ */
+int cgrtos_timer_change_period_from_isr(cgrtos_timer_t *timer, tick_t period,
+                                        BaseType_t *woken)
+{
+    if (!timer || period == 0) {
+        return pdFAIL;
+    }
+    return timer_cmd_from_isr(timer, TIMER_CMD_CHANGE, period, woken);
 }
 
 /**
@@ -416,7 +543,7 @@ void cgrtos_timer_process_tick(void)
                 .cmd = TIMER_CMD_EXPIRE,
             };
             /* 4. 到期时向命令队列 ISR 发送 TIMER_CMD_EXPIRE（不在 ISR 调 cb） */
-            cgrtos_queue_send_from_isr(g_timer_cmd_q, &cmd);
+            cgrtos_queue_send_from_isr(g_timer_cmd_q, &cmd, 0);
 
             /* 5. 周期定时器重新 wheel_insert；单次定时器 active=0 */
             if (timer->periodic) {

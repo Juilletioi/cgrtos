@@ -200,6 +200,34 @@ QEMU **必须**带 hart1 loader，否则 SMP 假绿：
 
 ---
 
+## 7.1 中断安全 API（FromISR）与优先级分组
+
+**FromISR 约定（FreeRTOS 风格）：**
+
+- 第二个/额外参数 `BaseType_t *woken`：非空则唤醒更高优先级任务时置 `pdTRUE`，由 ISR 末尾 `portYIELD_FROM_ISR(woken)` 请求调度；传 `NULL` 则自动 `cgrtos_sched_yield_from_isr()`。
+- 已提供：`sem_give/take_from_isr`、`queue_send/recv_from_isr`、`event_set/clear_from_isr`、`stream_*_from_isr`、`message_buffer_*_from_isr`、`task_notify_from_isr`、`timer_{start,stop,reset,change_period}_from_isr`。
+
+**优先级分组：**
+
+| 宏 / API | 含义 |
+|----------|------|
+| `CONFIG_IRQ_SYSCALL_MAX_PRIO` | 允许调用 FromISR 的最高优先级（默认 3） |
+| `cgrtos_irq_set/get_syscall_max_priority` | 运行时调整上界 |
+| `cgrtos_irq_configure` / `cgrtos_plic_set_priority` | 配置源优先级 |
+| `cgrtos_enter/exit_critical_from_isr` | 抬高 PLIC threshold，屏蔽 ≤ syscall_max 的中断 |
+
+**快速响应：** `riscv_handle_external` 在分发前抬高 PLIC threshold；当 `CONFIG_IRQ_NESTING=1` 时关闭 MTIE/MSIE 后短暂打开 `MIE`，仅允许更高优先级 **外部** 中断嵌套（不得调用 FromISR）。QEMU 不稳时可置 `CONFIG_IRQ_NESTING=0`。
+
+```c
+BaseType_t woken = pdFALSE;
+cgrtos_sem_give_from_isr(sem, &woken);
+portYIELD_FROM_ISR(woken);
+```
+
+专项测试：`./scripts/cgrtos.sh cli` → `run isr` / `run irq`；全量 `./scripts/cgrtos.sh test`。
+
+---
+
 ## 8. SDK 与目录
 
 ```bash

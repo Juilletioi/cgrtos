@@ -595,10 +595,10 @@ int stress_run(void)
         cgrtos_sched_load_balance();
         /* ISR-style ops from task context (APIs are critical-section safe). */
         if (g_sem[0]) {
-            cgrtos_sem_give_from_isr(g_sem[0]);
+            cgrtos_sem_give_from_isr(g_sem[0], 0);
         }
         if (g_eg) {
-            cgrtos_event_group_set_from_isr(g_eg, 0x1);
+            cgrtos_event_group_set_from_isr(g_eg, 0x1, 0);
         }
         cgrtos_delay(2);
     }

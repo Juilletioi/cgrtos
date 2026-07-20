@@ -25,6 +25,18 @@ static volatile uint32_t g_cfs_b;
 static volatile uint32_t g_lb_seen_core1;
 static cgrtos_task_t *g_notify_target;
 
+/* ISR pack test fixtures (tick hook → FromISR) */
+static cgrtos_sem_t *g_isr_sem;
+static cgrtos_queue_t *g_isr_q;
+static cgrtos_event_group_t *g_isr_eg;
+static cgrtos_stream_buffer_t *g_isr_sb;
+static cgrtos_message_buffer_t *g_isr_mb;
+static cgrtos_timer_t *g_isr_tmr;
+static volatile int g_isr_tick_ops;
+static volatile int g_isr_woken_seen;
+static volatile int g_irq_handler_hits;
+static volatile uint32_t g_irq_last;
+
 static void expect(const char *name, int cond)
 {
     if (cond) {
@@ -193,6 +205,60 @@ static void idle_hook_fn(void)
 static void tick_hook_fn(void)
 {
     g_hook_ticks++;
+}
+
+/**
+ * @brief 真实 tick ISR 钩子：按 phase 轮转调用 FromISR API 并收集 woken
+ *
+ * @details
+ * 1. phase = g_isr_tick_ops & 7，依次覆盖 sem_give、queue_send、event_set、
+ *    stream_send、message_send、timer_start、event_clear、sem_take。
+ * 2. 各 API 传入 &woken；若 woken!=pdFALSE 则计数并 portYIELD_FROM_ISR。
+ * 3. g_isr_tick_ops++，供 case_isr 断言至少执行多轮。
+ */
+static void isr_pack_tick_hook(void)
+{
+    BaseType_t woken = pdFALSE;
+    uint32_t phase = (uint32_t)g_isr_tick_ops & 7U;
+
+    if (phase == 0 && g_isr_sem) {
+        (void)cgrtos_sem_give_from_isr(g_isr_sem, &woken);
+    } else if (phase == 1 && g_isr_q) {
+        uint32_t v = 0xA5A5U + (uint32_t)g_isr_tick_ops;
+        (void)cgrtos_queue_send_from_isr(g_isr_q, &v, &woken);
+    } else if (phase == 2 && g_isr_eg) {
+        (void)cgrtos_event_group_set_from_isr(g_isr_eg, 0x1U, &woken);
+    } else if (phase == 3 && g_isr_sb) {
+        const char b = 'I';
+        (void)cgrtos_stream_buffer_send_from_isr(g_isr_sb, &b, 1, &woken);
+    } else if (phase == 4 && g_isr_mb) {
+        const char msg[] = "isr";
+        (void)cgrtos_message_buffer_send_from_isr(g_isr_mb, msg, 3, &woken);
+    } else if (phase == 5 && g_isr_tmr) {
+        (void)cgrtos_timer_start_from_isr(g_isr_tmr, &woken);
+    } else if (phase == 6 && g_isr_eg) {
+        (void)cgrtos_event_group_clear_from_isr(g_isr_eg, 0x2U);
+    } else if (phase == 7 && g_isr_sem) {
+        (void)cgrtos_sem_take_from_isr(g_isr_sem);
+    }
+
+    if (woken != pdFALSE) {
+        g_isr_woken_seen++;
+        portYIELD_FROM_ISR(woken);
+    }
+    g_isr_tick_ops++;
+}
+
+/**
+ * @brief case_irq 用的模拟 PLIC handler：累计命中次数并记录 irq 号
+ * @param irq 中断源号
+ * @param arg 未使用
+ */
+static void irq_test_handler(uint32_t irq, void *arg)
+{
+    (void)arg;
+    g_irq_handler_hits++;
+    g_irq_last = irq;
 }
 
 /* ---- named cases (former run_tests sections) ---- */
@@ -404,7 +470,7 @@ static void case_sem(void)
     expect("sem_take_timeout", cgrtos_sem_take(sem, portMS_TO_TICK(20)) == pdFAIL);
     expect("sem_give", cgrtos_sem_give(sem) == pdPASS);
     expect("sem_take", cgrtos_sem_take(sem, 0) == pdPASS);
-    expect("sem_give_isr", cgrtos_sem_give_from_isr(bin) == pdPASS);
+    expect("sem_give_isr", cgrtos_sem_give_from_isr(bin, 0) == pdPASS);
     expect("sem_bin_take", cgrtos_sem_take(bin, 0) == pdPASS);
     expect("sem_delete", cgrtos_sem_delete(sem) == pdPASS);
     cgrtos_sem_delete(bin);
@@ -528,9 +594,9 @@ static void case_queue(void)
     expect("queue_waiting", cgrtos_queue_messages_waiting(q) == 1);
     expect("queue_recv", cgrtos_queue_receive(q, &out, 0) == pdPASS && out == 42);
     v = 7;
-    expect("queue_send_isr", cgrtos_queue_send_from_isr(q, &v) == pdPASS);
+    expect("queue_send_isr", cgrtos_queue_send_from_isr(q, &v, 0) == pdPASS);
     expect("queue_recv_isr",
-           cgrtos_queue_receive_from_isr(q, &out) == pdPASS && out == 7);
+           cgrtos_queue_receive_from_isr(q, &out, 0) == pdPASS && out == 7);
     expect("queue_delete", cgrtos_queue_delete(q) == pdPASS);
 }
 
@@ -555,7 +621,7 @@ static void case_event(void)
     f = cgrtos_event_group_wait_bits(eg, 0x8, 0, 0, portMS_TO_TICK(20));
     expect("event_wait_timeout", (f & 0x8) == 0);
 
-    expect("event_set_isr", (cgrtos_event_group_set_from_isr(eg, 0x10) & 0x10) != 0);
+    expect("event_set_isr", (cgrtos_event_group_set_from_isr(eg, 0x10, 0) & 0x10) != 0);
     expect("event_delete", cgrtos_event_group_delete(eg) == pdPASS);
 }
 
@@ -857,7 +923,7 @@ static void case_hooks(void)
     cgrtos_event_group_t seg;
     expect("event_static", cgrtos_event_group_create_static(&seg) != 0);
     expect("event_from_isr",
-           cgrtos_event_group_set_from_isr(&seg, 0x3) == 0x3);
+           cgrtos_event_group_set_from_isr(&seg, 0x3, 0) == 0x3);
 
     /* timer slot reclaim */
     cgrtos_timer_t *t1 = cgrtos_timer_create("tr1", timer_cb, 0, 10, 0);
@@ -881,6 +947,142 @@ static void case_critical(void)
     cgrtos_stats_dump();
 }
 
+/**
+ * @brief FromISR 全系列回归：任务上下文 API + 真实 tick 钩子路径
+ *
+ * @details
+ * 1. 创建 sem/queue/event/stream/msgbuf/timer，校验 FromISR 收发与 clear/take。
+ * 2. timer_start_from_isr 后等待回调触发。
+ * 3. 安装 isr_pack_tick_hook，在真实 MTIP 上下文轮转 FromISR，断言 tick_ops≥16。
+ * 4. 验证 portYIELD_FROM_ISR 宏；清理对象。
+ */
+static void case_isr(void)
+{
+    g_isr_tick_ops = 0;
+    g_isr_woken_seen = 0;
+    g_timer_fires = 0;
+
+    g_isr_sem = cgrtos_sem_create(0, 8);
+    g_isr_q = cgrtos_queue_create(8, sizeof(uint32_t));
+    g_isr_eg = cgrtos_event_group_create();
+    g_isr_sb = cgrtos_stream_buffer_create(64, 1);
+    g_isr_mb = cgrtos_message_buffer_create(64);
+    g_isr_tmr = cgrtos_timer_create("isrT", timer_cb, 0, 5, 0);
+    expect("isr_objs", g_isr_sem && g_isr_q && g_isr_eg && g_isr_sb && g_isr_mb &&
+           g_isr_tmr);
+
+    expect("isr_sem_prefill", cgrtos_sem_give(g_isr_sem) == pdPASS);
+    expect("isr_sem_take", cgrtos_sem_take_from_isr(g_isr_sem) == pdPASS);
+    expect("isr_sem_take_empty", cgrtos_sem_take_from_isr(g_isr_sem) == pdFAIL);
+
+    uint32_t qv = 42, qo = 0;
+    expect("isr_q_send", cgrtos_queue_send_from_isr(g_isr_q, &qv, 0) == pdPASS);
+    expect("isr_q_recv", cgrtos_queue_receive_from_isr(g_isr_q, &qo, 0) == pdPASS &&
+           qo == 42);
+
+    expect("isr_eg_set", (cgrtos_event_group_set_from_isr(g_isr_eg, 0xF, 0) & 0xF) == 0xF);
+    expect("isr_eg_clr", (cgrtos_event_group_clear_from_isr(g_isr_eg, 0xA) & 0xA) == 0);
+    expect("isr_eg_left", cgrtos_event_group_get(g_isr_eg) == 0x5);
+
+    const char *s = "xy";
+    expect("isr_sb_send",
+           cgrtos_stream_buffer_send_from_isr(g_isr_sb, s, 2, 0) == 2);
+    char sbo[8];
+    expect("isr_sb_recv",
+           cgrtos_stream_buffer_recv_from_isr(g_isr_sb, sbo, sizeof(sbo), 0) == 2 &&
+           sbo[0] == 'x');
+
+    expect("isr_mb_send",
+           cgrtos_message_buffer_send_from_isr(g_isr_mb, "ok", 2, 0) == 2);
+    char mbo[8];
+    expect("isr_mb_recv",
+           cgrtos_message_buffer_recv_from_isr(g_isr_mb, mbo, sizeof(mbo), 0) == 2 &&
+           mbo[0] == 'o');
+
+    BaseType_t woken = pdFALSE;
+    expect("isr_tmr_start", cgrtos_timer_start_from_isr(g_isr_tmr, &woken) == pdPASS);
+    wait_ticks(40);
+    expect("isr_tmr_fired", g_timer_fires >= 1);
+
+    cgrtos_stream_buffer_reset(g_isr_sb);
+    cgrtos_set_tick_hook(isr_pack_tick_hook);
+    wait_ticks(40);
+    cgrtos_set_tick_hook(0);
+    expect("isr_tick_ops", g_isr_tick_ops >= 16);
+    expect("isr_in_isr_clear", cgrtos_in_isr() == 0);
+
+    woken = pdTRUE;
+    portYIELD_FROM_ISR(woken);
+    expect("isr_yield_macro", 1);
+
+    cgrtos_sem_delete(g_isr_sem);
+    cgrtos_queue_delete(g_isr_q);
+    cgrtos_event_group_delete(g_isr_eg);
+    cgrtos_stream_buffer_delete(g_isr_sb);
+    cgrtos_message_buffer_delete(g_isr_mb);
+    cgrtos_timer_delete(g_isr_tmr);
+    g_isr_sem = 0;
+    g_isr_q = 0;
+    g_isr_eg = 0;
+    g_isr_sb = 0;
+    g_isr_mb = 0;
+    g_isr_tmr = 0;
+}
+
+/**
+ * @brief 中断优先级分组 / PLIC 配置 / ISR 临界区 / 分发注册
+ *
+ * @details
+ * 1. 读写 syscall_max_priority；configure 低/高优先级源并校验分组关系。
+ * 2. register → dispatch 模拟 claim 后路径；unregister 后 handler 为空。
+ * 3. enter/exit_critical_from_isr 与 portSET/CLEAR_INTERRUPT_MASK_FROM_ISR 抬高/恢复 threshold。
+ * 4. 非法 irq/priority 返回 pdFAIL；最后 disable 测试源。
+ */
+static void case_irq(void)
+{
+    g_irq_handler_hits = 0;
+    g_irq_last = 0;
+
+    expect("irq_syscall_default",
+           cgrtos_irq_get_syscall_max_priority() == CONFIG_IRQ_SYSCALL_MAX_PRIO);
+
+    cgrtos_irq_set_syscall_max_priority(2);
+    expect("irq_syscall_set", cgrtos_irq_get_syscall_max_priority() == 2);
+    cgrtos_irq_set_syscall_max_priority(CONFIG_IRQ_SYSCALL_MAX_PRIO);
+
+    expect("irq_cfg_lo", cgrtos_irq_configure(5, 2, 1) == pdPASS);
+    expect("irq_cfg_hi", cgrtos_irq_configure(7, 6, 1) == pdPASS);
+    expect("irq_prio_lo", cgrtos_plic_get_priority(5) == 2);
+    expect("irq_prio_hi", cgrtos_plic_get_priority(7) == 6);
+    expect("irq_prio_group",
+           cgrtos_plic_get_priority(5) <= cgrtos_irq_get_syscall_max_priority() &&
+           cgrtos_plic_get_priority(7) > cgrtos_irq_get_syscall_max_priority());
+
+    expect("irq_reg", cgrtos_irq_register(5, irq_test_handler, 0) == pdPASS);
+    expect("irq_get_h", cgrtos_irq_get_handler(5) == irq_test_handler);
+    cgrtos_irq_dispatch(5);
+    expect("irq_dispatch", g_irq_handler_hits == 1 && g_irq_last == 5);
+
+    uint32_t thr0 = cgrtos_plic_get_threshold();
+    uint32_t mask = cgrtos_enter_critical_from_isr();
+    expect("irq_crit_raised",
+           cgrtos_plic_get_threshold() == cgrtos_irq_get_syscall_max_priority());
+    cgrtos_exit_critical_from_isr(mask);
+    expect("irq_crit_restore", cgrtos_plic_get_threshold() == thr0);
+
+    mask = portSET_INTERRUPT_MASK_FROM_ISR();
+    portCLEAR_INTERRUPT_MASK_FROM_ISR(mask);
+    expect("irq_port_mask", cgrtos_plic_get_threshold() == thr0);
+
+    expect("irq_unreg", cgrtos_irq_unregister(5) == pdPASS);
+    expect("irq_get_none", cgrtos_irq_get_handler(5) == 0);
+    expect("irq_disable", cgrtos_plic_disable(5) == pdPASS);
+    expect("irq_disable7", cgrtos_plic_disable(7) == pdPASS);
+    expect("irq_bad", cgrtos_irq_configure(0, 1, 1) == pdFAIL);
+    expect("irq_bad_prio",
+           cgrtos_plic_set_priority(5, CONFIG_IRQ_PRIORITY_MAX + 1) == pdFAIL);
+}
+
 static const test_case_t g_cases[] = {
     { "delay",     "tick / delay_ms / delay_us / delay_until", case_delay },
     { "mem",       "heap / TLSF malloc calloc free",          case_mem },
@@ -901,6 +1103,8 @@ static const test_case_t g_cases[] = {
     { "smp",       "affinity and load balance",               case_smp },
     { "hooks",     "hooks and static IPC",                    case_hooks },
     { "critical",  "critical section yield stats",            case_critical },
+    { "isr",       "FromISR woken tick-hook IPC/timer",       case_isr },
+    { "irq",       "PLIC prio group critical_from_isr",       case_irq },
 };
 
 #define N_CASES ((int)(sizeof(g_cases) / sizeof(g_cases[0])))

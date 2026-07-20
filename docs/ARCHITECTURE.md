@@ -237,7 +237,7 @@ flowchart TD
 |--------|------|
 | 中断 3 MSIP | `riscv_handle_ipi` → `g_yield_pending` |
 | 中断 7 MTIP | `riscv_handle_timer` → tick（hart0 推进 `g_ticks`） |
-| 中断 11 MEIP | PLIC claim / complete |
+| 中断 11 MEIP | PLIC claim → 嵌套窗口 → `cgrtos_irq_dispatch` → complete |
 | 异常 11 ecall | 自愿 yield（`g_yield_pending`） |
 | 其它异常 | 打印后 `_deadloop` |
 

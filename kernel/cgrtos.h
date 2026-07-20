@@ -28,7 +28,7 @@
 /* -------------------------------------------------------------------------- */
 
 /** @def CGRTOS_VERSION 内核版本字符串 */
-#define CGRTOS_VERSION              "4.3.0"
+#define CGRTOS_VERSION              "4.4.0"
 
 /** @def CONFIG_SMP_ENABLE 使能 SMP 代码路径（1=开） */
 #define CONFIG_SMP_ENABLE           1
@@ -73,11 +73,32 @@
  * @brief 每 tick 对本核当前任务做金丝雀抽检（需 CONFIG_CHECK_STACK_OVERFLOW）
  */
 #define CONFIG_STACK_CHECK_ON_TICK  1
-/**
- * @def CONFIG_MUTEX_MAX_RECURSIVE
+/** @def CONFIG_MUTEX_MAX_RECURSIVE
  * @brief 互斥量递归加锁上限（额外层数；总持有次数 = recursive+1）
  */
 #define CONFIG_MUTEX_MAX_RECURSIVE  64
+/**
+ * @def CONFIG_IRQ_MAX_SOURCES
+ * @brief PLIC 可注册的最大中断源编号（含）
+ */
+#define CONFIG_IRQ_MAX_SOURCES      64
+/**
+ * @def CONFIG_IRQ_PRIORITY_MAX
+ * @brief PLIC 源优先级最大值（1..本宏；0=禁用该源）
+ */
+#define CONFIG_IRQ_PRIORITY_MAX     7
+/**
+ * @def CONFIG_IRQ_SYSCALL_MAX_PRIO
+ * @brief 允许调用 FromISR 的最高中断优先级（优先级分组上界）
+ * @note 更高优先级中断可在 critical_from_isr 期间嵌套抢占；
+ *       FromISR 安全临界区通过抬高 PLIC threshold 屏蔽 ≤ 本宏的中断。
+ */
+#define CONFIG_IRQ_SYSCALL_MAX_PRIO 3
+/**
+ * @def CONFIG_IRQ_NESTING
+ * @brief 1=外部 ISR 内允许更高优先级 MEIP 嵌套（关 MTIE/MSIE）；0=关嵌套（QEMU 默认更稳）
+ */
+#define CONFIG_IRQ_NESTING          1
 /** @def CONFIG_USE_HOOKS 编译 idle/tick/malloc-fail 钩子 */
 #define CONFIG_USE_HOOKS            1
 /**
@@ -141,6 +162,8 @@
 #define pdTRUE                      1
 /** @def pdFALSE 布尔假 */
 #define pdFALSE                     0
+/** @typedef BaseType_t FreeRTOS 风格整型（FromISR woken 标志等） */
+typedef int                         BaseType_t;
 /** @def errQUEUE_EMPTY 队列空 */
 #define errQUEUE_EMPTY              (-1)
 /** @def errQUEUE_FULL 队列满 */
@@ -416,9 +439,19 @@ typedef struct {
  * @brief 定时器 daemon 命令（ISR → 任务队列）
  */
 typedef struct {
-    cgrtos_timer_t     *timer; /**< 关联定时器 */
-    uint8_t             cmd;   /**< 命令码，如 TIMER_CMD_EXPIRE */
+    cgrtos_timer_t     *timer;  /**< 关联定时器 */
+    uint8_t             cmd;    /**< 命令码：EXPIRE/START/STOP/RESET/CHANGE */
+    tick_t              period; /**< CHANGE 命令的新周期 */
 } timer_cmd_t;
+
+/**
+ * @typedef cgrtos_irq_handler_t
+ * @brief PLIC 外部中断处理函数类型
+ * @param irq claim 得到的中断源号
+ * @param arg 注册时传入的私有指针
+ * @note 须短小非阻塞；仅当该源优先级 ≤ syscall_max 时方可调用 FromISR
+ */
+typedef void (*cgrtos_irq_handler_t)(uint32_t irq, void *arg);
 
 /**
  * @defgroup cgrtos_fs RAM 文件系统
@@ -506,9 +539,18 @@ extern void start_first_task(uint64_t *sp);
 extern void riscv_handle_ipi(uint64_t *f);
 /** @brief 处理定时器中断（MTIP） */
 extern void riscv_handle_timer(uint64_t *f);
-/** @brief 处理外部中断（PLIC） */
+/**
+ * @brief 处理外部中断（MEIP / PLIC）
+ * @param f 陷阱栈帧（未使用）
+ * @details claim → 抬 threshold → 可选嵌套窗口 → irq_dispatch → complete；见 arch/riscv/plic.c
+ */
 extern void riscv_handle_external(uint64_t *f);
-/** @brief 处理同步异常 */
+/**
+ * @brief 处理同步异常
+ * @param f     陷阱栈帧
+ * @param cause mcause 异常码
+ * @param epc   mepc
+ */
 extern void riscv_handle_exception(uint64_t *f, uint64_t cause, uint64_t epc);
 
 /** @brief 致命挂起循环（WFI） */
@@ -626,9 +668,17 @@ uint32_t cgrtos_task_notify(cgrtos_task_t *task, uint32_t value,
  */
 uint32_t cgrtos_task_notify_wait(uint32_t clear_on_entry, uint32_t clear_on_exit,
                                  uint32_t *value, tick_t timeout);
-/** @brief ISR 安全版任务通知 */
+/**
+ * @brief ISR 安全任务通知
+ * @param task   目标任务 TCB
+ * @param value  通知载荷
+ * @param action 值更新动作
+ * @param woken  非空则唤醒更高优先级时置 pdTRUE（不自动 yield）；NULL 则自动 yield_from_isr
+ * @return 更新前的 notify_value；task 为 NULL 时返回 0
+ * @details 临界区内 notify_apply + pending；若目标在 BLOCK_NOTIFY 上则 unblock 并通知 woken
+ */
 uint32_t cgrtos_task_notify_from_isr(cgrtos_task_t *task, uint32_t value,
-                                     eNotifyAction_t action);
+                                     eNotifyAction_t action, BaseType_t *woken);
 #endif
 
 /**
@@ -645,8 +695,21 @@ cgrtos_sem_t *cgrtos_sem_create_static(cgrtos_sem_t *sem, int32_t init, int32_t 
 int cgrtos_sem_take(cgrtos_sem_t *sem, tick_t timeout);
 /** @brief V 操作 */
 int cgrtos_sem_give(cgrtos_sem_t *sem);
-/** @brief ISR 中 V 操作 */
-int cgrtos_sem_give_from_isr(cgrtos_sem_t *sem);
+/**
+ * @brief ISR 中 V 操作（释放信号量）
+ * @param sem   信号量
+ * @param woken 可选；非空则若唤醒更高优先级任务置 pdTRUE，由 ISR 末 portYIELD_FROM_ISR；
+ *              为 NULL 时自动 cgrtos_sched_yield_from_isr
+ * @return pdPASS 成功；pdFAIL 参数错误
+ * @details 有等待者则 unblock 最高优先级；否则 count++（不超过 max）
+ */
+int cgrtos_sem_give_from_isr(cgrtos_sem_t *sem, BaseType_t *woken);
+/**
+ * @brief ISR 中非阻塞 P 操作（不等待、不 yield）
+ * @param sem 信号量
+ * @return pdPASS 取到令牌；pdFAIL 无令牌或参数错误
+ */
+int cgrtos_sem_take_from_isr(cgrtos_sem_t *sem);
 /** @brief 删除信号量并唤醒等待者 */
 int cgrtos_sem_delete(cgrtos_sem_t *sem);
 
@@ -688,11 +751,23 @@ cgrtos_queue_t *cgrtos_queue_create_static(cgrtos_queue_t *q, void *storage,
 int cgrtos_queue_send(cgrtos_queue_t *q, const void *data, tick_t timeout);
 /** @brief 接收消息 */
 int cgrtos_queue_receive(cgrtos_queue_t *q, void *buf, tick_t timeout);
-/** @brief ISR 发送 */
-int cgrtos_queue_send_from_isr(cgrtos_queue_t *q, const void *data);
-/** @brief ISR 接收 */
-int cgrtos_queue_receive_from_isr(cgrtos_queue_t *q, void *buf);
-/** @brief 查询队列中消息数 */
+/**
+ * @brief ISR 向队列发送（不阻塞）
+ * @param q     队列
+ * @param data  元素指针（大小为创建时的 item_sz）
+ * @param woken 可选 woken；语义同 sem_give_from_isr
+ * @return pdPASS / errQUEUE_FULL / pdFAIL
+ */
+int cgrtos_queue_send_from_isr(cgrtos_queue_t *q, const void *data, BaseType_t *woken);
+/**
+ * @brief ISR 从队列接收（不阻塞）
+ * @param q     队列
+ * @param buf   接收缓冲
+ * @param woken 可选 woken
+ * @return pdPASS / errQUEUE_EMPTY
+ */
+int cgrtos_queue_receive_from_isr(cgrtos_queue_t *q, void *buf, BaseType_t *woken);
+/** @brief 查询待读消息数 */
 uint32_t cgrtos_queue_messages_waiting(cgrtos_queue_t *q);
 /** @brief 删除队列 */
 int cgrtos_queue_delete(cgrtos_queue_t *q);
@@ -713,6 +788,36 @@ int cgrtos_timer_reset(cgrtos_timer_t *timer);
 int cgrtos_timer_change_period(cgrtos_timer_t *timer, tick_t period);
 /** @brief 删除并回收槽位 */
 int cgrtos_timer_delete(cgrtos_timer_t *timer);
+/**
+ * @brief ISR：投递 START 到 Tmr Svc（不在 ISR 改时间轮）
+ * @param timer 定时器
+ * @param woken 可选 woken
+ * @return pdPASS 入队成功；pdFAIL 失败
+ */
+int cgrtos_timer_start_from_isr(cgrtos_timer_t *timer, BaseType_t *woken);
+/**
+ * @brief ISR：投递 STOP 到 Tmr Svc
+ * @param timer 定时器
+ * @param woken 可选 woken
+ * @return pdPASS / pdFAIL
+ */
+int cgrtos_timer_stop_from_isr(cgrtos_timer_t *timer, BaseType_t *woken);
+/**
+ * @brief ISR：投递 RESET（按当前 period 重新武装）
+ * @param timer 定时器
+ * @param woken 可选 woken
+ * @return pdPASS / pdFAIL
+ */
+int cgrtos_timer_reset_from_isr(cgrtos_timer_t *timer, BaseType_t *woken);
+/**
+ * @brief ISR：投递 CHANGE_PERIOD
+ * @param timer  定时器
+ * @param period 新周期（须非 0）
+ * @param woken  可选 woken
+ * @return pdPASS / pdFAIL
+ */
+int cgrtos_timer_change_period_from_isr(cgrtos_timer_t *timer, tick_t period,
+                                        BaseType_t *woken);
 /** @brief 初始化时间轮并创建 Tmr Svc 守护任务 */
 void cgrtos_timer_init(void);
 
@@ -722,11 +827,26 @@ cgrtos_event_group_t *cgrtos_event_group_create(void);
 cgrtos_event_group_t *cgrtos_event_group_create_static(cgrtos_event_group_t *eg);
 /** @brief 置位并唤醒匹配等待者 @return 新 flags */
 event_flags_t cgrtos_event_group_set(cgrtos_event_group_t *eg, event_flags_t flags);
-/** @brief ISR 置位 */
+/**
+ * @brief ISR 置位事件标志
+ * @param eg    事件组
+ * @param flags 置位掩码
+ * @param woken 可选 woken；语义同 sem_give_from_isr
+ * @return 置位后的完整 flags；eg 为空返回 0
+ */
 event_flags_t cgrtos_event_group_set_from_isr(cgrtos_event_group_t *eg,
-                                              event_flags_t flags);
+                                              event_flags_t flags,
+                                              BaseType_t *woken);
 /** @brief 清位 */
 event_flags_t cgrtos_event_group_clear(cgrtos_event_group_t *eg, event_flags_t flags);
+/**
+ * @brief ISR 清位（不唤醒等待者）
+ * @param eg    事件组
+ * @param flags 清除掩码
+ * @return 清除后的完整 flags；eg 为空返回 0
+ */
+event_flags_t cgrtos_event_group_clear_from_isr(cgrtos_event_group_t *eg,
+                                                event_flags_t flags);
 /** @brief 等待事件（简化接口） */
 event_flags_t cgrtos_event_group_wait(cgrtos_event_group_t *eg, event_flags_t flags,
                                       uint8_t wait_all, tick_t timeout);
@@ -761,18 +881,32 @@ cgrtos_stream_buffer_t *cgrtos_stream_buffer_create(uint32_t size, uint32_t trig
  */
 size_t cgrtos_stream_buffer_send(cgrtos_stream_buffer_t *sb, const void *data,
                                  size_t len, tick_t timeout);
-/** @brief ISR 安全发送；不阻塞，可能只写部分 */
+/**
+ * @brief ISR 安全发送字节流；不阻塞，可能只写部分
+ * @param sb    StreamBuffer
+ * @param data  源数据
+ * @param len   期望长度
+ * @param woken 可选 woken
+ * @return 实际写入字节数
+ */
 size_t cgrtos_stream_buffer_send_from_isr(cgrtos_stream_buffer_t *sb, const void *data,
-                                          size_t len);
+                                          size_t len, BaseType_t *woken);
 /**
  * @brief 读取字节流（可部分读取）；数据不足时可阻塞至 trigger
  * @return 实际读出字节数
  */
 size_t cgrtos_stream_buffer_recv(cgrtos_stream_buffer_t *sb, void *buf, size_t len,
                                  tick_t timeout);
-/** @brief ISR 安全接收；不阻塞 */
+/**
+ * @brief ISR 安全接收字节流；不阻塞
+ * @param sb    StreamBuffer
+ * @param buf   接收缓冲
+ * @param len   最大长度
+ * @param woken 可选 woken
+ * @return 实际读出字节数
+ */
 size_t cgrtos_stream_buffer_recv_from_isr(cgrtos_stream_buffer_t *sb, void *buf,
-                                          size_t len);
+                                          size_t len, BaseType_t *woken);
 /** @brief 清空缓冲并唤醒等待者 @return pdPASS / pdFAIL */
 int cgrtos_stream_buffer_reset(cgrtos_stream_buffer_t *sb);
 /** @brief 删除对象并释放堆缓冲 @return pdPASS / pdFAIL */
@@ -798,6 +932,26 @@ size_t cgrtos_message_buffer_send(cgrtos_message_buffer_t *mb, const void *data,
  */
 size_t cgrtos_message_buffer_recv(cgrtos_message_buffer_t *mb, void *buf, size_t buf_len,
                                   tick_t timeout);
+/**
+ * @brief ISR 发送一整条消息；空间不足返回 0（不部分写入）
+ * @param mb    MessageBuffer
+ * @param data  载荷
+ * @param len   载荷长度（≤0xFFFF）
+ * @param woken 可选 woken
+ * @return 成功为 len，失败为 0
+ */
+size_t cgrtos_message_buffer_send_from_isr(cgrtos_message_buffer_t *mb, const void *data,
+                                           size_t len, BaseType_t *woken);
+/**
+ * @brief ISR 接收一整条消息；无完整消息或 buf 过小返回 0
+ * @param mb      MessageBuffer
+ * @param buf     接收缓冲
+ * @param buf_len 缓冲容量
+ * @param woken   可选 woken
+ * @return 载荷长度；失败为 0
+ */
+size_t cgrtos_message_buffer_recv_from_isr(cgrtos_message_buffer_t *mb, void *buf,
+                                           size_t buf_len, BaseType_t *woken);
 /** @brief 删除 MessageBuffer（同 stream delete） */
 int cgrtos_message_buffer_delete(cgrtos_message_buffer_t *mb);
 /** @} */
@@ -928,9 +1082,13 @@ void cgrtos_task_handle_stack_overflow(cgrtos_task_t *task);
  * @note 仅当该 TCB 不再是任意核的 g_current 时真正清零
  */
 void cgrtos_task_reclaim_deleted(cgrtos_task_t *task);
-/** @brief 置 yield 标志并 ecall */
+/** @brief 置 yield 标志并 ecall（任务上下文） */
 void cgrtos_sched_yield(void);
-/** @brief ISR 中请求重新调度 */
+/**
+ * @brief ISR 中请求重新调度
+ * @details 置 g_yield_pending[cpu]=1，由 trap 返回路径 switch_from_trap；
+ *          通常由 cgrtos_isr_notify_woken(NULL,1) 或 portYIELD_FROM_ISR 触发
+ */
 void cgrtos_sched_yield_from_isr(void);
 /**
  * @brief Trap 出口选下一个任务并返回其栈指针
@@ -984,6 +1142,24 @@ void cgrtos_exit_critical(void);
 int cgrtos_in_critical(void);
 /** @brief 是否在 ISR 上下文 */
 int cgrtos_in_isr(void);
+/**
+ * @brief ISR 内临界区：抬高 PLIC threshold 至当前 syscall_max_prio
+ * @return 进入前的 threshold，必须交给 exit_critical_from_isr 成对恢复
+ * @note 屏蔽优先级 ≤ syscall_max 的中断；更高优先级仍可嵌套（不得调用 FromISR）
+ * @details 与任务侧 enter_critical（关 MIE + g_klock）不同，本 API 只改 PLIC 阈值
+ */
+uint32_t cgrtos_enter_critical_from_isr(void);
+/**
+ * @brief 恢复 ISR 临界区前的 PLIC threshold
+ * @param saved_threshold enter_critical_from_isr 的返回值
+ */
+void cgrtos_exit_critical_from_isr(uint32_t saved_threshold);
+/**
+ * @brief FromISR 统一唤醒通知
+ * @param woken      非空则 need_yield 时置 pdTRUE；空则自动 yield_from_isr
+ * @param need_yield 非 0 表示唤醒了可能更高优先级的任务
+ */
+void cgrtos_isr_notify_woken(BaseType_t *woken, int need_yield);
 
 /** @brief 体系结构早期初始化（开 MIE 位等） */
 void cgrtos_arch_init(void);
@@ -1006,12 +1182,109 @@ void cgrtos_printf(const char *fmt, ...);
 void cgrtos_clint_init(tick_t rate);
 /** @brief 读 SysTimer mtime */
 uint64_t cgrtos_mtime_read(void);
-/** @brief 初始化 PLIC */
+/**
+ * @brief 初始化本 hart PLIC（阈值=0、开 MEIE）；首次顺带 cgrtos_irq_init
+ */
 void cgrtos_plic_init(void);
-/** @brief PLIC claim */
+/**
+ * @brief PLIC claim：返回最高优先级 pending 源并锁定
+ * @return 中断源 ID；0=无待处理
+ */
 uint32_t cgrtos_plic_claim(void);
-/** @brief PLIC complete */
+/**
+ * @brief PLIC complete：释放 claim 锁定，允许该源再次投递
+ * @param irq 先前 claim 返回值
+ */
 void cgrtos_plic_complete(uint32_t irq);
+/**
+ * @brief 设置本 hart PLIC 优先级阈值（仅 priority > threshold 可投递）
+ * @param threshold 新阈值；0=允许全部（priority>0）
+ */
+void cgrtos_plic_set_threshold(uint32_t threshold);
+/**
+ * @brief 读取本 hart PLIC 优先级阈值
+ * @return 当前 threshold
+ */
+uint32_t cgrtos_plic_get_threshold(void);
+/**
+ * @brief 设置中断源优先级
+ * @param irq      1..CONFIG_IRQ_MAX_SOURCES
+ * @param priority 0=禁用该源；1..CONFIG_IRQ_PRIORITY_MAX
+ * @return pdPASS / pdFAIL
+ */
+int cgrtos_plic_set_priority(uint32_t irq, uint32_t priority);
+/**
+ * @brief 读取中断源优先级
+ * @param irq 源编号
+ * @return 优先级；非法 irq 返回 0
+ */
+uint32_t cgrtos_plic_get_priority(uint32_t irq);
+/**
+ * @brief 对本 hart 使能指定中断源
+ * @param irq 源编号
+ * @return pdPASS / pdFAIL
+ */
+int cgrtos_plic_enable(uint32_t irq);
+/**
+ * @brief 对本 hart 禁用指定中断源
+ * @param irq 源编号
+ * @return pdPASS / pdFAIL
+ */
+int cgrtos_plic_disable(uint32_t irq);
+
+/**
+ * @defgroup cgrtos_irq 中断优先级分组与处理注册
+ * @{
+ */
+/**
+ * @brief 初始化 IRQ 子系统（清零 handler 表）；由 cgrtos_plic_init 首次调用
+ */
+void cgrtos_irq_init(void);
+/**
+ * @brief 配置中断源优先级并可选使能
+ * @param irq 中断源编号（1..CONFIG_IRQ_MAX_SOURCES）
+ * @param priority 0..CONFIG_IRQ_PRIORITY_MAX；0 禁用该源
+ * @param enable 非 0 则使能该源，否则禁用
+ * @return pdPASS / pdFAIL
+ */
+int cgrtos_irq_configure(uint32_t irq, uint32_t priority, int enable);
+/**
+ * @brief 注册 PLIC 处理函数；claim 后由 irq_dispatch 调用
+ * @param irq     源编号
+ * @param handler 回调 void(irq, arg)；须短小、可调 FromISR（若优先级允许）
+ * @param arg     透传参数
+ * @return pdPASS / pdFAIL
+ */
+int cgrtos_irq_register(uint32_t irq, cgrtos_irq_handler_t handler, void *arg);
+/**
+ * @brief 注销处理函数（不自动 disable 源）
+ * @param irq 源编号
+ * @return pdPASS / pdFAIL
+ */
+int cgrtos_irq_unregister(uint32_t irq);
+/**
+ * @brief 查询已注册 handler（测试/诊断）
+ * @param irq 源编号
+ * @return handler 指针；未注册或非法返回 NULL
+ */
+cgrtos_irq_handler_t cgrtos_irq_get_handler(uint32_t irq);
+/**
+ * @brief 优先级分组：设置允许调用 FromISR 的最高优先级上界
+ * @param max_prio 新上界（超过 CONFIG_IRQ_PRIORITY_MAX 时钳制）
+ * @note enter_critical_from_isr 用此值作 PLIC threshold；默认 CONFIG_IRQ_SYSCALL_MAX_PRIO
+ */
+void cgrtos_irq_set_syscall_max_priority(uint32_t max_prio);
+/**
+ * @brief 当前 FromISR 允许的最高优先级
+ * @return 运行时 syscall_max_prio
+ */
+uint32_t cgrtos_irq_get_syscall_max_priority(void);
+/**
+ * @brief 分发已 claim 的外部中断（供 riscv_handle_external）
+ * @param irq claim 返回值；无 handler 时空操作
+ */
+void cgrtos_irq_dispatch(uint32_t irq);
+/** @} */
 /** @brief 原子读取 g_ticks */
 tick_t cgrtos_get_ticks(void);
 /** @brief 有界 snprintf 风格格式化 */
@@ -1120,9 +1393,11 @@ void cgrtos_task_purge_waits(cgrtos_task_t *task);
 #define xSemaphoreTake(s, t)        cgrtos_sem_take(s, t)
 /** @def xSemaphoreGive 释放信号量 */
 #define xSemaphoreGive(s)           cgrtos_sem_give(s)
-/** @def xSemaphoreGiveFromISR ISR 中释放信号量 */
-#define xSemaphoreGiveFromISR(s, hp) \
-    ((void)(hp), cgrtos_sem_give_from_isr(s))
+/** @def xSemaphoreGiveFromISR ISR 释放；hp 为 BaseType_t* woken（可为 NULL） */
+#define xSemaphoreGiveFromISR(s, hp) cgrtos_sem_give_from_isr((s), (hp))
+/** @def xSemaphoreTakeFromISR ISR 非阻塞获取；hp 忽略 */
+#define xSemaphoreTakeFromISR(s, hp) \
+    ((void)(hp), cgrtos_sem_take_from_isr(s))
 /** @def vSemaphoreDelete 删除信号量 */
 #define vSemaphoreDelete(s)         cgrtos_sem_delete(s)
 
@@ -1132,12 +1407,10 @@ void cgrtos_task_purge_waits(cgrtos_task_t *task);
 #define xQueueSend(q, d, t)         cgrtos_queue_send(q, d, t)
 /** @def xQueueReceive 从队列接收 */
 #define xQueueReceive(q, b, t)      cgrtos_queue_receive(q, b, t)
-/** @def xQueueSendFromISR ISR 发送 */
-#define xQueueSendFromISR(q, d, hp) \
-    ((void)(hp), cgrtos_queue_send_from_isr(q, d))
-/** @def xQueueReceiveFromISR ISR 接收 */
-#define xQueueReceiveFromISR(q, b, hp) \
-    ((void)(hp), cgrtos_queue_receive_from_isr(q, b))
+/** @def xQueueSendFromISR ISR 发送；hp 为 woken 指针 */
+#define xQueueSendFromISR(q, d, hp) cgrtos_queue_send_from_isr((q), (d), (hp))
+/** @def xQueueReceiveFromISR ISR 接收；hp 为 woken 指针 */
+#define xQueueReceiveFromISR(q, b, hp) cgrtos_queue_receive_from_isr((q), (b), (hp))
 /** @def uxQueueMessagesWaiting 队列当前消息数 */
 #define uxQueueMessagesWaiting(q)   cgrtos_queue_messages_waiting(q)
 /** @def vQueueDelete 删除队列 */
@@ -1147,11 +1420,13 @@ void cgrtos_task_purge_waits(cgrtos_task_t *task);
 #define xEventGroupCreate()         cgrtos_event_group_create()
 /** @def xEventGroupSetBits 置事件位 */
 #define xEventGroupSetBits(eg, f)   cgrtos_event_group_set(eg, f)
-/** @def xEventGroupSetBitsFromISR ISR 置事件位 */
+/** @def xEventGroupSetBitsFromISR ISR 置位；hp 为 woken 指针 */
 #define xEventGroupSetBitsFromISR(eg, f, hp) \
-    ((void)(hp), cgrtos_event_group_set_from_isr(eg, f))
+    cgrtos_event_group_set_from_isr((eg), (f), (hp))
 /** @def xEventGroupClearBits 清事件位 */
 #define xEventGroupClearBits(eg, f) cgrtos_event_group_clear(eg, f)
+/** @def xEventGroupClearBitsFromISR ISR 清位（无 woken） */
+#define xEventGroupClearBitsFromISR(eg, f) cgrtos_event_group_clear_from_isr((eg), (f))
 /** @def xEventGroupWaitBits 等待事件位 */
 #define xEventGroupWaitBits(eg, f, c, wa, t) \
     cgrtos_event_group_wait_bits(eg, f, c, wa, t)
@@ -1165,9 +1440,22 @@ void cgrtos_task_purge_waits(cgrtos_task_t *task);
 /** @def xPortGetMinimumEverFreeHeapSize 历史最小空闲堆 */
 #define xPortGetMinimumEverFreeHeapSize() cgrtos_get_min_free_heap()
 
-/** @def portYIELD_FROM_ISR ISR 末请求调度（hp 参数忽略） */
+/**
+ * @def portYIELD_FROM_ISR
+ * @brief ISR 末尾：若 hp（BaseType_t 值，非指针）非 pdFALSE 则请求调度
+ */
 #define portYIELD_FROM_ISR(hp) \
-    do { (void)(hp); cgrtos_sched_yield_from_isr(); } while (0)
+    do { if ((hp) != pdFALSE) { cgrtos_sched_yield_from_isr(); } } while (0)
+/**
+ * @def portSET_INTERRUPT_MASK_FROM_ISR
+ * @brief 抬高 PLIC 阈值屏蔽 FromISR 级中断；返回值交给 CLEAR
+ */
+#define portSET_INTERRUPT_MASK_FROM_ISR() cgrtos_enter_critical_from_isr()
+/**
+ * @def portCLEAR_INTERRUPT_MASK_FROM_ISR
+ * @brief 恢复 SET 返回的 PLIC 阈值
+ */
+#define portCLEAR_INTERRUPT_MASK_FROM_ISR(m) cgrtos_exit_critical_from_isr(m)
 
 /** @def vApplicationIdleHook 空钩子占位；请用 cgrtos_set_idle_hook */
 #define vApplicationIdleHook()      /* app override via cgrtos_set_idle_hook */
