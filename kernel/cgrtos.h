@@ -6,9 +6,10 @@
  * @brief CG-RTOS 公共 API 头文件（FreeRTOS 风格命名、SMP 多策略内核）
  *
  * @details
- * 调度：PRIORITY / RR / CFS / EDF / HYBRID + 加权 SMP 负载均衡。\n
- * 启动：hart0 `main` → `cgrtos_init` / kick → 创建任务 → `cgrtos_start`；\n
- *       hart1 `secondary_main` → `cgrtos_start_secondary`。\n
+ * 调度：PRIORITY / RR / CFS / MC-EDF(G-EDF) / HYBRID + 加权 SMP 负载均衡。\n
+ * 启动：hart0 `main` → `cgrtos_init`（含 `hal_board_init`）/ kick → 创建任务 → `cgrtos_start`；\n
+ *       次核 `secondary_main` → `cgrtos_start_secondary`（`CONFIG_NUM_CORES`=1/2/4）。\n
+ * 外设：统一 HAL 框架（hal/hal.h）+ 板级驱动（arch/riscv）；历史 cgrtos_uart_* 等仍兼容。\n
  * 主流程与流程图见 `docs/ARCHITECTURE.md`。
  *
  * 典型用法：
@@ -22,18 +23,33 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "list.h"
+#include "hal/hal.h"
 
 /* -------------------------------------------------------------------------- */
 /* Version & configuration                                                     */
 /* -------------------------------------------------------------------------- */
 
 /** @def CGRTOS_VERSION 内核版本字符串 */
-#define CGRTOS_VERSION              "4.4.0"
+#define CGRTOS_VERSION              "4.8.0"
 
 /** @def CONFIG_SMP_ENABLE 使能 SMP 代码路径（1=开） */
 #define CONFIG_SMP_ENABLE           1
-/** @def CONFIG_NUM_CORES 逻辑 hart / 核数量 */
+/**
+ * @def CONFIG_NUM_CORES
+ * @brief 逻辑 hart / 核数量：须为 1、2 或 4
+ * @note 可由构建系统 `-DCONFIG_NUM_CORES=N` 覆盖（Makefile `CORES=N` / `cgrtos.sh --cores N`）
+ *       默认 2 以保持既有双核行为。
+ */
+#ifndef CONFIG_NUM_CORES
 #define CONFIG_NUM_CORES            2
+#endif
+#if (CONFIG_NUM_CORES != 1) && (CONFIG_NUM_CORES != 2) && (CONFIG_NUM_CORES != 4)
+#error "CONFIG_NUM_CORES must be 1, 2, or 4"
+#endif
+/** @def CONFIG_MAX_CORES 链接脚本预留的最大核栈槽（固定 4，支持运行时选 1/2/4） */
+#define CONFIG_MAX_CORES            4
+/** @def CONFIG_CORE_STACK_BYTES 每核启动栈字节数（与 cgrtos.lds / startup.S 一致） */
+#define CONFIG_CORE_STACK_BYTES     0x4000
 /** @def CONFIG_MAX_TASKS 任务控制块池大小（含占用槽） */
 #define CONFIG_MAX_TASKS            64
 /** @def CONFIG_MAX_PRIORITY 最高优先级编号（0..本宏） */
@@ -52,6 +68,15 @@
 #define CONFIG_TIMER_WHEEL_SLOTS    256
 /** @def CONFIG_EDF_RELEASE_SLOTS EDF 下次释放轮槽数（须为 2 的幂） */
 #define CONFIG_EDF_RELEASE_SLOTS    256
+/**
+ * @def CONFIG_MCEDF_PRIO_SLACK_TICKS
+ * @brief MC-EDF 相对固定优先级的抢占窗口（tick）
+ * @details 当 EDF 任务 deadline <= now + 本值时，可抢占同核 SCHED_PRIORITY/Hybrid-RT；
+ *          否则优先保 RT 优先级粘性。CFS 始终让位于已分配的 EDF。
+ */
+#ifndef CONFIG_MCEDF_PRIO_SLACK_TICKS
+#define CONFIG_MCEDF_PRIO_SLACK_TICKS  1
+#endif
 /** @def CONFIG_TASK_STACK_WORDS 普通任务内嵌栈深度（字，64-bit） */
 #define CONFIG_TASK_STACK_WORDS     256
 /** @def CONFIG_HEAP_SIZE TLSF 堆字节数 */
@@ -196,7 +221,7 @@ typedef enum {
     SCHED_RR = 0,     /**< 同优先级时间片轮转 */
     SCHED_PRIORITY,   /**< 纯优先级，同优先级粘滞 */
     SCHED_CFS,        /**< 完全公平调度（vruntime） */
-    SCHED_EDF,        /**< 最早截止时间优先 */
+    SCHED_EDF,        /**< 全局 MC-EDF（G-EDF）：deadline 全局排序，m 任务占 m 核 */
     SCHED_HYBRID      /**< 高优先级 Priority，否则 CFS */
 } sched_policy_t;
 
@@ -522,8 +547,25 @@ extern spinlock_t       g_klock;
 extern volatile uint8_t g_yield_pending[CONFIG_NUM_CORES];
 /** @brief hart0 请求次核执行本地时间片记账 */
 extern volatile uint8_t g_remote_tick[CONFIG_NUM_CORES];
-/** @brief 从核已进入调度循环 */
+/**
+ * @brief 次核在线位图：bit N（N≥1）表示 hart N 已进入调度器
+ * @note 查询请用 CGRTOS_CORE_ONLINE(c)；非零即「至少一个次核在线」（兼容旧测试）
+ */
 extern volatile uint32_t g_secondary_online;
+/**
+ * @brief 各 hart 启动阶段面包屑（.data；startup.S 写入，kick 轮询）
+ * @note 下标 0 不用；次核到达 4 表示已通过 g_boot_sync 同步
+ */
+extern volatile uint32_t g_hart_stage[CONFIG_MAX_CORES];
+
+/**
+ * @def CGRTOS_CORE_ONLINE
+ * @brief 判断逻辑核是否可调度（hart0 恒为真；次核看 g_secondary_online 位）
+ */
+#define CGRTOS_CORE_ONLINE(c) \
+    (((uint8_t)(c) == 0U) || \
+     (((uint8_t)(c) < (uint8_t)CONFIG_NUM_CORES) && \
+      ((g_secondary_online & (1U << (uint8_t)(c))) != 0U)))
 /** @brief SMP 启动同步魔数（startup.S 轮询） */
 extern volatile uint32_t g_boot_sync;
 
@@ -1115,6 +1157,7 @@ void cgrtos_smp_kick_secondaries(void);
 /** @brief 将 EDF 任务下次释放挂入 wheel */
 void cgrtos_sched_edf_arm(cgrtos_task_t *task);
 /** @brief 向指定核写 CLINT MSIP */
+/** @brief 向目标核发送软件 IPI（兼容 → `hal_ipi_send`） */
 void cgrtos_smp_send_ipi(uint8_t core);
 /** @brief 节拍处理：延时/EDF/定时器/均衡/时间片 */
 /** @brief 系统 tick 中断处理（hart0 全局 + 本核切片） */
@@ -1161,72 +1204,77 @@ void cgrtos_exit_critical_from_isr(uint32_t saved_threshold);
  */
 void cgrtos_isr_notify_woken(BaseType_t *woken, int need_yield);
 
-/** @brief 体系结构早期初始化（开 MIE 位等） */
+/** @brief 体系结构早期初始化（兼容 → `hal_cpu_init`） */
 void cgrtos_arch_init(void);
-/** @brief 初始化 UART */
+/** @brief 初始化 UART（兼容 → `hal_console_init`） */
 void cgrtos_uart_init(void);
-/** @brief 输出一字符 */
+/** @brief 输出一字符（兼容 → `hal_console_putc`） */
 void cgrtos_uart_putc(char c);
-/** @brief 阻塞读一字符（调度运行后会 yield，避免饿死同核任务） */
+/** @brief 阻塞读一字符（兼容 → `hal_console_getc`） */
 char cgrtos_uart_getc(void);
 /**
- * @brief 非阻塞读一字符
+ * @brief 非阻塞读一字符（兼容 → `hal_console_pollc`）
  * @return 0..255 为数据；-1 表示 RX 空
  */
 int cgrtos_uart_pollc(void);
-/** @brief 输出字符串 */
+/** @brief 输出字符串（兼容 → `hal_console_puts`） */
 void cgrtos_uart_puts(const char *s);
 /** @brief 简易格式化打印（支持 s/d/u/x/p/c 及长整型变体） */
 void cgrtos_printf(const char *fmt, ...);
-/** @brief 初始化本核 mtimecmp 与 MTIE */
+/** @brief 初始化本核 mtimecmp 与 MTIE（兼容 → `hal_timer_init`） */
 void cgrtos_clint_init(tick_t rate);
-/** @brief 读 SysTimer mtime */
+/** @brief 读 SysTimer mtime（兼容 → `hal_mtime_read`） */
 uint64_t cgrtos_mtime_read(void);
 /**
- * @brief 初始化本 hart PLIC（阈值=0、开 MEIE）；首次顺带 cgrtos_irq_init
+ * @brief 初始化本 hart PLIC（兼容 → `hal_irqc_init`）
  */
 void cgrtos_plic_init(void);
 /**
- * @brief PLIC claim：返回最高优先级 pending 源并锁定
+ * @brief PLIC claim（兼容 → `hal_irqc_claim`）
  * @return 中断源 ID；0=无待处理
  */
 uint32_t cgrtos_plic_claim(void);
 /**
- * @brief PLIC complete：释放 claim 锁定，允许该源再次投递
+ * @brief PLIC complete（兼容 → `hal_irqc_complete`）
  * @param irq 先前 claim 返回值
  */
 void cgrtos_plic_complete(uint32_t irq);
 /**
- * @brief 设置本 hart PLIC 优先级阈值（仅 priority > threshold 可投递）
+ * @brief 设置本 hart PLIC 优先级阈值（兼容 → `hal_irqc_set_threshold`）
  * @param threshold 新阈值；0=允许全部（priority>0）
  */
 void cgrtos_plic_set_threshold(uint32_t threshold);
 /**
- * @brief 读取本 hart PLIC 优先级阈值
+ * @brief 读取本 hart PLIC 优先级阈值（兼容 → `hal_irqc_get_threshold`）
  * @return 当前 threshold
  */
 uint32_t cgrtos_plic_get_threshold(void);
 /**
- * @brief 设置中断源优先级
+ * @brief 设置中断源优先级（兼容 → `hal_irqc_set_priority`）
  * @param irq      1..CONFIG_IRQ_MAX_SOURCES
  * @param priority 0=禁用该源；1..CONFIG_IRQ_PRIORITY_MAX
  * @return pdPASS / pdFAIL
  */
 int cgrtos_plic_set_priority(uint32_t irq, uint32_t priority);
 /**
- * @brief 读取中断源优先级
+ * @brief 读取中断源优先级（兼容 → `hal_irqc_get_priority`）
  * @param irq 源编号
  * @return 优先级；非法 irq 返回 0
  */
 uint32_t cgrtos_plic_get_priority(uint32_t irq);
 /**
- * @brief 对本 hart 使能指定中断源
+ * @brief 对本 hart 使能指定中断源（兼容 → `hal_irqc_enable`）
  * @param irq 源编号
  * @return pdPASS / pdFAIL
  */
 int cgrtos_plic_enable(uint32_t irq);
 /**
  * @brief 对本 hart 禁用指定中断源
+ * @param irq 源编号
+ * @return pdPASS / pdFAIL
+ */
+/**
+ * @brief 对本 hart 禁用指定中断源（兼容 → `hal_irqc_disable`）
  * @param irq 源编号
  * @return pdPASS / pdFAIL
  */

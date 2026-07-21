@@ -1,80 +1,104 @@
 /**
  * @file ipic.c
- * @brief SMP 核间软件中断（IPI）驱动。
+ * @brief CLINT MSIP 核间中断驱动（纯硬件层）+ IPI trap 入口
  *
- * 通过 CLINT MSIP 寄存器向目标 hart 发送调度唤醒 IPI。
- * 次核还可借 IPI 执行 hart0 发起的远程 tick（时间片记账）。
+ * @details
+ * - ops 供 HAL 的 hal_ipi_send / clear。
+ * - riscv_handle_ipi 直接 ipi_hw_clear，不经 HAL。
+ * - cgrtos_smp_send_ipi 兼容封装在 hal_compat.c。
  */
 
 #include "../../kernel/cgrtos.h"
-
-/** @brief 指定 hart 的 CLINT MSIP 寄存器地址。 */
-#define CLINT_MSIP(h) (0x18031000 + (h) * 4)
+#include "../../hal/hal_drv.h"
+#include "../../hal/hal_board.h"
 
 extern void cgrtos_isr_enter(void);
 extern void cgrtos_isr_exit(void);
 
-/**
- * @brief 向目标核心发送软件 IPI。
- *
- * @param core 目标 hart 编号（须 < CONFIG_NUM_CORES）。
- *
- * @details
- * 1. 校验 core 是否在有效核数范围内，越界则直接返回。
- * 2. 计算目标 hart 的 CLINT MSIP 寄存器地址。
- * 3. 写入 MSIP=1，触发目标 hart 的机器软件中断（MSI）。
- * 4. 执行 __sync_synchronize 内存屏障，确保写入对目标核可见。
- *
- * @note 目标 hart 在 riscv_handle_ipi 中清 MSIP 并置 yield_pending。
- */
-void cgrtos_smp_send_ipi(uint8_t core)
+/** @brief IPI 设备 init（MSIP 无需额外配置） */
+static hal_status_t ipi_hw_init(hal_device_t *dev)
 {
-    /* 1. 校验目标核编号 */
-    if (core >= CONFIG_NUM_CORES) {
-        return;
-    }
-    /* 2. 计算 MSIP 寄存器地址 */
-    volatile uint32_t *msip = (volatile uint32_t *)(unsigned long)CLINT_MSIP(core);
-    /* 3. 写入 MSIP=1 触发软件中断 */
-    *msip = 1;
-    /* 4. 内存屏障确保目标核可见 */
-    __sync_synchronize();
+    (void)dev;
+    return HAL_OK;
 }
 
 /**
- * @brief 机器软件中断（IPI）C 层入口。
+ * @brief 向目标 hart 写 MSIP=1
  *
- * @param f 陷阱栈帧指针（未使用）。
+ * @details 步骤：
+ * 1. 校验 hart < CONFIG_NUM_CORES。
+ * 2. 写 MSIP(hart)=1。
+ * 3. 内存屏障。
+ * 4. 返回 HAL_OK / HAL_ERR_PARAM。
+ */
+static hal_status_t ipi_hw_send(hal_device_t *dev, uint8_t hart)
+{
+    (void)dev;
+    if (hart >= CONFIG_NUM_CORES) {
+        return HAL_ERR_PARAM;
+    }
+    volatile uint32_t *msip =
+        (volatile uint32_t *)(unsigned long)HAL_BOARD_CLINT_MSIP(hart);
+    *msip = 1;
+    __sync_synchronize();
+    return HAL_OK;
+}
+
+/**
+ * @brief 清目标 hart MSIP
+ * @details 步骤：1. 计算 MSIP 地址；2. 写 0。
+ */
+static void ipi_hw_clear(hal_device_t *dev, uint8_t hart)
+{
+    (void)dev;
+    volatile uint32_t *msip =
+        (volatile uint32_t *)(unsigned long)HAL_BOARD_CLINT_MSIP(hart);
+    *msip = 0;
+}
+
+static const hal_ipi_ops_t s_ipi_ops = {
+    .init  = ipi_hw_init,
+    .send  = ipi_hw_send,
+    .clear = ipi_hw_clear,
+};
+
+static hal_device_t s_ipi_dev = {
+    .name      = "ipi0",
+    .class     = HAL_DEV_IPI,
+    .mmio_base = HAL_BOARD_CLINT_BASE,
+    .ops       = &s_ipi_ops,
+    .priv      = 0,
+    .flags     = 0,
+};
+
+hal_device_t *drv_ipi_device(void)
+{
+    return &s_ipi_dev;
+}
+
+/**
+ * @brief 机器软件中断 C 入口（底层直调驱动）
  *
- * @details
- * 1. 调用 cgrtos_isr_enter 进入 ISR 上下文。
- * 2. 读取本 hart 编号 h，清除本核 MSIP（写 0），避免重复触发。
- * 3. 若 g_remote_tick[h] 置位，说明 hart0 请求本核执行本地 tick：
- *    a. 清除 g_remote_tick[h]；
- *    b. 调用 cgrtos_tick_local 做时间片记账与抢占评估。
- * 4. 置 g_yield_pending[h]=1，在 trap 返回路径触发调度切换。
- * 5. 调用 cgrtos_isr_exit 退出 ISR 上下文。
+ * @details 步骤：
+ * 1. cgrtos_isr_enter。
+ * 2. 读 mhartid，ipi_hw_clear 本核 MSIP。
+ * 3. 若 g_remote_tick[h]：清标志并 cgrtos_tick_local。
+ * 4. 置 g_yield_pending[h]=1。
+ * 5. cgrtos_isr_exit。
  */
 void riscv_handle_ipi(uint64_t *f)
 {
     (void)f;
-    /* 1. 进入 ISR 上下文 */
     cgrtos_isr_enter();
 
-    /* 2. 读取 hart 编号并清除 MSIP */
     uint64_t h = read_csr(mhartid);
-    volatile uint32_t *msip = (volatile uint32_t *)CLINT_MSIP(h);
-    *msip = 0;
+    ipi_hw_clear(&s_ipi_dev, (uint8_t)h);
 
-    /* 3. hart0 发起的远程 tick 处理 */
     if (h < CONFIG_NUM_CORES && g_remote_tick[h]) {
         g_remote_tick[h] = 0;
         cgrtos_tick_local();
     }
 
-    /* 4. 请求调度器在 trap 返回时切换 */
     g_yield_pending[h] = 1;
-
-    /* 5. 退出 ISR 上下文 */
     cgrtos_isr_exit();
 }

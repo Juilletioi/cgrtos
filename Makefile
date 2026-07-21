@@ -19,6 +19,12 @@ QEMU    ?= /home/cong/nuclei-ux900fd-linux/tools/nuclei-qemu/bin/qemu-system-ris
 export PATH := $(SYSROOT)/bin:$(PATH)
 
 APP     ?= demo
+# Logical hart count: 1 | 2 | 4 (default 2 preserves historical dual-core behaviour)
+CORES   ?= 2
+ifeq ($(filter $(CORES),1 2 4),)
+  $(error CORES must be 1, 2, or 4 (got '$(CORES)'))
+endif
+
 ifeq ($(APP),test)
   APP_SRCS := tests/test_all.c tests/test_cases.c tests/stress_cases.c
 else ifeq ($(APP),cli)
@@ -34,12 +40,13 @@ endif
 CFLAGS  := -march=rv64imafdc -mabi=lp64d -mcmodel=medany \
            -nostdlib -nostartfiles -ffreestanding -fno-builtin \
            -fno-stack-protector -O2 -g -Wall \
+           -DCONFIG_NUM_CORES=$(CORES) \
            -I$(SYSROOT)/riscv64-unknown-linux-gnu/sysroot/usr/include \
-           -I. -Ikernel
+           -I. -Ikernel -Ihal
 LDFLAGS := -nostdlib -nostartfiles -ffreestanding -T cgrtos.lds
 LIBGCC  := -lgcc
 
-KERN_SRCS := $(wildcard kernel/*.c) $(wildcard arch/riscv/*.c)
+KERN_SRCS := $(wildcard kernel/*.c) $(wildcard arch/riscv/*.c) $(wildcard hal/*.c)
 SRCS := $(KERN_SRCS) $(APP_SRCS)
 OBJS := $(SRCS:.c=.o) startup.o
 
@@ -59,28 +66,35 @@ cgrtos.elf: $(OBJS) cgrtos.lds
 cgrtos.bin: cgrtos.elf
 	$(OBJCOPY) -O binary $< $@
 
-QEMU_FLAGS := -M nuclei_evalsoc,download=ddr -smp 2 -m 512M \
+QEMU_FLAGS := -M nuclei_evalsoc,download=ddr -smp $(CORES) -m 512M \
 	-cpu nuclei-ux900fd,ext=svpbmt_zicbom_sstc_sscofpmf_zba_zbb_zbc_zbs_zicond \
-	-nographic -serial mon:stdio \
-	-device loader,addr=0xA0000000,cpu-num=1
+	-nographic -serial mon:stdio
+# Secondary hart loaders (Nuclei ROM often leaves CPU1+ parked at reset)
+ifeq ($(CORES),2)
+  QEMU_FLAGS += -device loader,addr=0xA0000000,cpu-num=1
+else ifeq ($(CORES),4)
+  QEMU_FLAGS += -device loader,addr=0xA0000000,cpu-num=1 \
+	-device loader,addr=0xA0000000,cpu-num=2 \
+	-device loader,addr=0xA0000000,cpu-num=3
+endif
 
 run: cgrtos.bin
-	./scripts/cgrtos.sh run --app $(APP) --no-build
+	./scripts/cgrtos.sh run --app $(APP) --cores $(CORES) --no-build
 
 run-demo:
-	./scripts/cgrtos.sh demo
+	./scripts/cgrtos.sh demo --cores $(CORES)
 
 test:
-	./scripts/cgrtos.sh test
+	./scripts/cgrtos.sh test --cores $(CORES)
 
 bench:
-	./scripts/cgrtos.sh bench
+	./scripts/cgrtos.sh bench --cores $(CORES)
 
 stress:
-	./scripts/cgrtos.sh stress
+	./scripts/cgrtos.sh stress --cores $(CORES)
 
 cli:
-	./scripts/cgrtos.sh cli
+	./scripts/cgrtos.sh cli --cores $(CORES)
 
 #   make APP=test gdb     # or: ./scripts/cgrtos.sh test --gdb
 #   make APP=cli gdb
@@ -96,7 +110,7 @@ sdk:
 debug: gdb
 
 clean:
-	rm -f $(OBJS) kernel/*.o arch/riscv/*.o demo/*.o tests/*.o \
+	rm -f $(OBJS) kernel/*.o arch/riscv/*.o hal/*.o demo/*.o tests/*.o \
 	      startup.o cgrtos.elf cgrtos.bin cgrtos.map
 	rm -rf sdk
 

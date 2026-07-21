@@ -218,7 +218,7 @@ task_id_t cgrtos_task_create(const char *name, task_func_t fn, void *arg,
 
     /* 7. 对端核需 IPI 才能调度新就绪任务 */
 #if CONFIG_NUM_CORES > 1
-    if (g_secondary_online &&
+    if (CGRTOS_CORE_ONLINE(task->run_cpu) &&
         task->run_cpu != (uint8_t)read_csr(mhartid)) {
         cgrtos_smp_send_ipi(task->run_cpu);
     }
@@ -515,8 +515,8 @@ int cgrtos_task_set_affinity(task_id_t id, uint8_t cpu)
     if (cpu != 0xFF && cpu >= CONFIG_NUM_CORES) {
         return pdFAIL;
     }
-    /* 次核尚未 online 时不允许硬亲和到 hart1 */
-    if (cpu != 0xFF && cpu != 0 && !g_secondary_online) {
+    /* 次核尚未 online 时不允许硬亲和到该核 */
+    if (cpu != 0xFF && cpu != 0 && !CGRTOS_CORE_ONLINE(cpu)) {
         return pdFAIL;
     }
 

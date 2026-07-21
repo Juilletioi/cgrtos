@@ -53,8 +53,11 @@ static ready_list_t g_ready[CONFIG_NUM_CORES][CONFIG_MAX_PRIORITY + 1];
 static uint32_t     g_ready_bitmap[CONFIG_NUM_CORES];
 /** @brief 每核 CFS 就绪链表（按 vruntime 升序）。 */
 static list_t       g_cfs_ready[CONFIG_NUM_CORES];
-/** @brief 每核 EDF 就绪链表（按 deadline 升序）。 */
-static list_t       g_edf_ready[CONFIG_NUM_CORES];
+/**
+ * @brief 全局 MC-EDF 就绪链表（按 deadline 升序）
+ * @note 非每核队列；sched_pick_edf 按 Global EDF 将前 m 个任务分配到 m 个在线核。
+ */
+static list_t       g_edf_global;
 /** @brief 全局延迟唤醒链表（按 wake_tick 排序）。 */
 static list_t       g_delayed_list;
 /** @brief EDF 释放时间轮各槽位链表。 */
@@ -153,6 +156,63 @@ static inline int sched_uses_cfs(cgrtos_task_t *task)
 static inline int sched_uses_edf(cgrtos_task_t *task)
 {
     return task && task->policy == SCHED_EDF;
+}
+
+/**
+ * @brief EDF 任务是否允许在 cpu 上运行（硬亲和）
+ * @param task 任务；@param cpu 核号
+ * @return 非 0 表示可在该核运行
+ * @details 步骤：1. cpu_aff==0xFF 任意核；2. 否则必须 cpu_aff==cpu。
+ */
+static int sched_edf_affinity_ok(cgrtos_task_t *task, uint8_t cpu)
+{
+    if (!task) {
+        return 0;
+    }
+    return (task->cpu_aff == 0xFF) || (task->cpu_aff == cpu);
+}
+
+/**
+ * @brief MC-EDF：请求所有在线核重新评估调度
+ *
+ * @details 步骤：
+ * 1. 对本核置 g_yield_pending。
+ * 2. 对其余在线核置 yield_pending 并发送 MSIP IPI。
+ * @note 在 EDF 释放/入队后调用，使更早 deadline 能立即抢占其它核。
+ * @warning 调用方不得持有 g_ready_lock（IPI 路径可能间接争用）。
+ */
+static void sched_mcedf_kick_all(void)
+{
+    uint8_t here = (uint8_t)read_csr(mhartid);
+    g_yield_pending[here] = 1;
+#if CONFIG_NUM_CORES > 1
+    for (uint8_t c = 0; c < CONFIG_NUM_CORES; c++) {
+        if (c == here) {
+            continue;
+        }
+        if (c != 0 && !CGRTOS_CORE_ONLINE(c)) {
+            continue;
+        }
+        g_yield_pending[c] = 1;
+        cgrtos_smp_send_ipi(c);
+    }
+#endif
+}
+
+/**
+ * @brief 从全局 MC-EDF 就绪链移除任务（调用方已持锁）
+ * @param task EDF 任务
+ * @details 步骤：1. 若节点在链上则 list_remove；2. 否则无操作。
+ */
+static void sched_edf_global_remove(cgrtos_task_t *task)
+{
+    if (!task) {
+        return;
+    }
+    if (task->edf_item.next || task->edf_item.prev ||
+        g_edf_global.head == &task->edf_item) {
+        list_remove(&g_edf_global, &task->edf_item);
+    }
 }
 
 /**
@@ -338,6 +398,10 @@ static void sched_process_edf_releases(void)
     for (uint32_t i = 0; i < n; i++) {
         sched_edf_release(to_release[i]);
     }
+    /* 6. 有释放则踢所有核做 MC-EDF 重选 */
+    if (n > 0) {
+        sched_mcedf_kick_all();
+    }
 }
 
 /**
@@ -363,13 +427,13 @@ uint8_t cgrtos_sched_target_core(cgrtos_task_t *task)
     }
     if (task->cpu_aff != 0xFF) {
         if (task->cpu_aff >= CONFIG_NUM_CORES ||
-            (task->cpu_aff != 0 && !g_secondary_online)) {
+            (task->cpu_aff != 0 && !CGRTOS_CORE_ONLINE(task->cpu_aff))) {
             return 0;
         }
         return task->cpu_aff;
     }
     if (task->run_cpu < CONFIG_NUM_CORES) {
-        if (task->run_cpu != 0 && !g_secondary_online) {
+        if (task->run_cpu != 0 && !CGRTOS_CORE_ONLINE(task->run_cpu)) {
             return 0;
         }
         return task->run_cpu;
@@ -428,20 +492,18 @@ static void sched_add_cfs_ready(cgrtos_task_t *task)
 }
 
 /**
- * @brief 将任务按 deadline 插入 EDF 就绪队列。
+ * @brief 将任务按 deadline 插入全局 MC-EDF 就绪队列。
  *
  * @param task 任务指针。
  *
- * @details
- * 1. 计算任务目标核 core。
- * 2. 调用 list_insert_sorted_asc 按 deadline 升序插入 g_edf_ready[core]。
+ * @details 步骤：
+ * 1. 按 deadline 升序插入 g_edf_global（全局，不分核）。
+ * 2. run_cpu 仅作软放置提示，真正占核由 sched_pick_edf 分配。
+ * @note 调用方已持 g_ready_lock。
  */
 static void sched_add_edf_ready(cgrtos_task_t *task)
 {
-    /* 1. 计算任务目标核 core */
-    uint8_t core = cgrtos_sched_target_core(task);
-    /* 2. 按 deadline 升序插入 g_edf_ready[core] */
-    list_insert_sorted_asc(&g_edf_ready[core], &task->edf_item, task->deadline);
+    list_insert_sorted_asc(&g_edf_global, &task->edf_item, task->deadline);
 }
 
 static void sched_remove_priority_ready(cgrtos_task_t *task);
@@ -503,10 +565,7 @@ static void sched_remove_ready_locked(cgrtos_task_t *task)
 
     /* 2. 按策略从对应队列移除 */
     if (sched_uses_edf(task)) {
-        if (task->edf_item.next || task->edf_item.prev ||
-            g_edf_ready[cgrtos_sched_target_core(task)].head == &task->edf_item) {
-            list_remove(&g_edf_ready[cgrtos_sched_target_core(task)], &task->edf_item);
-        }
+        sched_edf_global_remove(task);
     } else if (sched_uses_cfs(task)) {
         if (task->cfs_item.next || task->cfs_item.prev ||
             g_cfs_ready[cgrtos_sched_target_core(task)].head == &task->cfs_item) {
@@ -539,10 +598,15 @@ void cgrtos_sched_add_ready(cgrtos_task_t *task)
     uint64_t flags = cgrtos_irq_save();
     cgrtos_spin_lock(&g_ready_lock);
     /* 3. 调用 sched_add_ready_locked 执行实际入队 */
+    int is_edf = sched_uses_edf(task);
     sched_add_ready_locked(task);
     /* 4. 解锁并恢复 IRQ */
     cgrtos_spin_unlock(&g_ready_lock);
     cgrtos_irq_restore(flags);
+    /* 5. EDF 入队后踢核，使全局更早 deadline 可立即占核 */
+    if (is_edf) {
+        sched_mcedf_kick_all();
+    }
 }
 
 /**
@@ -666,38 +730,105 @@ static cgrtos_task_t *sched_pick_cfs(uint8_t cpu)
 }
 
 /**
- * @brief 在指定核上选取 deadline 最早的 EDF 任务。
+ * @brief MC-EDF（Global EDF）：为本核分配应运行的 EDF 任务
  *
- * @param cpu 核编号。
- * @return 任务指针；队列为空时返回 NULL。
+ * @param cpu 核编号
+ * @return 分配给本核的 EDF 任务；无则 NULL
  *
  * @details
- * 1. 查看 g_edf_ready[cpu] 链表头（deadline 最早）。
- * 2. 通过 offsetof 从 edf_item 反算 task 指针并返回。
+ * 全局规则：在线核数为 m 时，系统中 deadline 最早的至多 m 个就绪 EDF
+ * 任务应占用 m 个核（经典 Global / MC-EDF）。
+ *
+ * 分配步骤（在 g_ready_lock 下，确定性、无额外迁移表）：
+ * 1. 枚举在线核列表 cores[0..n)。
+ * 2. 按 deadline 升序遍历 g_edf_global。
+ * 3. 硬亲和（cpu_aff!=0xFF）：若目标核空闲且在线，则占该核一席。
+ * 4. 软亲和：优先占 run_cpu（若空闲在线），否则占第一个空闲在线核。
+ * 5. 已填满 n 席则停止。
+ * 6. 返回 assigned[cpu]。
+ *
+ * @note RUNNING 任务不在就绪链中；换出时先 pick 再 requeue，由锁串行化多核。
  */
 static cgrtos_task_t *sched_pick_edf(uint8_t cpu)
 {
-    list_item_t *item = list_peek_head(&g_edf_ready[cpu]);
-    if (!item) {
+    uint8_t cores[CONFIG_MAX_CORES];
+    cgrtos_task_t *assigned[CONFIG_MAX_CORES];
+    int n = 0;
+    int filled = 0;
+    int i;
+    list_item_t *it;
+
+    if (cpu >= CONFIG_NUM_CORES) {
         return 0;
     }
-    return (cgrtos_task_t *)((uint8_t *)item - offsetof(cgrtos_task_t, edf_item));
+
+    for (i = 0; i < CONFIG_MAX_CORES; i++) {
+        assigned[i] = 0;
+    }
+
+    /* 1. 在线核列表（与 sched_mcedf_online_cores 一致） */
+    n = 0;
+    cores[n++] = 0;
+#if CONFIG_NUM_CORES > 1
+    for (uint8_t c = 1; c < CONFIG_NUM_CORES; c++) {
+        if (CGRTOS_CORE_ONLINE(c)) {
+            cores[n++] = c;
+        }
+    }
+#endif
+
+    /* 2-5. 按 deadline 填充至多 n 席 */
+    for (it = g_edf_global.head; it && filled < n; it = it->next) {
+        cgrtos_task_t *t = (cgrtos_task_t *)((uint8_t *)it -
+                                             offsetof(cgrtos_task_t, edf_item));
+        if (t->cpu_aff != 0xFF) {
+            uint8_t a = t->cpu_aff;
+            if (a < CONFIG_NUM_CORES && !assigned[a] &&
+                sched_edf_affinity_ok(t, a) &&
+                (a == 0 || CGRTOS_CORE_ONLINE(a))) {
+                assigned[a] = t;
+                filled++;
+            }
+            continue;
+        }
+
+        /* 软亲和：先试 run_cpu */
+        {
+            uint8_t prefer = t->run_cpu;
+            if (prefer < CONFIG_NUM_CORES && !assigned[prefer] &&
+                (prefer == 0 || CGRTOS_CORE_ONLINE(prefer))) {
+                assigned[prefer] = t;
+                filled++;
+                continue;
+            }
+        }
+        for (i = 0; i < n; i++) {
+            uint8_t c = cores[i];
+            if (!assigned[c]) {
+                assigned[c] = t;
+                filled++;
+                break;
+            }
+        }
+    }
+
+    /* 6. */
+    return assigned[cpu];
 }
 
 /**
- * @brief 综合 EDF/优先级/CFS 选取下一运行任务。
+ * @brief 综合 MC-EDF / 优先级 / CFS 选取下一运行任务
  *
- * @param cpu 核编号。
- * @return 下一任务；均无则返回该核 idle 任务。
+ * @param cpu 核编号
+ * @return 下一任务；均无则返回该核 idle
  *
- * @details
- * 1. 分别调用 sched_pick_edf、sched_pick_priority、sched_pick_cfs 获取候选。
- * 2. EDF 优先：若 edf 存在且无更高优先级 RT 任务，或 deadline <= g_ticks+1，选 edf。
- * 3. 否则若有 RT 优先级任务，选 pri。
- * 4. 否则若有 CFS 任务，选 cfs。
- * 5. 均无则返回 g_idle[cpu]。
- *
- * @note EDF 在 deadline 临近时优先于同核 RT 优先级任务。
+ * @details 步骤：
+ * 1. 取 MC-EDF 分配、优先级队头、CFS 队头。
+ * 2. 若有 EDF：无 RT 优先级候选，或 deadline 在
+ *    CONFIG_MCEDF_PRIO_SLACK_TICKS 窗口内 → 选 EDF（硬实时带）。
+ * 3. 否则选优先级任务。
+ * 4. 否则选 CFS。
+ * 5. 否则 idle。
  */
 static cgrtos_task_t *sched_pick_next(uint8_t cpu)
 {
@@ -705,9 +836,8 @@ static cgrtos_task_t *sched_pick_next(uint8_t cpu)
     cgrtos_task_t *pri = sched_pick_priority(cpu);
     cgrtos_task_t *cfs = sched_pick_cfs(cpu);
 
-    /* 2. EDF 临近 deadline 时优先 */
     if (edf) {
-        if (!pri || edf->deadline <= g_ticks + 1) {
+        if (!pri || edf->deadline <= g_ticks + CONFIG_MCEDF_PRIO_SLACK_TICKS) {
             return edf;
         }
     }
@@ -1046,10 +1176,10 @@ int cgrtos_sched_unblock(cgrtos_task_t *task)
 
 #if CONFIG_NUM_CORES > 1
     {
-        /* 4. SMP：若目标核 != 本核且次核已上线，向目标 hart 发 IPI */
+        /* 4. SMP：若目标核 != 本核且目标核已上线，向其发 IPI */
         uint8_t dst = cgrtos_sched_target_core(task);
         uint8_t here = (uint8_t)read_csr(mhartid);
-        if (dst != here && g_secondary_online) {
+        if (dst != here && CGRTOS_CORE_ONLINE(dst)) {
             cgrtos_smp_send_ipi(dst);
         }
     }
@@ -1193,9 +1323,11 @@ uint64_t *cgrtos_sched_switch_from_trap(uint64_t *sp)
                 /* CFS 不能抢占纯 RT 优先级任务 */
                 stick = 1;
             } else if (sched_uses_priority(next) && next->prio <= cur->prio &&
-                       !(sched_uses_edf(next) && next->deadline <= g_ticks + 1)) {
+                       !(sched_uses_edf(next) &&
+                         next->deadline <= g_ticks + CONFIG_MCEDF_PRIO_SLACK_TICKS)) {
                 stick = 1;
-            } else if (sched_uses_edf(next) && next->deadline > g_ticks + 1) {
+            } else if (sched_uses_edf(next) &&
+                       next->deadline > g_ticks + CONFIG_MCEDF_PRIO_SLACK_TICKS) {
                 stick = 1;
             }
         }
@@ -1399,11 +1531,13 @@ void cgrtos_tick_handler(void)
             cgrtos_sched_load_balance();
         }
 #if CONFIG_SMP_ENABLE && CONFIG_NUM_CORES > 1
-        /* 2g. SMP：向次核置 g_remote_tick 并发 IPI */
+        /* 2g. SMP：向已在线次核置 g_remote_tick 并发 IPI */
         if (g_secondary_online) {
             for (uint8_t c = 1; c < CONFIG_NUM_CORES; c++) {
-                g_remote_tick[c] = 1;
-                cgrtos_smp_send_ipi(c);
+                if (CGRTOS_CORE_ONLINE(c)) {
+                    g_remote_tick[c] = 1;
+                    cgrtos_smp_send_ipi(c);
+                }
             }
         }
 #endif
@@ -1434,7 +1568,19 @@ uint32_t cgrtos_sched_ready_count(uint8_t cpu)
         n += g_ready[cpu][p].count;
     }
     n += list_count(&g_cfs_ready[cpu]);
-    n += list_count(&g_edf_ready[cpu]);
+    /* MC-EDF：全局链上存在可在本核运行的任务则计 1（无锁近似，供 steal/统计） */
+    {
+        list_item_t *it = g_edf_global.head;
+        while (it) {
+            cgrtos_task_t *t = (cgrtos_task_t *)((uint8_t *)it -
+                                                 offsetof(cgrtos_task_t, edf_item));
+            if (sched_edf_affinity_ok(t, cpu)) {
+                n += 1;
+                break;
+            }
+            it = it->next;
+        }
+    }
     return n;
 }
 
@@ -1446,7 +1592,7 @@ uint32_t cgrtos_sched_ready_count(uint8_t cpu)
  *
  * @details
  * 1. task 为空或 idle 返回 0。
- * 2. EDF 任务返回 0（不参与 LB）。
+ * 2. EDF 任务返回 0（MC-EDF 自行占核，不参与加权 LB）。
  * 3. CFS 任务返回 CONFIG_LB_CFS_WEIGHT。
  * 4. RT 任务返回 (prio+1) * CONFIG_LB_PRIO_SCALE。
  *
@@ -1475,7 +1621,7 @@ static uint32_t sched_task_weight(cgrtos_task_t *task)
  * @details
  * 1. task 为空、idle 或非 READY 返回 0。
  * 2. cpu_aff 硬亲和（!= 0xFF）返回 0。
- * 3. EDF 任务返回 0。
+ * 3. EDF 任务返回 0（由 MC-EDF 全局分配，禁止 LB 乱迁）。
  * 4. 优先级 >= TIMER_TASK_PRIO-1（定时器守护/近顶 RT）返回 0。
  * 5. 其余返回 1。
  */
@@ -1724,7 +1870,7 @@ void cgrtos_sched_idle_steal(void)
  *
  * @details
  * 1. 清零 g_ready 与 g_ready_bitmap。
- * 2. 初始化每核 CFS/EDF 就绪链表。
+ * 2. 初始化每核 CFS 就绪链表与全局 MC-EDF 就绪链。
  * 3. 初始化 EDF 释放轮各槽位链表。
  * 4. 初始化 g_delayed_list，edf_rel_cursor=0。
  * 5. suspend_count=0，ready_lock=0，lb_tick=0，force_yield 清零。
@@ -1735,8 +1881,8 @@ void cgrtos_sched_init(void)
     memset(g_ready_bitmap, 0, sizeof(g_ready_bitmap));
     for (int i = 0; i < CONFIG_NUM_CORES; i++) {
         list_init(&g_cfs_ready[i]);
-        list_init(&g_edf_ready[i]);
     }
+    list_init(&g_edf_global);
     for (int i = 0; i < CONFIG_EDF_RELEASE_SLOTS; i++) {
         list_init(&g_edf_rel[i]);
     }

@@ -25,6 +25,7 @@ NO_BUILD=0
 TIMEOUT_SEC="${TIMEOUT_SEC:-120}"
 GDB_PORT=1234
 WITH_GDB=0
+CORES="${CORES:-2}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -34,6 +35,7 @@ while [[ $# -gt 0 ]]; do
     --bench) APP=bench; shift ;;
     --stress) APP=stress; shift ;;
     --cli) APP=cli; shift ;;
+    --cores) CORES="$2"; shift 2 ;;
     --no-build) NO_BUILD=1; shift ;;
     --timeout) TIMEOUT_SEC="$2"; shift 2 ;;
     --port) GDB_PORT="$2"; shift 2 ;;
@@ -43,14 +45,25 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+case "${CORES}" in
+  1|2|4) ;;
+  *) echo "ERROR: --cores must be 1, 2, or 4 (got '${CORES}')"; exit 2 ;;
+esac
+
 QEMU_MACHINE=(
   -M nuclei_evalsoc,download=ddr
-  -smp 2 -m 512M
+  -smp "${CORES}" -m 512M
   -cpu nuclei-ux900fd,ext=svpbmt_zicbom_sstc_sscofpmf_zba_zbb_zbc_zbs_zicond
   -nographic -serial mon:stdio
-  # Nuclei ROM often boots only hart0; force hart1 PC to DDR image entry
-  -device loader,addr=0xA0000000,cpu-num=1
 )
+# Nuclei ROM often boots only hart0; force secondary PCs to DDR image entry
+if [[ "${CORES}" -ge 2 ]]; then
+  QEMU_MACHINE+=(-device loader,addr=0xA0000000,cpu-num=1)
+fi
+if [[ "${CORES}" -ge 4 ]]; then
+  QEMU_MACHINE+=(-device loader,addr=0xA0000000,cpu-num=2)
+  QEMU_MACHINE+=(-device loader,addr=0xA0000000,cpu-num=3)
+fi
 
 need_toolchain() {
   if [[ ! -x "${SYSROOT}/bin/riscv64-unknown-linux-gnu-gcc" ]]; then
@@ -78,10 +91,10 @@ need_gdb() {
 
 do_build() {
   need_toolchain
-  echo "==> Building APP=${APP}"
+  echo "==> Building APP=${APP} CORES=${CORES}"
   make clean
-  make all APP="${APP}"
-  echo "==> Built cgrtos.elf / cgrtos.bin"
+  make all APP="${APP}" CORES="${CORES}"
+  echo "==> Built cgrtos.elf / cgrtos.bin (CONFIG_NUM_CORES=${CORES})"
 }
 
 ensure_built() {
@@ -257,7 +270,7 @@ do_run() {
   LOG="$(mktemp /tmp/cgrtos-qemu.XXXXXX.log)"
   trap 'rm -f "${LOG}"' EXIT
 
-  echo "==> QEMU APP=${APP} timeout=${TIMEOUT_SEC}s"
+  echo "==> QEMU APP=${APP} CORES=${CORES} timeout=${TIMEOUT_SEC}s"
   set +e
   timeout "${TIMEOUT_SEC}" "${QEMU}" "${QEMU_MACHINE[@]}" -bios cgrtos.bin >"${LOG}" 2>&1
   QEMU_RC=$?
@@ -365,8 +378,11 @@ do_sdk() {
   local sdk="${ROOT}/sdk"
   echo "==> Packaging SDK -> ${sdk}/"
   rm -rf "${sdk}"
-  mkdir -p "${sdk}/include" "${sdk}/docs"
+  mkdir -p "${sdk}/include" "${sdk}/include/hal" "${sdk}/docs"
   cp -a "${ROOT}/kernel/cgrtos.h" "${sdk}/include/cgrtos.h"
+  cp -a "${ROOT}/kernel/list.h" "${sdk}/include/list.h"
+  cp -a "${ROOT}/hal/hal.h" "${sdk}/include/hal/hal.h"
+  cp -a "${ROOT}/hal/hal_board.h" "${sdk}/include/hal/hal_board.h"
   # Lightweight HTML tree copy (already generated under docs/doxygen)
   cp -a "${ROOT}/docs/doxygen/html" "${sdk}/docs/api"
   cat >"${sdk}/README.md" <<'EOF'
@@ -378,15 +394,22 @@ do_sdk() {
 
 | 路径 | 说明 |
 |------|------|
-| `include/cgrtos.h` | 唯一公开头文件（宏 / 类型 / API） |
+| `include/cgrtos.h` | 内核公共 API（会 `#include "hal/hal.h"`） |
+| `include/hal/hal.h` | 统一驱动框架 + 用户 HAL API |
+| `include/hal/hal_board.h` | Nuclei evalsoc 板级 MMIO |
+| `include/list.h` | `cgrtos.h` 依赖 |
 | `docs/api/index.html` | Doxygen API 文档（浏览器打开） |
 
 ## 使用
 
-应用工程：
-
 ```c
 #include "cgrtos.h"
+/* 新代码也可用：#include "hal/hal.h" */
+
+void demo(void) {
+    hal_console_puts("hello HAL\n");
+    cgrtos_printf("mtime=%lx\n", (unsigned long)hal_mtime_read());
+}
 ```
 
 编译时增加 `-I<path-to-sdk>/include`，并链入本仓库构建的内核目标（见仓库根 `Makefile` / `docs/USER_GUIDE.md`）。
@@ -394,6 +417,7 @@ do_sdk() {
 完整使用指南：仓库 `docs/USER_GUIDE.md`。
 EOF
   echo "==> SDK ready: ${sdk}/include/cgrtos.h"
+  echo "               ${sdk}/include/hal/hal.h"
   echo "               ${sdk}/docs/api/index.html"
 }
 
@@ -419,6 +443,7 @@ Commands:
 
 Options:
   --app NAME     demo | test | bench | stress | cli
+  --cores N      Hart count: 1 | 2 | 4 (default 2; sets -DCONFIG_NUM_CORES and QEMU -smp)
   --gdb | -g     This window = QEMU UART; other window = GDB TUI (C source)
   --no-build     Skip make; reuse existing binary
   --timeout SEC  QEMU wall timeout (default 120; stress 60; ignored with --gdb)
@@ -426,6 +451,8 @@ Options:
 
 Examples:
   ./scripts/cgrtos.sh test
+  ./scripts/cgrtos.sh test --cores 1
+  ./scripts/cgrtos.sh test --cores 4
   ./scripts/cgrtos.sh cli                 # then: list / run streambuf / run fs
   ./scripts/cgrtos.sh test --gdb
   ./scripts/cgrtos.sh sdk                 # refresh API SDK + Doxygen
@@ -434,6 +461,7 @@ Environment:
   SYSROOT          RISC-V toolchain prefix
   QEMU             qemu-system-riscv64 path
   GDB              gdb path
+  CORES            default hart count if --cores omitted (1|2|4)
   CGRTOS_GDB_TERM  auto|wt|tmux|xterm|here
 
 See docs/USER_GUIDE.md for the full guide.

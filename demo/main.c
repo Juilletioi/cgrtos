@@ -3,6 +3,9 @@
 /*
  * Interactive demo — built with `make APP=demo && make run`.
  * Relies on the same tick path validated by `make test`.
+ *
+ * Includes a SCHED_EDF periodic task to exercise MC-EDF alongside
+ * classic priority producer/consumer.
  */
 
 static cgrtos_sem_t *sem;
@@ -60,6 +63,38 @@ static void ticker(void *arg)
     }
 }
 
+static void edf_beat(void *arg)
+{
+    (void)arg;
+    uint8_t cpu = (uint8_t)read_csr(mhartid);
+    cgrtos_task_t *self = g_current[cpu];
+    tick_t period = portMS_TO_TICK(100);
+    tick_t wake = cgrtos_get_ticks() + period;
+
+    if (self) {
+        cgrtos_task_set_period(self->id, period);
+        cgrtos_task_set_deadline(self->id, wake);
+    }
+
+    while (1) {
+        tick_t now = cgrtos_get_ticks();
+        if (now < wake) {
+            cgrtos_delay_until(&wake, period);
+        } else {
+            wake = now + period;
+            if (self) {
+                cgrtos_task_set_deadline(self->id, wake);
+            }
+        }
+        cpu = (uint8_t)read_csr(mhartid);
+        self = g_current[cpu];
+        cgrtos_printf("  [DEMO][MC-EDF] beat @%lu dl=%lu cpu=%u\n",
+                      (unsigned long)cgrtos_get_ticks(),
+                      (unsigned long)(self ? self->deadline : 0),
+                      (unsigned)cpu);
+    }
+}
+
 int main(int hartid, void *fdt, void *end)
 {
     (void)fdt;
@@ -75,6 +110,7 @@ int main(int hartid, void *fdt, void *end)
     cgrtos_task_create("producer", producer, 0, 8, SCHED_PRIORITY);
     cgrtos_task_create("consumer", consumer, 0, 7, SCHED_PRIORITY);
     cgrtos_task_create("ticker", ticker, 0, 3, SCHED_RR);
+    cgrtos_task_create("edfbeat", edf_beat, 0, 4, SCHED_EDF);
 
     cgrtos_start();
     return 0;

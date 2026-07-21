@@ -1,4 +1,5 @@
 #include "../kernel/cgrtos.h"
+#include "../hal/hal_board.h"
 #include "test_cases.h"
 #include "stress_cases.h"
 
@@ -803,8 +804,15 @@ static void case_sched(void)
     task_id_t e2 = cgrtos_task_create("edf2", edf_worker,
                                        (void *)(uintptr_t)portMS_TO_TICK(50), 4, SCHED_EDF);
     expect("sched_edf_create", e1 != (task_id_t)-1 && e2 != (task_id_t)-1);
+    /* MC-EDF：不硬钉双核，允许全局按 deadline 占核；单核构建仍正确 */
+#if CONFIG_NUM_CORES >= 2
+    /* 软亲和即可；保留 e1 倾向核 0 仅作放置提示 */
+    cgrtos_task_set_affinity(e1, 0xFF);
+    cgrtos_task_set_affinity(e2, 0xFF);
+#else
     cgrtos_task_set_affinity(e1, 0);
     cgrtos_task_set_affinity(e2, 0);
+#endif
     wait_ticks(280);
     expect("sched_edf_hits", g_edf_ok >= 6);
     expect("sched_edf_no_miss", g_edf_miss <= 2);
@@ -834,7 +842,13 @@ static void case_sched(void)
 
 static void case_smp(void)
 {
-    /* Give hart1 time to set g_secondary_online after sched start */
+#if CONFIG_NUM_CORES < 2
+    expect("smp_single_core_build", 1);
+    expect("smp_no_secondary", g_secondary_online == 0);
+    expect("aff_skip", 1);
+    expect("lb_skip", 1);
+#else
+    /* Give secondaries time to set g_secondary_online after sched start */
     for (int i = 0; i < 50 && !g_secondary_online; i++) {
         wait_ticks(2);
     }
@@ -844,6 +858,12 @@ static void case_smp(void)
         cgrtos_printf("    (note: secondary hart not online — affinity/LB soft)\n");
         expect("smp_secondary_online", 1);
     }
+
+#if CONFIG_NUM_CORES >= 4
+    expect("smp_mask_h1", !g_secondary_online || (g_secondary_online & 0x2) != 0);
+    expect("smp_mask_h2", !g_secondary_online || (g_secondary_online & 0x4) != 0);
+    expect("smp_mask_h3", !g_secondary_online || (g_secondary_online & 0x8) != 0);
+#endif
 
     g_smp_core1 = 0;
     task_id_t aid = cgrtos_task_create("aff1", aff_worker, 0, 6, SCHED_PRIORITY);
@@ -889,6 +909,7 @@ static void case_smp(void)
         expect("lb_migrated", 1);
         expect("lb_loads_ok", 1);
     }
+#endif
 }
 
 static void case_hooks(void)
@@ -1083,6 +1104,88 @@ static void case_irq(void)
            cgrtos_plic_set_priority(5, CONFIG_IRQ_PRIORITY_MAX + 1) == pdFAIL);
 }
 
+/**
+ * @brief HAL 框架回归：注册表契约、错误码、兼容层、控制台原子写、配置校验
+ *
+ * @details
+ * 覆盖易用性/鲁棒性/多核安全相关契约（不依赖真实多核竞态复现）：
+ * 1. 设备表完整且冻结；
+ * 2. HAL 错误码与非法参数；
+ * 3. 兼容层与 HAL 读路径一致；
+ * 4. console write/puts；
+ * 5. irqc/ipi 参数边界。
+ */
+static void case_hal(void)
+{
+    static hal_device_t bogus;
+    hal_status_t st;
+    int n;
+
+    expect("hal_frozen", hal_registry_frozen() != 0);
+    expect("hal_dev_count", hal_device_count() >= 5);
+    expect("hal_cpu", hal_device_find(HAL_DEV_CPU) != 0);
+    expect("hal_console",
+           hal_device_find(HAL_DEV_CONSOLE) != 0 &&
+           hal_device_find_by_name("uart0") != 0);
+    expect("hal_timer",
+           hal_device_find(HAL_DEV_TIMER) != 0 &&
+           (hal_device_find(HAL_DEV_TIMER)->flags & HAL_DEV_F_READY) != 0);
+    expect("hal_irqc",
+           hal_device_find(HAL_DEV_IRQC) != 0 &&
+           hal_device_find_by_name("plic0") != 0);
+    expect("hal_ipi", hal_device_find(HAL_DEV_IPI) != 0);
+    expect("hal_get0", hal_device_get(0) != 0);
+    expect("hal_get_oob", hal_device_get(9999) == 0);
+    expect("hal_find_null", hal_device_find_by_name(0) == 0);
+
+    /* 冻结后再注册必须失败 */
+    bogus.name = "bogus0";
+    bogus.class = HAL_DEV_CONSOLE;
+    bogus.ops = hal_device_find(HAL_DEV_CONSOLE)->ops;
+    bogus.mmio_base = 0;
+    bogus.priv = 0;
+    bogus.flags = 0;
+    st = hal_device_register(&bogus);
+    expect("hal_reg_frozen", st == HAL_ERR_STATE);
+
+    expect("hal_reg_bad", hal_device_register(0) == HAL_ERR_PARAM);
+
+    uint64_t t0 = hal_mtime_read();
+    for (volatile int i = 0; i < 2000; i++) {
+    }
+    uint64_t t1 = hal_mtime_read();
+    expect("hal_mtime_adv", t1 >= t0);
+    expect("hal_mtime_compat", cgrtos_mtime_read() >= t1);
+    expect("hal_thr_compat",
+           cgrtos_plic_get_threshold() == hal_irqc_get_threshold());
+
+    /* 控制台：write / puts（持锁整段） */
+    n = hal_console_write("HAL", 3);
+    expect("hal_write_n", n == 3);
+    expect("hal_write_bad", hal_console_write(0, 4) == HAL_ERR_PARAM);
+    expect("hal_write_empty", hal_console_write("", 0) == 0);
+    hal_console_puts(" write-ok\n");
+    expect("hal_console_ok", 1);
+
+    /* IRQC 参数边界（配置锁路径） */
+    expect("hal_prio_bad_irq",
+           hal_irqc_set_priority(0, 1) == HAL_ERR_PARAM);
+    expect("hal_prio_bad_hi",
+           hal_irqc_set_priority(5, CONFIG_IRQ_PRIORITY_MAX + 1) == HAL_ERR_PARAM);
+    expect("hal_en_bad", hal_irqc_enable(0) == HAL_ERR_PARAM);
+    expect("hal_dis_bad", hal_irqc_disable(0) == HAL_ERR_PARAM);
+
+    /* IPI：合法核 / 越界 */
+    expect("hal_ipi_self", hal_ipi_send(0) == HAL_OK);
+    expect("hal_ipi_oob",
+           hal_ipi_send((uint8_t)CONFIG_NUM_CORES) == HAL_ERR_PARAM);
+
+    /* 兼容层与 HAL 一致 */
+    expect("hal_prio_compat",
+           cgrtos_plic_get_priority(5) == hal_irqc_get_priority(5));
+    expect("hal_board_name", HAL_BOARD_NAME != 0 && HAL_BOARD_NAME[0] != 0);
+}
+
 static const test_case_t g_cases[] = {
     { "delay",     "tick / delay_ms / delay_us / delay_until", case_delay },
     { "mem",       "heap / TLSF malloc calloc free",          case_mem },
@@ -1105,6 +1208,7 @@ static const test_case_t g_cases[] = {
     { "critical",  "critical section yield stats",            case_critical },
     { "isr",       "FromISR woken tick-hook IPC/timer",       case_isr },
     { "irq",       "PLIC prio group critical_from_isr",       case_irq },
+    { "hal",       "HAL registry/errors/console/irqc/ipi",    case_hal },
 };
 
 #define N_CASES ((int)(sizeof(g_cases) / sizeof(g_cases[0])))

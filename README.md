@@ -1,4 +1,4 @@
-# CG-RTOS v4.3
+# CG-RTOS v4.7
 
 Freestanding **RISC-V 64** SMP RTOS for **Nuclei UX900 / evalsoc**.
 
@@ -11,19 +11,21 @@ Freestanding **RISC-V 64** SMP RTOS for **Nuclei UX900 / evalsoc**.
 ./scripts/cgrtos.sh demo          # blinky / IPC demo
 ./scripts/cgrtos.sh bench         # microbenchmarks
 ./scripts/cgrtos.sh test --gdb    # QEMU here, GDB+C source in other window
-./scripts/cgrtos.sh sdk           # public header + API HTML → sdk/
+./scripts/cgrtos.sh sdk           # public headers + API HTML → sdk/
 ```
 
 Docs:
 
 - Guide: [docs/USER_GUIDE.md](docs/USER_GUIDE.md)
 - Architecture: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+- HAL: [docs/HAL.md](docs/HAL.md)
 - API: `./scripts/cgrtos.sh sdk` → [sdk/docs/api/index.html](sdk/docs/api/index.html)
 
 ## Features
 
-- Multi-policy preemptive sched: RR / Priority / CFS / EDF / Hybrid
-- SMP affinity, weighted LB, IPI, per-core ready queues
+- Multi-policy preemptive sched: RR / Priority / CFS / **MC-EDF** / Hybrid
+- SMP affinity, weighted LB, IPI, per-core ready queues (1/2/4 cores)
+- Unified **HAL** driver framework (`hal/`) + board MMIO map
 - Sem / mutex / queue / event / notify, StreamBuffer / MessageBuffer, QueueSet
 - Soft timers, TLSF heap, RAM filesystem (`cgrtos_fs_*`)
 - Precise delay (`delay` / `delay_us` / `delay_until`)
@@ -33,8 +35,9 @@ Docs:
 ## Layout
 
 ```
-kernel/     sched, task, ipc, stream, qset, fs, timer, mem
-arch/riscv/
+kernel/     sched, task, ipc, stream, qset, fs, timer, mem, irq
+hal/        device framework + user HAL API + board headers
+arch/riscv/ uart, clint, plic, ipi, cpu (HAL backends)
 tests/      test / cli / bench / stress
 scripts/    cgrtos.sh (preferred), gdbinit, run_qemu.sh (legacy)
 docs/       USER_GUIDE, ARCHITECTURE, doxygen

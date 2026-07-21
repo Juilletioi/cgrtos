@@ -11,6 +11,7 @@
  * 临界区：每核可嵌套的 IRQ 关闭 + 全局自旋锁 g_klock。
  */
 #include "cgrtos.h"
+#include "hal/hal_board.h"
 #include <string.h>
 
 /** @brief 全局任务控制块数组 */
@@ -42,10 +43,15 @@ volatile uint8_t g_remote_tick[CONFIG_NUM_CORES];
 
 /** @brief 次核启动同步魔数（须在 .data，避免热启动残留 BSS 魔数竞态） */
 volatile uint32_t g_boot_sync __attribute__((section(".data"))) = 0;
-/** @brief 次核已进入调度器标志 */
+/**
+ * @brief 次核在线位图：bit N（N≥1）表示 hart N 已进入调度器
+ */
 volatile uint32_t g_secondary_online;
-/** @brief hart1 启动阶段调试面包屑（.data，避免 BSS 清零抹掉） */
-volatile uint32_t g_hart1_stage __attribute__((section(".data"))) = 0;
+/**
+ * @brief 各 hart 启动阶段面包屑（须在 .data，避免 BSS 清零抹掉次核进度）
+ * @note startup.S 按 hartid 索引；kick 等待 1..CONFIG_NUM_CORES-1 均 ≥4
+ */
+volatile uint32_t g_hart_stage[CONFIG_MAX_CORES] __attribute__((section(".data")));
 
 #if CONFIG_USE_HOOKS
 /** @brief idle 任务钩子函数指针 */
@@ -303,11 +309,11 @@ tick_t cgrtos_get_ticks(void)
 /**
  * @brief 向次核发送 IPI，完成 SMP 启动握手同步
  * @details
- * 1. 写入 g_boot_sync=0xCAFE5A5A 并内存屏障，通知次核可离开 startup 轮询。
- * 2. 对每个次核 cgrtos_smp_send_ipi 触发 MSIP。
- * 3. 忙等最多 400000 次直至 g_hart1_stage>=4（次核已离开同步阶段）。
- * 4. 打印同步成功或 WARN 日志。
- * @note 仅在 CONFIG_NUM_CORES>1 时编译有效代码
+ * 1. CONFIG_NUM_CORES==1 时为空操作。
+ * 2. 写入 g_boot_sync=0xCAFE5A5A 并内存屏障，通知次核可离开 startup 轮询。
+ * 3. 对每个次核 cgrtos_smp_send_ipi 触发 MSIP。
+ * 4. 忙等直至所有 1..N-1 的 g_hart_stage[c]≥4（或超时）。
+ * 5. 打印各次核同步结果。
  */
 void cgrtos_smp_kick_secondaries(void)
 {
@@ -317,16 +323,31 @@ void cgrtos_smp_kick_secondaries(void)
     for (uint8_t c = 1; c < CONFIG_NUM_CORES; c++) {
         cgrtos_smp_send_ipi(c);
     }
-    /* 等待 hart1 离开 startup.S 同步轮询（stage>=4） */
-    for (int i = 0; i < 400000 && g_hart1_stage < 4; i++) {
+    /* 等待全部次核离开 startup.S 同步轮询（stage>=4） */
+    for (int i = 0; i < 400000; i++) {
         __sync_synchronize();
+        int all_ok = 1;
+        for (uint8_t c = 1; c < CONFIG_NUM_CORES; c++) {
+            if (g_hart_stage[c] < 4) {
+                all_ok = 0;
+                break;
+            }
+        }
+        if (all_ok) {
+            break;
+        }
     }
-    if (g_hart1_stage >= 4) {
-        cgrtos_printf("  [SMP] hart1 boot sync ok (stage=%u)\n", g_hart1_stage);
-    } else {
-        cgrtos_printf("  [SMP] WARN hart1 stage=%u sync=%x\n",
-                      g_hart1_stage, g_boot_sync);
+    for (uint8_t c = 1; c < CONFIG_NUM_CORES; c++) {
+        if (g_hart_stage[c] >= 4) {
+            cgrtos_printf("  [SMP] hart%u boot sync ok (stage=%u)\n",
+                          c, g_hart_stage[c]);
+        } else {
+            cgrtos_printf("  [SMP] WARN hart%u stage=%u sync=%x\n",
+                          c, g_hart_stage[c], g_boot_sync);
+        }
     }
+#else
+    /* 单核：无需 kick */
 #endif
 }
 
@@ -336,7 +357,7 @@ void cgrtos_smp_kick_secondaries(void)
  * 1. 清零 g_tasks/g_current/g_idle、临界区 nest、yield/remote_tick 等全局状态。
  * 2. 重置 tick、上下文切换计数、负载均衡计数、g_sched_run=0、g_klock=0。
  * 3. 各核 g_in_isr 清零；次核 online 与钩子指针（若启用）清零。
- * 4. 依次 cgrtos_sched_init、arch_init、uart_init、plic_init、clint_init。
+ * 4. cgrtos_sched_init；`hal_board_init()` 注册并初始化全部板级外设（CPU/UART/PLIC/CLINT/IPI）。
  * 5. cgrtos_smp_kick_secondaries 唤醒次核；打印版本横幅；cgrtos_fs_init。
  */
 void cgrtos_init(void)
@@ -375,22 +396,21 @@ void cgrtos_init(void)
     g_task_create_count = 0;
     g_task_delete_count = 0;
 
-    /* 4. 依次 cgrtos_sched_init、arch_init、uart_init、plic_init、clint_init */
+    /* 4. 调度器 + 统一 HAL 板级外设初始化 */
     cgrtos_sched_init();
-    cgrtos_arch_init();
-    cgrtos_uart_init();
-    cgrtos_plic_init();
-    cgrtos_clint_init(CONFIG_TICK_RATE_HZ);
+    hal_board_init();
 
     /* 5. cgrtos_smp_kick_secondaries 唤醒次核；打印版本横幅；cgrtos_fs_init */
     cgrtos_smp_kick_secondaries();
 
     cgrtos_printf("\n\n=== CG-RTOS v%s (SMP multi-policy) ===\n",
                   CGRTOS_VERSION);
-    cgrtos_printf("  Cores: %d | Tasks: %d | Tick: %d Hz | Priorities: 0-%d\n",
+    cgrtos_printf("  Cores: %d (build) | Tasks: %d | Tick: %d Hz | Priorities: 0-%d\n",
                   CONFIG_NUM_CORES, CONFIG_MAX_TASKS,
                   CONFIG_TICK_RATE_HZ, CONFIG_MAX_PRIORITY);
-    cgrtos_printf("  Features: weighted LB + steal, EDF wheel, CFS/Hybrid, TLSF\n");
+    cgrtos_printf("  HAL board: %s | devices=%d\n",
+                  HAL_BOARD_NAME, hal_device_count());
+    cgrtos_printf("  Features: weighted LB + steal, MC-EDF, CFS/Hybrid, TLSF\n");
     cgrtos_fs_init();
 }
 
@@ -447,18 +467,20 @@ void cgrtos_start(void)
  * @brief 次核进入调度器（secondary_main 调用，不再返回）
  * @param hartid 硬件线程 ID（1..N-1）
  * @details
- * 1. hartid 越界则返回。
+ * 1. hartid 非法（≤0 或 ≥ CONFIG_NUM_CORES）则 WFI 死循环（多出的 QEMU hart）。
  * 2. 自旋等待 g_sched_run==1（hart0 已 cgrtos_start）。
- * 3. 本地 clint_init 启用片内时间片；set_csr MSIE 允许 IPI。
+ * 3. 本地 clint_init；set_csr MSIE 允许 IPI。
  * 4. g_current[hartid]=idle[hartid]，idle state=RUNNING。
- * 5. 原子发布 g_secondary_online=1；start_first_task 运行 idle。
+ * 5. 原子置位 g_secondary_online bit hartid；start_first_task 运行 idle。
  * @note g_ticks 仍仅由 hart0 递增
  */
 void cgrtos_start_secondary(int hartid)
 {
-    /* 1. hartid 越界则返回 */
-    if (hartid >= CONFIG_NUM_CORES) {
-        return;
+    /* 1. 越界 hart：镜像可拉起 MAX_CORES 个 hart，但本构建未启用 */
+    if (hartid <= 0 || hartid >= CONFIG_NUM_CORES) {
+        while (1) {
+            asm volatile("wfi");
+        }
     }
 
     /* 2. 自旋等待 g_sched_run==1（hart0 已 cgrtos_start） */
@@ -473,8 +495,8 @@ void cgrtos_start_secondary(int hartid)
     /* 4. g_current[hartid]=idle[hartid]，idle state=RUNNING */
     g_current[hartid] = &g_idle[hartid];
     g_idle[hartid].state = TASK_RUNNING;
-    /* 5. 原子发布 g_secondary_online=1；start_first_task 运行 idle */
-    __atomic_store_n(&g_secondary_online, 1, __ATOMIC_SEQ_CST);
+    /* 5. 原子置位次核在线位；start_first_task 运行 idle */
+    __atomic_or_fetch(&g_secondary_online, (1U << hartid), __ATOMIC_SEQ_CST);
     start_first_task(g_idle[hartid].sp);
 }
 
@@ -500,16 +522,22 @@ void cgrtos_stats_dump(void)
     cgrtos_printf("  Tasks alive : %u / %u (create=%u delete=%u)\n",
                   st.tasks_alive, CONFIG_MAX_TASKS,
                   st.task_creates, st.task_deletes);
-    cgrtos_printf("  Context sw  : %u (core0=%u core1=%u)\n",
-                  st.context_switches,
-                  st.context_switches_core[0],
-                  CONFIG_NUM_CORES > 1 ? st.context_switches_core[1] : 0);
+    cgrtos_printf("  Context sw  : %u", st.context_switches);
+    for (uint8_t c = 0; c < CONFIG_NUM_CORES; c++) {
+        cgrtos_printf(" c%u=%u", c, st.context_switches_core[c]);
+    }
+    cgrtos_printf("\n");
     /* 2. 负载与堆 */
-    cgrtos_printf("  Ready/Load  : c0 r=%u L=%u | c1 r=%u L=%u\n",
-                  cgrtos_sched_ready_count(0), cgrtos_sched_core_load(0),
-                  CONFIG_NUM_CORES > 1 ? cgrtos_sched_ready_count(1) : 0,
-                  CONFIG_NUM_CORES > 1 ? cgrtos_sched_core_load(1) : 0);
-    cgrtos_printf("  LB migrate  : %u | steal: %u | secondary=%u\n",
+    cgrtos_printf("  Ready/Load  :");
+    for (uint8_t c = 0; c < CONFIG_NUM_CORES; c++) {
+        cgrtos_printf(" c%u r=%u L=%u", c,
+                      cgrtos_sched_ready_count(c), cgrtos_sched_core_load(c));
+        if (c + 1 < CONFIG_NUM_CORES) {
+            cgrtos_printf(" |");
+        }
+    }
+    cgrtos_printf("\n");
+    cgrtos_printf("  LB migrate  : %u | steal: %u | secondary_mask=0x%x\n",
                   st.lb_migrate, st.lb_steal, g_secondary_online);
     cgrtos_printf("  Free heap   : %lu bytes (min ever: %lu)\n",
                   st.free_heap, st.min_free_heap);

@@ -34,7 +34,7 @@ SECTIONS
     /*
      * Merge .sbss into .bss. GCC places small zero-init globals (g_boot_sync,
      * g_sched_run, …) in .sbss; if we stop _ebss before .sbss, startup never
-     * clears them and hart1's boot poll can race on garbage / wrong layout.
+     * clears them and secondary boot poll can race on garbage / wrong layout.
      */
     .bss : ALIGN(16) {
         _sbss = .;
@@ -45,11 +45,20 @@ SECTIONS
         _ebss = .;
     } >ram
 
+    /*
+     * Per-hart boot stacks (16 KiB each). Always reserve CONFIG_MAX_CORES=4 slots
+     * so the same image layout works for CORES=1/2/4; unused harts simply idle.
+     * Stack top for hart N = _stack_top + N * 0x4000 (see startup.S).
+     */
     .stack : ALIGN(16) {
         . += 0x4000;
-        _stack_top = .;
+        _stack_top = .;          /* hart0 */
         . += 0x4000;
-        _stack_top_core1 = .;
+        _stack_top_core1 = .;    /* hart1 (compat symbol) */
+        . += 0x4000;
+        _stack_top_core2 = .;    /* hart2 */
+        . += 0x4000;
+        _stack_top_core3 = .;    /* hart3 */
     } >ram
 
     _end = .;

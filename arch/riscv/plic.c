@@ -1,309 +1,237 @@
 /**
  * @file plic.c
- * @brief RISC-V PLIC 外部中断控制器驱动。
+ * @brief RISC-V PLIC 板级驱动（纯硬件层）+ 外部中断 trap 入口
  *
- * 提供 PLIC 初始化、优先级/使能、claim/complete、阈值，以及
- * 支持高优先级嵌套的快速外部中断分发入口。
+ * @details
+ * ## 分层
+ * - ops / drv_plic_device() → 供 HAL 注册与用户 hal_irqc_* 分发。
+ * - riscv_handle_external → **直接**调本文件 plic_hw_*，禁止再进 hal_irqc_*。
+ * - 兼容 cgrtos_plic_* 在 hal/hal_compat.c，不在本文件。
  *
- * Nuclei evalsoc DT 按 hart 提供 M+S 两套 context（mei + sei），因此
- * M-mode context 索引为 hart * 2（而非 hart * 1）。
+ * Nuclei evalsoc：M-mode context = hart * 2。
  */
 
 #include "../../kernel/cgrtos.h"
-
-/** @brief PLIC 寄存器基址（Nuclei evalsoc） */
-#define PLIC_BASE 0x1C000000
-/** @brief 每 context 的 threshold/claim 块跨度 */
-#define PLIC_CTX_STRIDE 0x1000
-/** @brief 每 context 的 enable 寄存器块跨度 */
-#define PLIC_ENABLE_STRIDE 0x80
-/**
- * @brief 指定 hart 的 M-mode PLIC context 编号
- * @note evalsoc: contexts 0=hart0-M, 1=hart0-S, 2=hart1-M, 3=hart1-S
- */
-#define PLIC_M_CONTEXT(h) ((uint64_t)(h) * 2ULL)
-/** @brief 中断源优先级寄存器：base + 4*irq */
-#define PLIC_PRIORITY(irq) (PLIC_BASE + 4ULL * (uint64_t)(irq))
-/**
- * @brief 指定 hart 的 enable 字地址（每字覆盖 32 个源）
- * @param h    hart 编号
- * @param word 字索引 = irq/32
- */
-#define PLIC_ENABLE(h, word) \
-    (PLIC_BASE + 0x2000ULL + PLIC_M_CONTEXT(h) * PLIC_ENABLE_STRIDE + \
-     4ULL * (uint64_t)(word))
-/** @brief 指定 hart 的 PLIC 优先级阈值寄存器（M-mode） */
-#define PLIC_THRESHOLD(h) (PLIC_BASE + 0x200000 + PLIC_M_CONTEXT(h) * PLIC_CTX_STRIDE)
-/** @brief 指定 hart 的 PLIC claim/complete 寄存器（M-mode，同地址读写） */
-#define PLIC_CLAIM(h) (PLIC_BASE + 0x200004 + PLIC_M_CONTEXT(h) * PLIC_CTX_STRIDE)
+#include "../../hal/hal_drv.h"
+#include "../../hal/hal_board.h"
 
 /**
- * @brief 初始化本 hart 的 PLIC 并使能机器外部中断（MEIE）
+ * @brief PLIC 本 hart 初始化
  *
- * @details
- * 1. 首次（任意核）调用 cgrtos_irq_init，清零 handler 表与优先级分组上界。
- * 2. 读取 mhartid，将本 hart M-mode context 的优先级阈值寄存器置 0
- *    （允许所有优先级 >0 的外部中断通过）。
- * 3. 通过 set_csr_bits 打开 mie 的 MEIE 位（bit 11）。
- * 4. 每个 hart 在启动路径各自调用一次；irq_init 仅执行一次。
+ * @details 步骤：
+ * 1. 全局首次调用 cgrtos_irq_init() 清 handler 表。
+ * 2. 本 hart threshold 写 0（放行 priority>0）。
+ * 3. 打开 mie.MEIE。
+ * 4. 返回 HAL_OK。
  */
-void cgrtos_plic_init(void)
+static hal_status_t plic_hw_init(hal_device_t *dev)
 {
+    (void)dev;
     static uint8_t irq_inited;
-    /* 1. 全局 IRQ 表初始化（仅一次） */
     if (!irq_inited) {
         cgrtos_irq_init();
         irq_inited = 1;
     }
-
-    /* 2. 本 hart 阈值置 0 */
     uint64_t h = read_csr(mhartid);
-    volatile uint32_t *thr = (volatile uint32_t *)PLIC_THRESHOLD(h);
-    *thr = 0;
-    /* 3. 打开 MEIE */
+    *(volatile uint32_t *)HAL_BOARD_PLIC_THRESHOLD(h) = 0;
     set_csr_bits(mie, 0x800);
+    return HAL_OK;
 }
 
-/**
- * @brief 从 PLIC claim 寄存器读取并锁定待服务中断号
- *
- * @return 中断源 ID；0 表示当前无待处理外部中断
- *
- * @details
- * 1. 读取本 hart 编号。
- * 2. 读本 hart M-mode claim 寄存器：PLIC 返回最高优先级 pending 源，并隐式锁定。
- * 3. 返回该 ID；调用方处理完毕后必须 cgrtos_plic_complete，否则该源不再投递。
- */
-uint32_t cgrtos_plic_claim(void)
+/** @brief claim：读本 hart claim 寄存器 */
+static uint32_t plic_hw_claim(hal_device_t *dev)
 {
-    /* 1-2. 读本 hart claim */
+    (void)dev;
     uint64_t h = read_csr(mhartid);
-    return *(volatile uint32_t *)PLIC_CLAIM(h);
+    return *(volatile uint32_t *)HAL_BOARD_PLIC_CLAIM(h);
 }
 
-/**
- * @brief 通知 PLIC 指定中断已服务完毕（complete）
- *
- * @param irq 先前 claim 返回的中断源 ID（0 无意义，调用方应避免）
- *
- * @details
- * 1. 读取本 hart 编号。
- * 2. 向 claim/complete 寄存器写入 irq，释放该源锁定，允许再次 pending。
- * 3. 必须与 claim 成对；遗漏会导致该中断源永久丢失后续请求。
- */
-void cgrtos_plic_complete(uint32_t irq)
+/** @brief complete：写本 hart claim 寄存器 */
+static void plic_hw_complete(hal_device_t *dev, uint32_t irq)
 {
-    /* 1-2. 写 complete */
+    (void)dev;
     uint64_t h = read_csr(mhartid);
-    *(volatile uint32_t *)PLIC_CLAIM(h) = irq;
+    *(volatile uint32_t *)HAL_BOARD_PLIC_CLAIM(h) = irq;
 }
 
-/**
- * @brief 设置本 hart 的 PLIC 优先级阈值
- *
- * @param threshold 新阈值；仅 priority > threshold 的源可投递到本 hart
- *
- * @details
- * 1. 读取 mhartid。
- * 2. 写入本 hart M-mode threshold 寄存器。
- * 3. 用于 enter_critical_from_isr（抬高屏蔽 FromISR 级）与外部 ISR 嵌套窗口。
- */
-void cgrtos_plic_set_threshold(uint32_t threshold)
+/** @brief 写本 hart threshold */
+static void plic_hw_set_threshold(hal_device_t *dev, uint32_t thr)
 {
+    (void)dev;
     uint64_t h = read_csr(mhartid);
-    *(volatile uint32_t *)PLIC_THRESHOLD(h) = threshold;
+    *(volatile uint32_t *)HAL_BOARD_PLIC_THRESHOLD(h) = thr;
 }
 
-/**
- * @brief 读取本 hart 的 PLIC 优先级阈值
- *
- * @return 当前 threshold 寄存器值
- *
- * @details
- * 1. 读取 mhartid。
- * 2. 返回 threshold 寄存器内容（无副作用）。
- */
-uint32_t cgrtos_plic_get_threshold(void)
+/** @brief 读本 hart threshold */
+static uint32_t plic_hw_get_threshold(hal_device_t *dev)
 {
+    (void)dev;
     uint64_t h = read_csr(mhartid);
-    return *(volatile uint32_t *)PLIC_THRESHOLD(h);
+    return *(volatile uint32_t *)HAL_BOARD_PLIC_THRESHOLD(h);
 }
 
 /**
- * @brief 设置中断源优先级
- *
- * @param irq      源编号（1..CONFIG_IRQ_MAX_SOURCES）
- * @param priority 0..CONFIG_IRQ_PRIORITY_MAX；0 表示该源永不投递（PLIC 禁用语义）
- *
- * @return pdPASS 成功；pdFAIL 参数越界
- *
- * @details
- * 1. 校验 irq 与 priority 范围。
- * 2. 写入 PLIC_PRIORITY(irq) 寄存器。
- * 3. 优先级越高越先被 claim；与 threshold 比较决定是否可达本 hart。
+ * @brief 设置源优先级
+ * @details 步骤：1. 校验 irq/prio；2. 写 PRIORITY(irq)；3. 返回状态。
  */
-int cgrtos_plic_set_priority(uint32_t irq, uint32_t priority)
+static hal_status_t plic_hw_set_priority(hal_device_t *dev, uint32_t irq, uint32_t prio)
 {
-    /* 1. 参数校验 */
+    (void)dev;
     if (irq == 0 || irq > CONFIG_IRQ_MAX_SOURCES) {
-        return pdFAIL;
+        return HAL_ERR_PARAM;
     }
-    if (priority > CONFIG_IRQ_PRIORITY_MAX) {
-        return pdFAIL;
+    if (prio > CONFIG_IRQ_PRIORITY_MAX) {
+        return HAL_ERR_PARAM;
     }
-    /* 2. 写优先级寄存器 */
-    *(volatile uint32_t *)PLIC_PRIORITY(irq) = priority;
-    return pdPASS;
+    *(volatile uint32_t *)HAL_BOARD_PLIC_PRIORITY(irq) = prio;
+    return HAL_OK;
 }
 
-/**
- * @brief 读取中断源优先级
- *
- * @param irq 源编号
- *
- * @return 当前优先级；irq 非法时返回 0
- *
- * @details
- * 1. irq 越界返回 0。
- * 2. 否则读 PLIC_PRIORITY(irq)。
- */
-uint32_t cgrtos_plic_get_priority(uint32_t irq)
+static uint32_t plic_hw_get_priority(hal_device_t *dev, uint32_t irq)
 {
+    (void)dev;
     if (irq == 0 || irq > CONFIG_IRQ_MAX_SOURCES) {
         return 0;
     }
-    return *(volatile uint32_t *)PLIC_PRIORITY(irq);
+    return *(volatile uint32_t *)HAL_BOARD_PLIC_PRIORITY(irq);
 }
 
 /**
- * @brief 对本 hart 使能指定中断源
- *
- * @param irq 源编号（1..CONFIG_IRQ_MAX_SOURCES）
- *
- * @return pdPASS 成功；pdFAIL irq 非法
- *
- * @details
- * 1. 校验 irq。
- * 2. 计算 enable 字索引 word=irq/32 与位 bit=irq%32。
- * 3. 对本 hart M-mode enable 字做按位置 1。
- * 4. 仅影响本 hart；其他 hart 需各自使能。
+ * @brief 对本 hart 使能源
+ * @details 步骤：1. 校验；2. word=irq/32 bit=irq%32；3. enable 字按位置 1。
  */
-int cgrtos_plic_enable(uint32_t irq)
+static hal_status_t plic_hw_enable(hal_device_t *dev, uint32_t irq)
 {
-    /* 1. 参数校验 */
+    (void)dev;
     if (irq == 0 || irq > CONFIG_IRQ_MAX_SOURCES) {
-        return pdFAIL;
+        return HAL_ERR_PARAM;
     }
-    /* 2-3. 置 enable 位 */
     uint64_t h = read_csr(mhartid);
     uint32_t word = irq / 32U;
     uint32_t bit = irq % 32U;
-    volatile uint32_t *en = (volatile uint32_t *)PLIC_ENABLE(h, word);
+    volatile uint32_t *en =
+        (volatile uint32_t *)HAL_BOARD_PLIC_ENABLE(h, word);
     *en |= (1U << bit);
-    return pdPASS;
+    return HAL_OK;
 }
 
-/**
- * @brief 对本 hart 禁用指定中断源
- *
- * @param irq 源编号
- *
- * @return pdPASS 成功；pdFAIL irq 非法
- *
- * @details
- * 1. 校验 irq。
- * 2. 计算 word/bit，对本 hart enable 字按位清 0。
- * 3. 已 pending 的请求在 disable 后通常不再投递到本 hart。
- */
-int cgrtos_plic_disable(uint32_t irq)
+/** @brief 对本 hart 禁用源（步骤同 enable，改为按位清 0） */
+static hal_status_t plic_hw_disable(hal_device_t *dev, uint32_t irq)
 {
-    /* 1. 参数校验 */
+    (void)dev;
     if (irq == 0 || irq > CONFIG_IRQ_MAX_SOURCES) {
-        return pdFAIL;
+        return HAL_ERR_PARAM;
     }
-    /* 2. 清 enable 位 */
     uint64_t h = read_csr(mhartid);
     uint32_t word = irq / 32U;
     uint32_t bit = irq % 32U;
-    volatile uint32_t *en = (volatile uint32_t *)PLIC_ENABLE(h, word);
+    volatile uint32_t *en =
+        (volatile uint32_t *)HAL_BOARD_PLIC_ENABLE(h, word);
     *en &= ~(1U << bit);
-    return pdPASS;
+    return HAL_OK;
+}
+
+static const hal_irqc_ops_t s_plic_ops = {
+    .init          = plic_hw_init,
+    .claim         = plic_hw_claim,
+    .complete      = plic_hw_complete,
+    .set_threshold = plic_hw_set_threshold,
+    .get_threshold = plic_hw_get_threshold,
+    .set_priority  = plic_hw_set_priority,
+    .get_priority  = plic_hw_get_priority,
+    .enable        = plic_hw_enable,
+    .disable       = plic_hw_disable,
+};
+
+static hal_device_t s_plic_dev = {
+    .name      = "plic0",
+    .class     = HAL_DEV_IRQC,
+    .mmio_base = HAL_BOARD_PLIC_BASE,
+    .ops       = &s_plic_ops,
+    .priv      = 0,
+    .flags     = 0,
+};
+
+hal_device_t *drv_plic_device(void)
+{
+    return &s_plic_dev;
 }
 
 /**
- * @brief 机器外部中断 C 层入口（快速响应路径）
+ * @brief 机器外部中断 C 入口（底层直调驱动）
  *
- * @param f 陷阱栈帧指针（本实现未使用，由 trap_vector 传入）
+ * @details 步骤：
+ * 1. cgrtos_isr_enter 标记 ISR 上下文。
+ * 2. plic_hw_claim 取最高优先级 pending 源；0 则跳到步骤 6。
+ * 3. 保存 threshold；抬到本源 priority（0 则抬到 1），屏蔽同级及以下。
+ * 4. 可选嵌套：清 MTIE|MSIE，开 mstatus.MIE，仅允许更高优先级外部中断。
+ * 5. cgrtos_irq_dispatch → 恢复 mie/threshold → plic_hw_complete。
+ * 6. cgrtos_isr_exit。
  *
- * @details
- * 1. cgrtos_isr_enter 标记 ISR 上下文（供 cgrtos_in_isr 查询）。
- * 2. claim 中断号；若为 0 则跳到步骤 3。
- *    a. 保存当前 threshold；将 threshold 抬至该源优先级（prio==0 时抬到 1），
- *       屏蔽同级及以下，为更高优先级嵌套做准备。
- *    b. 若 CONFIG_IRQ_NESTING：保存 mie，清 MTIE|MSIE，置 mstatus.MIE，
- *       仅允许更高优先级 *外部* 中断嵌套（避免 SysTimer/IPI 重入）。
- *    c. cgrtos_irq_dispatch(irq) 调用注册 handler（无则空操作）。
- *    d. 若开启嵌套：清 MIE，恢复 mie；恢复 threshold；complete(irq)。
- * 3. cgrtos_isr_exit。
- *
- * @note 更高优先级嵌套 ISR 不得调用 FromISR（优先级应 > syscall_max）。
+ * @note 本路径故意不调用 hal_irqc_*，避免「底层 → HAL」倒置。
  */
 void riscv_handle_external(uint64_t *f)
 {
     (void)f;
-    /* 1. 进入 ISR 上下文 */
     cgrtos_isr_enter();
 
-    /* 2. claim */
-    uint32_t irq = cgrtos_plic_claim();
+    uint32_t irq = plic_hw_claim(&s_plic_dev);
     if (irq) {
-        uint32_t saved_thr = cgrtos_plic_get_threshold();
-        uint32_t prio = cgrtos_plic_get_priority(irq);
-        /* a. 防御：prio==0 时至少抬到 1，避免 threshold=0 放行全部 */
+        uint32_t saved_thr = plic_hw_get_threshold(&s_plic_dev);
+        uint32_t prio = plic_hw_get_priority(&s_plic_dev, irq);
         if (prio == 0) {
             prio = 1;
         }
-        cgrtos_plic_set_threshold(prio);
+        plic_hw_set_threshold(&s_plic_dev, prio);
 
 #if CONFIG_IRQ_NESTING
-        /* b. 仅嵌套更高优先级外部中断 */
         uint64_t mie_save;
         asm volatile("csrr %0, mie" : "=r"(mie_save));
         asm volatile("csrc mie, %0" :: "r"(0x88ULL));
         set_csr_bits(mstatus, 0x8);
 #endif
-        /* c. 分发 */
         cgrtos_irq_dispatch(irq);
 #if CONFIG_IRQ_NESTING
         clear_csr_bits(mstatus, 0x8);
         asm volatile("csrw mie, %0" :: "r"(mie_save));
 #endif
 
-        /* d. 恢复 threshold 并 complete */
-        cgrtos_plic_set_threshold(saved_thr);
-        cgrtos_plic_complete(irq);
+        plic_hw_set_threshold(&s_plic_dev, saved_thr);
+        plic_hw_complete(&s_plic_dev, irq);
     }
 
-    /* 3. 退出 ISR 上下文 */
     cgrtos_isr_exit();
 }
 
 /**
- * @brief 同步异常 C 层入口（非法指令、访存错误等）
+ * @brief 将无符号数以十六进制粗打到早期 UART
+ * @param v 数值
+ * @details 步骤：1. 输出 "0x"；2. 从高半字节到低半字节逐位输出。
+ */
+static void early_put_hex(unsigned long v)
+{
+    const char *hex = "0123456789abcdef";
+    int i;
+    drv_uart_early_puts("0x");
+    for (i = (int)(sizeof(unsigned long) * 2 - 1); i >= 0; i--) {
+        drv_uart_early_putc(hex[(v >> (i * 4)) & 0xFUL]);
+    }
+}
+
+/**
+ * @brief 同步异常诊断（底层直写 UART，不调用 HAL / printf）
  *
- * @param f     陷阱栈帧（本实现未使用）
- * @param cause mcause 异常原因编码（不含中断位）
- * @param epc   mepc：异常发生时的 PC
- *
- * @details
- * 1. 接收 trap_vector 传入的 cause 与 epc。
- * 2. 通过 cgrtos_printf 打印异常信息供调试。
- * 3. 当前不恢复、不 halt；返回后行为取决于 trap 路径（通常继续执行或再次异常）。
+ * @details 步骤：
+ * 1. 忽略栈帧指针。
+ * 2. drv_uart_early_puts 输出前缀。
+ * 3. 以十六进制粗打 cause / epc（避免依赖格式化库与 HAL）。
  */
 void riscv_handle_exception(uint64_t *f, uint64_t cause, uint64_t epc)
 {
     (void)f;
-    /* 1-2. 打印诊断信息 */
-    cgrtos_printf("[EXC] cause=%lu epc=%p\n",
-                  (unsigned long)cause, (void *)(uintptr_t)epc);
+    drv_uart_early_puts("[EXC] cause=");
+    early_put_hex((unsigned long)cause);
+    drv_uart_early_puts(" epc=");
+    early_put_hex((unsigned long)epc);
+    drv_uart_early_putc('\n');
 }

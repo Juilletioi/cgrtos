@@ -12,24 +12,26 @@
  *
  * SMP 启动流程：
  *   hart0: 清零 BSS → 写 g_boot_sync 魔数 → main() → 可选 MSIP 唤醒
- *   hart1: 阶段标记 → 设 SP → 轮询 g_boot_sync → secondary_main()
+ *   hart1..3: 阶段标记 → 按 hartid 选栈 → 轮询 g_boot_sync → secondary_main()
  *
- * QEMU 须将 hart1 置于镜像入口，例如：
- *   -device loader,addr=0xA0000000,cpu-num=1
- * Nuclei ROM 单独启动时常使 CPU1 停留在复位态。
+ * QEMU 须将次核置于镜像入口，例如（双核）：
+ *   -smp 2 -device loader,addr=0xA0000000,cpu-num=1
+ * 四核时对 cpu-num=1,2,3 各加一条 loader。单核则仅 -smp 1。
  */
 
 .section .text.init,"ax"
 .global _start,_start_secondary,context_switch,start_first_task,trap_vector,_deadloop
 .equ CSR_MCACHE_CTL,0x7CA
 .equ BOOT_FLAG_MAGIC,0xCAFE5A5A
+.equ CORE_STACK_SHIFT,14
+.equ MAX_CORES,4
 
 /**
  * @brief 主 hart 复位入口（hart0）或 secondary 分发点。
  *
  * hart0：关中断、设 mtvec、仅开 I-cache、清零 BSS、设 SP、
  * 写 g_boot_sync 后调用 main()。
- * hart1：跳转 _start_secondary。
+ * hart!=0：跳转 _start_secondary（C 侧按 CONFIG_NUM_CORES 过滤）。
  */
 _start:
     csrw mie,zero
@@ -37,11 +39,10 @@ _start:
     la t0,trap_vector
     csrw mtvec,t0
     csrr t0,mhartid
-    li t1,1
-    beq t0,t1,_start_secondary
+    bnez t0,_start_secondary
     /*
      * Invalidate boot magic BEFORE any work so a warm-RAM leftover 0xCAFE5A5A
-     * cannot let hart1 race into C while we still wipe BSS.
+     * cannot let secondaries race into C while we still wipe BSS.
      */
     la t0,g_boot_sync
     sw zero,0(t0)
@@ -62,7 +63,7 @@ _start:
     addi t0,t0,8
     blt t0,t1,1b
 2:  la sp,_stack_top
-    /* Release secondary only after BSS is clean. */
+    /* Release secondaries only after BSS is clean. */
     la t0,g_boot_sync
     li t1,BOOT_FLAG_MAGIC
     sw t1,0(t0)
@@ -74,13 +75,19 @@ _start:
     j _deadloop
 
 /**
- * @brief 从 hart 启动路径（hart1）。
+ * @brief 从 hart 启动路径（hart1..hart3）。
  *
- * 在 g_hart1_stage 写入阶段面包屑，开 I-cache，设 gp/SP，
- * 短延时后轮询 g_boot_sync 魔数，匹配后调用 secondary_main()。
+ * 在 g_hart_stage[hartid] 写入阶段面包屑，开 I-cache，按 hartid 设 SP，
+ * 短延时后轮询 g_boot_sync 魔数，匹配后调用 secondary_main(hartid)。
  */
 _start_secondary:
-    la t3,g_hart1_stage
+    csrr t5,mhartid
+    li t1,MAX_CORES
+    bgeu t5,t1,_deadloop
+    /* g_hart_stage[hartid] = 1 */
+    la t3,g_hart_stage
+    slli t4,t5,2
+    add t3,t3,t4
     li t4,1
     sw t4,0(t3)
     fence
@@ -88,7 +95,10 @@ _start_secondary:
     csrw CSR_MCACHE_CTL,t0
     fence
     la gp,__global_pointer$
-    la sp,_stack_top_core1
+    /* sp = _stack_top + hartid * 0x4000 */
+    la sp,_stack_top
+    slli t1,t5,CORE_STACK_SHIFT
+    add sp,sp,t1
     li t4,2
     sw t4,0(t3)
     fence

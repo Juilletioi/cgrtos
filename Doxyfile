@@ -1,6 +1,6 @@
 # Doxyfile — CG-RTOS API documentation
 PROJECT_NAME           = "CG-RTOS"
-PROJECT_NUMBER         = 4.2.0
+PROJECT_NUMBER         = 4.7.0
 PROJECT_BRIEF          = "RISC-V64 SMP multi-policy RTOS for Nuclei UX900"
 OUTPUT_DIRECTORY       = docs/doxygen
 CREATE_SUBDIRS         = NO
@@ -11,7 +11,7 @@ EXTRACT_LOCAL_CLASSES  = YES
 OPTIMIZE_OUTPUT_FOR_C  = YES
 TYPEDEF_HIDES_STRUCT   = YES
 RECURSIVE              = YES
-INPUT                  = kernel arch/riscv startup.S docs/ARCHITECTURE.md
+INPUT                  = kernel arch/riscv hal startup.S docs/ARCHITECTURE.md docs/USER_GUIDE.md docs/HAL.md
 FILE_PATTERNS          = *.c *.h *.S *.md
 EXCLUDE_PATTERNS       = */tests/* */demo/*
 USE_MDFILE_AS_MAINPAGE = docs/ARCHITECTURE.md
