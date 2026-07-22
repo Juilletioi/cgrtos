@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
-# Deprecated thin wrapper — prefer ./scripts/cgrtos.sh
-#   ./scripts/run_qemu.sh            → cgrtos.sh run --app test
-#   ./scripts/run_qemu.sh --demo     → cgrtos.sh run --app demo
-#   ./scripts/run_qemu.sh --bench    → cgrtos.sh run --app bench
+# Deprecated — prefer ./scripts/run.sh or ./scripts/cgrtos.sh run
+# (run never builds; compile first with ./scripts/build.sh)
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ARGS=()
 APP=test
@@ -11,11 +9,12 @@ while [[ $# -gt 0 ]]; do
     --bench) APP=bench; shift ;;
     --demo) APP=demo; shift ;;
     --test) APP=test; shift ;;
-    --no-build) ARGS+=(--no-build); shift ;;
+    --no-build) shift ;; # no-op: run never builds
     --timeout) ARGS+=(--timeout "$2"); shift 2 ;;
     --gdb|-g) ARGS+=(--gdb); shift ;;
     -h|--help)
-      echo "Deprecated. Use: ./scripts/cgrtos.sh test|demo|bench|cli|..."
+      echo "Deprecated. Use: ./scripts/build.sh && ./scripts/run.sh"
+      echo "See docs/SCRIPTS.md"
       exit 0
       ;;
     *) ARGS+=("$1"); shift ;;

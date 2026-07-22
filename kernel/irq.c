@@ -1,15 +1,18 @@
 /**
  * @file irq.c
- * @brief 中断优先级分组、PLIC 处理注册、ISR 临界区与 woken 通知。
+ * @brief 中断优先级分组、PLIC 处理注册、ISR 临界区与 woken 通知
+ * @author Cong Zhou / Juilletioi
+ * @version 5.0.0
+ * @date 2026-07-22
+ * @copyright CG-RTOS
  *
  * @details
  * 优先级分组（FreeRTOS 风格）：
- *   - 优先级 ≤ syscall_max_prio 的中断可调用 FromISR；
- *   - enter_critical_from_isr 将 PLIC threshold 抬至 syscall_max_prio，
- *     屏蔽这些中断，同时允许更高优先级中断嵌套（不得调用 FromISR）。
+ * - 优先级 ≤ syscall_max_prio 的中断可调用 FromISR；
+ * - enter_critical_from_isr 将 PLIC threshold 抬至 syscall_max_prio，
+ *   屏蔽这些中断，同时允许更高优先级中断嵌套（不得调用 FromISR）。
  * 快速响应：riscv_handle_external 在分发前把 threshold 设为当前源优先级；
- * 当 CONFIG_IRQ_NESTING=1 时短暂打开 MIE（并关 MTIE/MSIE），使更高优先级
- * 外部中断可嵌套抢占。
+ * 当 CONFIG_IRQ_NESTING=1 时短暂打开 MIE，使更高优先级外部中断可嵌套抢占。
  */
 #include "cgrtos.h"
 
@@ -30,11 +33,12 @@ static uint32_t             g_syscall_max_prio = CONFIG_IRQ_SYSCALL_MAX_PRIO;
 
 /**
  * @brief 初始化 IRQ 子系统
- *
- * @details
- * 1. 将 g_irq_handlers[] 与 g_irq_args[] 全部清零（无已注册 handler）。
- * 2. 将 g_syscall_max_prio 复位为 CONFIG_IRQ_SYSCALL_MAX_PRIO。
- * 3. 由 cgrtos_plic_init 在首次调用时触发；可重复调用（幂等清表）。
+ * @details 将 g_irq_handlers[] 与 g_irq_args[] 全部清零；将 g_syscall_max_prio 复位为 CONFIG_IRQ_SYSCALL_MAX_PRIO。
+ * @return 无
+ * @retval 无
+ * @note 由 cgrtos_plic_init 在首次调用时触发；可重复调用（幂等清表）
+ * @warning 重复 init 会清除所有已注册 handler
+ * @attention ❌ ISR；❌ block
  */
 void cgrtos_irq_init(void)
 {
@@ -49,18 +53,16 @@ void cgrtos_irq_init(void)
 
 /**
  * @brief 配置中断源优先级并可选使能/禁用
- *
- * @param irq      中断源编号，范围 1..CONFIG_IRQ_MAX_SOURCES
- * @param priority 优先级 0..CONFIG_IRQ_PRIORITY_MAX；0 表示禁用该源（PLIC 语义）
- * @param enable   非 0 则对本 hart 使能该源；0 则禁用
- *
+ * @details 校验 irq 与 priority 合法范围；调用 cgrtos_plic_set_priority 写入源优先级；按 enable 调用 plic_enable 或 plic_disable。
+ * @param[in] irq      中断源编号，范围 1..CONFIG_IRQ_MAX_SOURCES
+ * @param[in] priority 优先级 0..CONFIG_IRQ_PRIORITY_MAX；0 表示禁用该源（PLIC 语义）
+ * @param[in] enable   非 0 则对本 hart 使能该源；0 则禁用
  * @return pdPASS 成功；pdFAIL 参数非法或底层 PLIC 写入失败
- *
- * @details
- * 1. 校验 irq 与 priority 合法范围。
- * 2. 调用 cgrtos_plic_set_priority 写入源优先级寄存器。
- * 3. 按 enable 调用 plic_enable 或 plic_disable。
- * 4. 本函数不注册 handler；需另调 cgrtos_irq_register。
+ * @retval pdPASS 配置成功
+ * @retval pdFAIL 参数非法或 PLIC 操作失败
+ * @note 本函数不注册 handler；需另调 cgrtos_irq_register
+ * @warning priority 0 在 PLIC 语义下禁用该源
+ * @attention ❌ ISR；❌ block
  */
 int cgrtos_irq_configure(uint32_t irq, uint32_t priority, int enable)
 {
@@ -84,18 +86,16 @@ int cgrtos_irq_configure(uint32_t irq, uint32_t priority, int enable)
 
 /**
  * @brief 注册 PLIC 外部中断处理函数
- *
- * @param irq     中断源编号（1..CONFIG_IRQ_MAX_SOURCES）
- * @param handler 回调；签名 void (*)(uint32_t irq, void *arg)
- * @param arg     透传给 handler 的私有指针（可为 NULL）
- *
+ * @details 校验 irq 与 handler；将 handler/arg 写入表项 g_irq_handlers[irq] / g_irq_args[irq]。
+ * @param[in] irq     中断源编号（1..CONFIG_IRQ_MAX_SOURCES）
+ * @param[in] handler 回调；签名 void (*)(uint32_t irq, void *arg)
+ * @param[in] arg     透传给 handler 的私有指针（可为 NULL）
  * @return pdPASS 成功；pdFAIL 参数非法（irq 越界或 handler 为空）
- *
- * @details
- * 1. 校验 irq 与 handler。
- * 2. 将 handler/arg 写入表项 g_irq_handlers[irq] / g_irq_args[irq]。
- * 3. 实际调用发生在 riscv_handle_external → cgrtos_irq_dispatch。
- * 4. handler 内可调用 FromISR（仅当该源优先级 ≤ syscall_max）；不得阻塞。
+ * @retval pdPASS 注册成功
+ * @retval pdFAIL irq 越界或 handler 为空
+ * @note 实际调用发生在 riscv_handle_external → cgrtos_irq_dispatch
+ * @warning handler 内可调用 FromISR（仅当该源优先级 ≤ syscall_max）；不得阻塞
+ * @attention ❌ ISR；❌ block
  */
 int cgrtos_irq_register(uint32_t irq, cgrtos_irq_handler_t handler, void *arg)
 {
@@ -111,15 +111,14 @@ int cgrtos_irq_register(uint32_t irq, cgrtos_irq_handler_t handler, void *arg)
 
 /**
  * @brief 注销指定中断源的处理函数
- *
- * @param irq 中断源编号
- *
+ * @details 校验 irq 范围；将 g_irq_handlers[irq] 与 g_irq_args[irq] 清零。
+ * @param[in] irq 中断源编号
  * @return pdPASS 成功；pdFAIL irq 非法
- *
- * @details
- * 1. 校验 irq 范围。
- * 2. 将 g_irq_handlers[irq] 与 g_irq_args[irq] 清零。
- * 3. 不自动 disable PLIC 源；若需屏蔽请另调 plic_disable / irq_configure。
+ * @retval pdPASS 已注销
+ * @retval pdFAIL irq 非法
+ * @note 不自动 disable PLIC 源；若需屏蔽请另调 plic_disable / irq_configure
+ * @warning 注销后 incoming 中断仍可能触发但无 handler（空操作）
+ * @attention ❌ ISR；❌ block
  */
 int cgrtos_irq_unregister(uint32_t irq)
 {
@@ -135,14 +134,14 @@ int cgrtos_irq_unregister(uint32_t irq)
 
 /**
  * @brief 查询已注册的 handler（诊断/测试用）
- *
- * @param irq 中断源编号
- *
+ * @details irq 越界返回 NULL；否则返回 g_irq_handlers[irq]（可能为 NULL 表示未注册）。
+ * @param[in] irq 中断源编号
  * @return 已注册函数指针；未注册或 irq 非法时返回 NULL
- *
- * @details
- * 1. irq 越界返回 NULL。
- * 2. 否则返回 g_irq_handlers[irq]（可能为 NULL 表示未注册）。
+ * @retval 非 NULL 已注册的 handler
+ * @retval NULL     irq 非法或未注册
+ * @note 仅供诊断与单元测试
+ * @warning 无
+ * @attention ❌ ISR；❌ block
  */
 cgrtos_irq_handler_t cgrtos_irq_get_handler(uint32_t irq)
 {
@@ -154,15 +153,13 @@ cgrtos_irq_handler_t cgrtos_irq_get_handler(uint32_t irq)
 
 /**
  * @brief 设置允许调用 FromISR 的最高中断优先级（优先级分组上界）
- *
- * @param max_prio 新上界；超过 CONFIG_IRQ_PRIORITY_MAX 时钳制到该最大值
- *
- * @details
- * 1. 将 max_prio 钳制到 ≤ CONFIG_IRQ_PRIORITY_MAX。
- * 2. 写入 g_syscall_max_prio。
- * 3. enter_critical_from_isr 使用该值作为 PLIC threshold，从而：
- *    - 屏蔽优先级 ≤ max_prio 的中断（这些中断才允许调 FromISR）；
- *    - 更高优先级仍可嵌套，但约定不得调用 FromISR。
+ * @details 将 max_prio 钳制到 ≤ CONFIG_IRQ_PRIORITY_MAX 后写入 g_syscall_max_prio；enter_critical_from_isr 使用该值作为 PLIC threshold。
+ * @param[in] max_prio 新上界；超过 CONFIG_IRQ_PRIORITY_MAX 时钳制到该最大值
+ * @return 无
+ * @retval 无
+ * @note 屏蔽优先级 ≤ max_prio 的中断（这些才允许调 FromISR）
+ * @warning 修改后已运行 ISR 的 threshold 不受影响直至下次 enter
+ * @attention ❌ ISR；❌ block
  */
 void cgrtos_irq_set_syscall_max_priority(uint32_t max_prio)
 {
@@ -176,11 +173,12 @@ void cgrtos_irq_set_syscall_max_priority(uint32_t max_prio)
 
 /**
  * @brief 读取当前 FromISR 优先级上界
- *
+ * @details 直接返回静态变量 g_syscall_max_prio，无副作用。
  * @return g_syscall_max_prio 当前值（默认 CONFIG_IRQ_SYSCALL_MAX_PRIO）
- *
- * @details
- * 1. 直接返回静态变量 g_syscall_max_prio，无副作用。
+ * @retval 0..CONFIG_IRQ_PRIORITY_MAX 当前 syscall 上界
+ * @note 只读查询
+ * @warning 无
+ * @attention ❌ ISR；❌ block
  */
 uint32_t cgrtos_irq_get_syscall_max_priority(void)
 {
@@ -189,14 +187,13 @@ uint32_t cgrtos_irq_get_syscall_max_priority(void)
 
 /**
  * @brief 将已 claim 的外部中断分发到注册 handler
- *
- * @param irq PLIC claim 返回的中断源号
- *
- * @details
- * 1. irq 为 0 或越界则直接返回（防御性）。
- * 2. 查表 g_irq_handlers[irq]；若非空则调用 h(irq, g_irq_args[irq])。
- * 3. 无 handler 时为空操作，调用方仍须 complete，避免 PLIC 卡死。
- * 4. 由 riscv_handle_external 在嵌套窗口内调用。
+ * @details irq 为 0 或越界则直接返回；查表 g_irq_handlers[irq]；若非空则调用 h(irq, g_irq_args[irq])；无 handler 时为空操作。
+ * @param[in] irq PLIC claim 返回的中断源号
+ * @return 无
+ * @retval 无
+ * @note 无 handler 时调用方仍须 complete，避免 PLIC 卡死
+ * @warning 由 riscv_handle_external 在嵌套窗口内调用
+ * @attention ✅ ISR；❌ block
  */
 void cgrtos_irq_dispatch(uint32_t irq)
 {
@@ -213,15 +210,12 @@ void cgrtos_irq_dispatch(uint32_t irq)
 
 /**
  * @brief ISR 内临界区：抬高 PLIC threshold 屏蔽 FromISR 级中断
- *
+ * @details 读取本 hart 当前 PLIC threshold 保存为 prev；将 threshold 设为 g_syscall_max_prio，屏蔽 ≤ syscall_max 的中断源。
  * @return 进入前的 threshold，必须交给 cgrtos_exit_critical_from_isr 成对恢复
- *
- * @details
- * 1. 读取本 hart 当前 PLIC threshold 保存为 prev。
- * 2. 将 threshold 设为 g_syscall_max_prio：
- *    PLIC 仅投递 priority > threshold 的源，故 ≤ syscall_max 的中断被屏蔽。
- * 3. 更高优先级中断仍可到达（若 CONFIG_IRQ_NESTING 且 MIE 打开），但不得调 FromISR。
- * 4. 与任务侧 cgrtos_enter_critical（关 MIE + g_klock）不同：本 API 只改 threshold。
+ * @retval 先前 PLIC threshold 值
+ * @note 与任务侧 cgrtos_enter_critical（关 MIE + g_klock）不同：本 API 只改 threshold
+ * @warning 必须与 exit_critical_from_isr 成对；嵌套时自行维护保存栈
+ * @attention ✅ ISR；❌ block
  */
 uint32_t cgrtos_enter_critical_from_isr(void)
 {
@@ -234,12 +228,13 @@ uint32_t cgrtos_enter_critical_from_isr(void)
 
 /**
  * @brief 退出 ISR 临界区，恢复 PLIC threshold
- *
- * @param saved_threshold 先前 enter_critical_from_isr 的返回值
- *
- * @details
- * 1. 将本 hart PLIC threshold 写回 saved_threshold。
- * 2. 必须与 enter 成对；嵌套调用时由调用方自行维护保存栈。
+ * @details 将本 hart PLIC threshold 写回 saved_threshold。
+ * @param[in] saved_threshold 先前 enter_critical_from_isr 的返回值
+ * @return 无
+ * @retval 无
+ * @note 必须与 enter 成对
+ * @warning 嵌套调用时由调用方自行维护保存栈
+ * @attention ✅ ISR；❌ block
  */
 void cgrtos_exit_critical_from_isr(uint32_t saved_threshold)
 {
@@ -248,15 +243,14 @@ void cgrtos_exit_critical_from_isr(uint32_t saved_threshold)
 
 /**
  * @brief FromISR 统一唤醒通知（woken 或自动 yield）
- *
- * @param woken      可选输出指针；非空且 need_yield 时置 *woken = pdTRUE，
- *                   由 ISR 末尾 portYIELD_FROM_ISR(woken) 请求调度
- * @param need_yield 非 0 表示本 FromISR 唤醒了可能更高优先级的任务
- *
- * @details
- * 1. need_yield==0 时立即返回（无调度请求）。
- * 2. woken 非空：仅置 *woken=pdTRUE，不直接 yield（兼容 FreeRTOS 批量 FromISR）。
- * 3. woken 为空：调用 cgrtos_sched_yield_from_isr，在 trap 返回路径切换。
+ * @details need_yield==0 时立即返回；woken 非空则置 *woken=pdTRUE；woken 为空则调用 cgrtos_sched_yield_from_isr。
+ * @param[in,out] woken      可选输出指针；非空且 need_yield 时置 *woken = pdTRUE
+ * @param[in]     need_yield 非 0 表示本 FromISR 唤醒了可能更高优先级的任务
+ * @return 无
+ * @retval 无
+ * @note woken 非空时由 ISR 末尾 portYIELD_FROM_ISR(woken) 请求调度
+ * @warning 无
+ * @attention ✅ ISR；❌ block
  */
 void cgrtos_isr_notify_woken(BaseType_t *woken, int need_yield)
 {

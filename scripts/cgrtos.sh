@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # =============================================================================
-# CG-RTOS all-in-one helper: build + QEMU + GDB + docs/sdk
+# CG-RTOS — 编译 / 运行 / clangd / 文档 统一入口
 # =============================================================================
-#   ./scripts/cgrtos.sh test|cli|stress|demo|bench
-#   ./scripts/cgrtos.sh test --gdb
-#   ./scripts/cgrtos.sh sdk              # Doxygen + sdk/ package
-#   ./scripts/cgrtos.sh help
+# 设计原则：编译与运行分离。
+#   build   → 只编译（可选生成 compile_commands.json）
+#   run     → 只运行已有 cgrtos.bin（不自动 make）
+#   test/…  → 先 build 再 run（可用 --no-build）
+#
+# 详细说明见：docs/SCRIPTS.md
 # =============================================================================
 set -euo pipefail
 
@@ -20,12 +22,16 @@ export PATH="${SYSROOT}/bin:${PATH}"
 CMD="${1:-help}"
 shift || true
 
-APP=test
+APP="${APP:-test}"
 NO_BUILD=0
+DO_CLEAN=0
+DO_COMPDB=1
 TIMEOUT_SEC="${TIMEOUT_SEC:-120}"
 GDB_PORT=1234
 WITH_GDB=0
 CORES="${CORES:-2}"
+BOARD="${BOARD:-nuclei_evalsoc}"
+PROFILE="${PROFILE:-}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -36,7 +42,12 @@ while [[ $# -gt 0 ]]; do
     --stress) APP=stress; shift ;;
     --cli) APP=cli; shift ;;
     --cores) CORES="$2"; shift 2 ;;
+    --board) BOARD="$2"; shift 2 ;;
+    --profile) PROFILE="$2"; shift 2 ;;
     --no-build) NO_BUILD=1; shift ;;
+    --clean) DO_CLEAN=1; shift ;;
+    --no-compdb) DO_COMPDB=0; shift ;;
+    --compdb-only) DO_COMPDB=1; CMD=compdb; shift ;;
     --timeout) TIMEOUT_SEC="$2"; shift 2 ;;
     --port) GDB_PORT="$2"; shift 2 ;;
     --gdb|-g) WITH_GDB=1; shift ;;
@@ -56,7 +67,6 @@ QEMU_MACHINE=(
   -cpu nuclei-ux900fd,ext=svpbmt_zicbom_sstc_sscofpmf_zba_zbb_zbc_zbs_zicond
   -nographic -serial mon:stdio
 )
-# Nuclei ROM often boots only hart0; force secondary PCs to DDR image entry
 if [[ "${CORES}" -ge 2 ]]; then
   QEMU_MACHINE+=(-device loader,addr=0xA0000000,cpu-num=1)
 fi
@@ -89,30 +99,124 @@ need_gdb() {
   fi
 }
 
-do_build() {
-  need_toolchain
-  echo "==> Building APP=${APP} CORES=${CORES}"
-  make clean
-  make all APP="${APP}" CORES="${CORES}"
-  echo "==> Built cgrtos.elf / cgrtos.bin (CONFIG_NUM_CORES=${CORES})"
+make_vars() {
+  echo "APP=${APP}" "CORES=${CORES}" "BOARD=${BOARD}" "PROFILE=${PROFILE}"
 }
 
-ensure_built() {
-  if [[ "${NO_BUILD}" -eq 0 ]]; then
-    do_build
-  elif [[ ! -f cgrtos.bin ]]; then
-    echo "ERROR: cgrtos.bin missing — build first"
+# ---------------------------------------------------------------------------
+# clangd: generate compile_commands.json via bear (preferred) or make -n
+# ---------------------------------------------------------------------------
+do_compdb() {
+  need_toolchain
+  echo "==> Generating compile_commands.json (APP=${APP} CORES=${CORES} BOARD=${BOARD})"
+  # Touch a stamp so make rebuilds enough entries; bear wraps the real compile.
+  if command -v bear >/dev/null 2>&1; then
+    # Rebuild objects under bear to refresh the DB (no link required for clangd)
+    make clean APP="${APP}" CORES="${CORES}" BOARD="${BOARD}" PROFILE="${PROFILE}" >/dev/null
+    bear --output compile_commands.json -- \
+      make all APP="${APP}" CORES="${CORES}" BOARD="${BOARD}" PROFILE="${PROFILE}"
+  else
+    echo "WARN: bear not found — writing a minimal compile_commands.json via make -n"
+    python3 - "${APP}" "${CORES}" "${BOARD}" "${PROFILE}" "${SYSROOT}" "${ROOT}" <<'PY'
+import json, os, subprocess, sys
+app, cores, board, profile, sysroot, root = sys.argv[1:7]
+env = os.environ.copy()
+env["PATH"] = f"{sysroot}/bin:" + env.get("PATH", "")
+cmd = ["make", "-n", "all", f"APP={app}", f"CORES={cores}", f"BOARD={board}", f"PROFILE={profile}"]
+out = subprocess.check_output(cmd, cwd=root, env=env, text=True, stderr=subprocess.STDOUT)
+entries = []
+cc = f"{sysroot}/bin/riscv64-unknown-linux-gnu-gcc"
+for line in out.splitlines():
+    line = line.strip()
+    if " -c " not in line or ".c" not in line:
+        continue
+    # last token ending with .c is the source
+    parts = line.split()
+    src = None
+    for p in reversed(parts):
+        if p.endswith(".c") or p.endswith(".S"):
+            src = p
+            break
+    if not src:
+        continue
+    entries.append({
+        "directory": root,
+        "command": line if line.startswith("/") or "gcc" in line else f"{cc} " + " ".join(parts[1:]) if parts[0].endswith("gcc") else line,
+        "file": os.path.join(root, src) if not os.path.isabs(src) else src,
+    })
+# Fix relative gcc in command
+for e in entries:
+    c = e["command"]
+    if c.startswith("riscv64-") or c.startswith("$(CROSS)"):
+        e["command"] = cc + " " + " ".join(c.split()[1:])
+    elif not c.startswith("/"):
+        # "gcc ..." from make uses $(CC) expanded
+        pass
+with open(os.path.join(root, "compile_commands.json"), "w") as f:
+    json.dump(entries, f, indent=2)
+    f.write("\n")
+print(f"wrote {len(entries)} entries")
+PY
+  fi
+  # Ensure .clangd points at the DB
+  if [[ ! -f .clangd ]]; then
+    cat > .clangd <<'EOF'
+CompileFlags:
+  CompilationDatabase: .
+Diagnostics:
+  UnusedIncludes: None
+Index:
+  Background: Build
+EOF
+  fi
+  echo "==> clangd: open the workspace root; compile_commands.json ready"
+  echo "    (Cursor/VS Code: reload window if index is stale)"
+}
+
+do_build() {
+  need_toolchain
+  echo "==> Building APP=${APP} CORES=${CORES} BOARD=${BOARD} PROFILE=${PROFILE:-default}"
+  if [[ "${DO_CLEAN}" -eq 1 ]]; then
+    make clean APP="${APP}" CORES="${CORES}" BOARD="${BOARD}" PROFILE="${PROFILE}"
+  fi
+  if [[ "${DO_COMPDB}" -eq 1 ]] && command -v bear >/dev/null 2>&1; then
+    # Force-rebuild under bear so compile_commands.json covers every TU (clangd)
+    echo "==> clangd: refreshing compile_commands.json via bear"
+    bear --output compile_commands.json -- \
+      make -B all APP="${APP}" CORES="${CORES}" BOARD="${BOARD}" PROFILE="${PROFILE}"
+  else
+    make all APP="${APP}" CORES="${CORES}" BOARD="${BOARD}" PROFILE="${PROFILE}"
+    if [[ "${DO_COMPDB}" -eq 1 ]]; then
+      do_compdb || true
+    fi
+  fi
+  echo "==> Built: cgrtos.elf / cgrtos.bin"
+  ls -la cgrtos.elf cgrtos.bin 2>/dev/null || true
+}
+
+require_binary() {
+  if [[ ! -f cgrtos.bin ]]; then
+    echo "ERROR: cgrtos.bin missing — compile first:"
+    echo "  ./scripts/cgrtos.sh build --app ${APP} --cores ${CORES}"
     exit 1
   fi
   if [[ "${WITH_GDB}" -eq 1 && ! -f cgrtos.elf ]]; then
-    echo "ERROR: cgrtos.elf missing (needed for GDB symbols)"
+    echo "ERROR: cgrtos.elf missing (needed for GDB)"
     exit 1
   fi
+}
+
+# Optional: build if missing / unless --no-build for convenience cmds
+ensure_built() {
+  if [[ "${NO_BUILD}" -eq 1 ]]; then
+    require_binary
+    return
+  fi
+  do_build
 }
 
 # ---------------------------------------------------------------------------
 # Open GDB (+ TUI C source) in a second window / pane.
-# Prefers: Windows Terminal (WSL) → tmux split → GUI terminal → same tty.
 # ---------------------------------------------------------------------------
 open_gdb_window() {
   need_gdb
@@ -123,7 +227,6 @@ open_gdb_window() {
 set -euo pipefail
 cd $(printf '%q' "${ROOT}")
 export PATH=$(printf '%q' "${PATH}")
-# Give QEMU a moment to bind the gdbstub
 sleep 1
 exec $(printf '%q' "${GDB}") -q -tui \\
   -ex $(printf '%q' "target remote :${GDB_PORT}") \\
@@ -132,7 +235,6 @@ exec $(printf '%q' "${GDB}") -q -tui \\
 EOF
   chmod +x "${gdb_script}"
 
-  # Allow override: CGRTOS_GDB_TERM='wt' | 'tmux' | 'xterm' | 'here'
   local prefer="${CGRTOS_GDB_TERM:-auto}"
   local launched=0
 
@@ -142,144 +244,90 @@ EOF
       "${CGRTOS_WT:-}"
       "$(command -v wt.exe 2>/dev/null || true)"
     )
-    local c
-    # Resolve WindowsApps execution alias / package install of Windows Terminal
     shopt -s nullglob
     candidates+=(
       /mnt/c/Users/*/AppData/Local/Microsoft/WindowsApps/Microsoft.WindowsTerminal_*/wt.exe
       /mnt/c/Users/*/AppData/Local/Microsoft/WindowsApps/wt.exe
     )
     shopt -u nullglob
+    local c
     for c in "${candidates[@]}"; do
-      [[ -n "${c}" && -e "${c}" ]] || continue
+      [[ -n "${c}" && -x "${c}" ]] || continue
       wt="${c}"
       break
     done
-    [[ -n "${wt}" && -n "${WSL_DISTRO_NAME:-}" ]] || return 1
-    # New Windows Terminal tab running GDB inside this WSL distro
-    "${wt}" -w 0 new-tab --title "CG-RTOS GDB (${APP})" \
-      wsl.exe -d "${WSL_DISTRO_NAME}" --cd "${ROOT}" \
-      -e bash "${gdb_script}" >/dev/null 2>&1 &
-    return 0
+    [[ -n "${wt}" ]] || return 1
+    "${wt}" new-tab --title "CG-RTOS GDB" bash "${gdb_script}" && launched=1
   }
 
   try_tmux() {
+    command -v tmux >/dev/null 2>&1 || return 1
     [[ -n "${TMUX:-}" ]] || return 1
-    tmux split-window -h "bash '${gdb_script}'; tmux wait-for -S cgrtos-gdb-done"
-    return 0
+    tmux split-window -h "bash ${gdb_script}" && launched=1
   }
 
   try_xterm() {
-    local term=""
-    for cand in gnome-terminal xfce4-terminal mate-terminal x-terminal-emulator xterm; do
-      if command -v "${cand}" >/dev/null 2>&1; then
-        term="${cand}"
-        break
-      fi
-    done
-    [[ -n "${term}" ]] || return 1
-    case "${term}" in
-      gnome-terminal|xfce4-terminal|mate-terminal)
-        "${term}" --title="CG-RTOS GDB (${APP})" -- bash "${gdb_script}" &
-        ;;
-      *)
-        "${term}" -T "CG-RTOS GDB (${APP})" -e "bash ${gdb_script}" &
-        ;;
-    esac
-    return 0
+    if command -v x-terminal-emulator >/dev/null 2>&1; then
+      x-terminal-emulator -e bash "${gdb_script}" &
+      launched=1
+      return 0
+    fi
+    if command -v gnome-terminal >/dev/null 2>&1; then
+      gnome-terminal -- bash "${gdb_script}" &
+      launched=1
+      return 0
+    fi
+    return 1
   }
 
   case "${prefer}" in
-    wt) try_wt && launched=1 ;;
-    tmux) try_tmux && launched=1 ;;
-    xterm|gui) try_xterm && launched=1 ;;
-    here) launched=0 ;;
+    wt) try_wt || true ;;
+    tmux) try_tmux || true ;;
+    xterm) try_xterm || true ;;
+    here)
+      echo "==> GDB in this terminal after QEMU starts (Ctrl-C QEMU first if stuck)"
+      bash "${gdb_script}" &
+      launched=1
+      ;;
     auto)
-      if try_wt || try_tmux || try_xterm; then
-        launched=1
-      fi
+      try_wt || try_tmux || try_xterm || {
+        echo "==> Could not open second window; GDB script: ${gdb_script}"
+        echo "    Run manually: bash ${gdb_script}"
+      }
       ;;
   esac
-
   if [[ "${launched}" -eq 1 ]]; then
-    echo "==> GDB opened in another window/pane (TUI source view)"
-    echo "    Port :${GDB_PORT}  ELF ${ROOT}/cgrtos.elf"
-    # Keep script path for the child; remove later on exit
-    GDB_LAUNCH_SCRIPT="${gdb_script}"
-    return 0
+    echo "==> GDB window launched"
   fi
-
-  # Fallback: GDB takes over this tty after QEMU is backgrounded by caller
-  echo "==> No external terminal found — GDB will use this window"
-  echo "    Tip (WSL): install Windows Terminal, or run inside tmux"
-  echo "    Or set CGRTOS_GDB_TERM=here and use two terminals manually"
-  GDB_LAUNCH_SCRIPT="${gdb_script}"
-  return 1
 }
 
-do_gdb_session() {
+do_run_qemu() {
   need_qemu
-  ensure_built
-  need_gdb
-
-  echo "==> Debug session APP=${APP}"
-  echo "    This window : QEMU UART (Ctrl-A X to quit)"
-  echo "    Other window: GDB + C source (TUI)"
-  echo ""
-
-  local gdb_here=0
-  if ! open_gdb_window; then
-    gdb_here=1
-  fi
-
-  cleanup_gdb_session() {
-    if [[ -n "${QEMU_PID:-}" ]]; then
-      kill "${QEMU_PID}" 2>/dev/null || true
-      wait "${QEMU_PID}" 2>/dev/null || true
-    fi
-    if [[ -n "${GDB_LAUNCH_SCRIPT:-}" ]]; then
-      rm -f "${GDB_LAUNCH_SCRIPT}"
-    fi
-  }
-  trap cleanup_gdb_session EXIT
-
-  if [[ "${gdb_here}" -eq 1 ]]; then
-    # Same-window fallback: QEMU background, GDB foreground
-    "${QEMU}" "${QEMU_MACHINE[@]}" -bios cgrtos.bin \
-      -gdb tcp::"${GDB_PORT}" -S &
-    QEMU_PID=$!
-    sleep 0.5
-    bash "${GDB_LAUNCH_SCRIPT}" || true
-    return 0
-  fi
-
-  # Two-window: QEMU owns this terminal (UART + stdin for CLI)
-  "${QEMU}" "${QEMU_MACHINE[@]}" -bios cgrtos.bin \
-    -gdb tcp::"${GDB_PORT}" -S
-}
-
-do_run() {
-  if [[ "${WITH_GDB}" -eq 1 ]]; then
-    do_gdb_session
-    return
-  fi
-
-  need_qemu
-  ensure_built
-
+  require_binary
+  local LOG
   LOG="$(mktemp /tmp/cgrtos-qemu.XXXXXX.log)"
-  trap 'rm -f "${LOG}"' EXIT
-
-  echo "==> QEMU APP=${APP} CORES=${CORES} timeout=${TIMEOUT_SEC}s"
+  # shellcheck disable=SC2064
+  trap "rm -f '${LOG}'" EXIT
+  echo "==> QEMU APP=${APP} CORES=${CORES} timeout=${TIMEOUT_SEC}s (no rebuild)"
+  if [[ "${WITH_GDB}" -eq 1 ]]; then
+    open_gdb_window
+    echo "==> QEMU + gdbstub :${GDB_PORT} (UART here; GDB elsewhere)"
+    "${QEMU}" "${QEMU_MACHINE[@]}" -bios cgrtos.bin -S -gdb "tcp::${GDB_PORT}" \
+      2>&1 | tee "${LOG}"
+    return "${PIPESTATUS[0]}"
+  fi
   set +e
-  timeout "${TIMEOUT_SEC}" "${QEMU}" "${QEMU_MACHINE[@]}" -bios cgrtos.bin >"${LOG}" 2>&1
-  QEMU_RC=$?
+  timeout "${TIMEOUT_SEC}" "${QEMU}" "${QEMU_MACHINE[@]}" -bios cgrtos.bin \
+    >"${LOG}" 2>&1
+  local QEMU_RC=$?
   set -e
 
+  local OUT
   OUT="$(tr -d '\r' <"${LOG}")"
   printf '%s\n' "${OUT}"
   echo ""
   echo "==> Summary"
+  local PASS_N FAIL_N BENCH_N
   PASS_N="$(printf '%s\n' "${OUT}" | grep -c '\[PASS\]' || true)"
   FAIL_N="$(printf '%s\n' "${OUT}" | grep -c '\[FAIL\]' || true)"
   BENCH_N="$(printf '%s\n' "${OUT}" | grep -c '^BENCH ' || true)"
@@ -290,192 +338,190 @@ do_run() {
       if printf '%s\n' "${OUT}" | grep -q '=== BENCH_DONE ==='; then
         echo "---- Bench ----"
         printf '%s\n' "${OUT}" | grep '^BENCH ' || true
-        echo "RESULT: BENCH_DONE"; exit 0
+        echo "RESULT: BENCH_DONE"; return 0
       fi
-      echo "RESULT: BENCH_INCOMPLETE"; exit 1
+      echo "RESULT: BENCH_INCOMPLETE"; return 1
       ;;
     stress)
       if printf '%s\n' "${OUT}" | grep -q '=== STRESS_PASSED ==='; then
-        echo "RESULT: STRESS_PASSED"; exit 0
+        echo "RESULT: STRESS_PASSED"; return 0
       fi
       if printf '%s\n' "${OUT}" | grep -q '=== STRESS_FAILED ==='; then
-        echo "RESULT: STRESS_FAILED"; exit 1
+        echo "RESULT: STRESS_FAILED"; return 1
       fi
       if [[ "${QEMU_RC}" -eq 124 ]]; then
-        echo "RESULT: TIMEOUT"; exit 1
+        echo "RESULT: TIMEOUT"; return 1
       fi
-      echo "RESULT: STRESS_INCOMPLETE (qemu rc=${QEMU_RC})"; exit 1
+      echo "RESULT: STRESS_INCOMPLETE (qemu rc=${QEMU_RC})"; return 1
       ;;
     demo)
       if printf '%s\n' "${OUT}" | grep -q '\[T1\] LED OFF'; then
-        echo "RESULT: DEMO_OK"; exit 0
+        echo "RESULT: DEMO_OK"; return 0
       fi
-      echo "RESULT: DEMO_INCOMPLETE"; exit 1
+      echo "RESULT: DEMO_INCOMPLETE"; return 1
       ;;
-    *)
+    test|*)
       if printf '%s\n' "${OUT}" | grep -q '=== TEST_SUITE_PASSED ==='; then
-        echo "RESULT: TEST_SUITE_PASSED"; exit 0
+        echo "RESULT: TEST_SUITE_PASSED"; return 0
       fi
-      # Suite may print Results before the marker; accept that too
       if printf '%s\n' "${OUT}" | grep -qE 'Results: [0-9]+ passed, 0 failed'; then
-        echo "RESULT: TEST_SUITE_PASSED"; exit 0
+        echo "RESULT: TEST_SUITE_PASSED"; return 0
       fi
       if printf '%s\n' "${OUT}" | grep -q '=== TEST_SUITE_FAILED ==='; then
-        echo "RESULT: TEST_SUITE_FAILED"; exit 1
+        echo "RESULT: TEST_SUITE_FAILED"; return 1
       fi
       if [[ "${QEMU_RC}" -eq 124 ]]; then
-        echo "RESULT: TIMEOUT"; exit 1
+        echo "RESULT: TIMEOUT"; return 1
       fi
-      echo "RESULT: NO_SUITE_MARKER (qemu rc=${QEMU_RC})"; exit 1
+      echo "RESULT: NO_SUITE_MARKER (qemu rc=${QEMU_RC})"; return 1
       ;;
   esac
 }
 
-do_gdb() {
-  # Legacy entry: ./scripts/cgrtos.sh gdb [--app X]
-  WITH_GDB=1
-  do_gdb_session
+do_run() {
+  # Pure run: never builds. Convenience apps call ensure_built before this.
+  do_run_qemu
 }
 
 do_cli() {
   APP=cli
-  if [[ "${WITH_GDB}" -eq 1 ]]; then
-    do_gdb_session
-    return
-  fi
-
-  need_qemu
   ensure_built
-
-  echo "==> Interactive CLI (Ctrl-A X to quit QEMU)"
-  echo "    Commands: help | list | run <case>|all|stress | stats | heap | cores"
-  echo "    Debug:    ./scripts/cgrtos.sh cli --gdb"
-  echo ""
-  # Keep stdin/stdout attached — do not capture or timeout.
+  need_qemu
+  require_binary
+  echo "==> CLI (interactive). Exit QEMU: Ctrl-A then X"
+  if [[ "${WITH_GDB}" -eq 1 ]]; then
+    open_gdb_window
+    exec "${QEMU}" "${QEMU_MACHINE[@]}" -bios cgrtos.bin -S -gdb "tcp::${GDB_PORT}"
+  fi
   exec "${QEMU}" "${QEMU_MACHINE[@]}" -bios cgrtos.bin
+}
+
+do_gdb() {
+  WITH_GDB=1
+  ensure_built
+  do_run_qemu
 }
 
 do_docs() {
   if ! command -v doxygen >/dev/null 2>&1; then
-    echo "ERROR: doxygen not installed. Try: sudo apt install doxygen graphviz"
+    echo "ERROR: doxygen not installed"
     exit 1
   fi
-  echo "==> Generating Doxygen HTML -> docs/doxygen/html/"
-  rm -rf "${ROOT}/docs/doxygen"
-  (cd "${ROOT}" && doxygen Doxyfile)
-  local index="${ROOT}/docs/doxygen/html/index.html"
-  if [[ ! -f "${index}" ]]; then
-    echo "ERROR: Doxygen failed (missing ${index})"
-    exit 1
-  fi
-  echo "==> Done: ${index}"
-  echo "    Open with: xdg-open ${index}   # or browse file://${index}"
+  doxygen Doxyfile
+  echo "==> docs/doxygen/html/index.html"
 }
 
-# Package a minimal application SDK: public header + API HTML docs.
 do_sdk() {
   do_docs
   local sdk="${ROOT}/sdk"
-  echo "==> Packaging SDK -> ${sdk}/"
   rm -rf "${sdk}"
-  mkdir -p "${sdk}/include" "${sdk}/include/hal" "${sdk}/docs"
-  cp -a "${ROOT}/kernel/cgrtos.h" "${sdk}/include/cgrtos.h"
-  cp -a "${ROOT}/kernel/list.h" "${sdk}/include/list.h"
-  cp -a "${ROOT}/hal/hal.h" "${sdk}/include/hal/hal.h"
-  cp -a "${ROOT}/hal/hal_board.h" "${sdk}/include/hal/hal_board.h"
-  # Lightweight HTML tree copy (already generated under docs/doxygen)
-  cp -a "${ROOT}/docs/doxygen/html" "${sdk}/docs/api"
+  mkdir -p "${sdk}/include/hal" "${sdk}/docs"
+  cp -a kernel/cgrtos.h kernel/cgrtos_config.h kernel/list.h kernel/vfs.h "${sdk}/include/" 2>/dev/null || \
+    cp -a kernel/cgrtos.h kernel/cgrtos_config.h kernel/list.h "${sdk}/include/"
+  cp -a hal/hal.h hal/hal_board.h hal/hal_drv.h "${sdk}/include/hal/" 2>/dev/null || true
+  if [[ -d docs/doxygen/html ]]; then
+    cp -a docs/doxygen/html "${sdk}/docs/api"
+  fi
   cat >"${sdk}/README.md" <<'EOF'
-# CG-RTOS Application SDK
+# CG-RTOS SDK
 
-本目录由 `./scripts/cgrtos.sh sdk` 生成，供应用侧引用公开 API。
+| Path | Content |
+|------|---------|
+| `include/cgrtos.h` | Public kernel API |
+| `include/cgrtos_config.h` | Feature / capacity knobs |
+| `include/hal/` | HAL headers |
+| `docs/api/index.html` | Doxygen |
 
-## 内容
-
-| 路径 | 说明 |
-|------|------|
-| `include/cgrtos.h` | 内核公共 API（会 `#include "hal/hal.h"`） |
-| `include/hal/hal.h` | 统一驱动框架 + 用户 HAL API |
-| `include/hal/hal_board.h` | Nuclei evalsoc 板级 MMIO |
-| `include/list.h` | `cgrtos.h` 依赖 |
-| `docs/api/index.html` | Doxygen API 文档（浏览器打开） |
-
-## 使用
-
-```c
-#include "cgrtos.h"
-/* 新代码也可用：#include "hal/hal.h" */
-
-void demo(void) {
-    hal_console_puts("hello HAL\n");
-    cgrtos_printf("mtime=%lx\n", (unsigned long)hal_mtime_read());
-}
-```
-
-编译时增加 `-I<path-to-sdk>/include`，并链入本仓库构建的内核目标（见仓库根 `Makefile` / `docs/USER_GUIDE.md`）。
-
-完整使用指南：仓库 `docs/USER_GUIDE.md`。
+See repository `docs/USER_GUIDE.md` and `docs/SCRIPTS.md`.
 EOF
-  echo "==> SDK ready: ${sdk}/include/cgrtos.h"
-  echo "               ${sdk}/include/hal/hal.h"
-  echo "               ${sdk}/docs/api/index.html"
+  echo "==> SDK ready under sdk/"
 }
 
 print_help() {
   cat <<'EOF'
-CG-RTOS helper — build / run / debug / docs / sdk
+CG-RTOS — build and run are separate
 
 Usage:
   ./scripts/cgrtos.sh <command> [options]
 
-Commands:
-  build     Compile only (--app demo|test|bench|stress|cli)
-  run       Build (unless --no-build) and run in QEMU
-  test      Feature suite (APP=test) → expect TEST_SUITE_PASSED
-  demo      Blinky / IPC demo
-  bench     Microbenchmarks (default timeout 30s)
-  stress    Concurrent stress (default timeout 60s; not in run all)
-  cli       Interactive UART CLI (list / run <case>)
-  gdb       Same as <app> --gdb (default APP=test)
-  docs      Regenerate Doxygen HTML → docs/doxygen/html/
-  sdk       docs + package sdk/ (include/cgrtos.h + docs/api/)
-  help      This message
+── Compile only ──────────────────────────────────────────
+  build       Compile APP → cgrtos.elf / cgrtos.bin
+              Also refreshes compile_commands.json (clangd) unless --no-compdb
+  compdb      Only regenerate compile_commands.json for clangd
+
+── Run only (requires prior build) ───────────────────────
+  run         Boot existing cgrtos.bin in QEMU (never runs make)
+
+── Convenience (build then run) ──────────────────────────
+  test        build --app test  && run
+  demo        build --app demo  && run
+  bench       build --app bench && run   (timeout default 30s)
+  stress      build --app stress&& run   (timeout default 60s)
+  cli         build --app cli   && interactive QEMU
+  gdb         build + QEMU(-S) + GDB TUI
+
+── Docs ──────────────────────────────────────────────────
+  docs        Doxygen → docs/doxygen/html/
+  sdk         docs + package sdk/
+  help        This message
 
 Options:
-  --app NAME     demo | test | bench | stress | cli
-  --cores N      Hart count: 1 | 2 | 4 (default 2; sets -DCONFIG_NUM_CORES and QEMU -smp)
-  --gdb | -g     This window = QEMU UART; other window = GDB TUI (C source)
-  --no-build     Skip make; reuse existing binary
-  --timeout SEC  QEMU wall timeout (default 120; stress 60; ignored with --gdb)
-  --port N       GDB stub port (default 1234)
+  --app NAME       demo | test | bench | stress | cli
+  --cores N        1 | 2 | 4 (default 2)
+  --board NAME     BSP under boards/ (default nuclei_evalsoc)
+  --profile NAME   e.g. minimal → -DCGRTOS_CONFIG_MINIMAL=1
+  --clean          make clean before build
+  --no-compdb      skip compile_commands.json on build
+  --no-build       skip make for convenience cmds (use existing binary)
+  --gdb | -g       QEMU gdbstub + second-window GDB TUI
+  --timeout SEC    QEMU wall timeout (default 120)
+  --port N         GDB port (default 1234)
 
 Examples:
-  ./scripts/cgrtos.sh test
-  ./scripts/cgrtos.sh test --cores 1
-  ./scripts/cgrtos.sh test --cores 4
-  ./scripts/cgrtos.sh cli                 # then: list / run streambuf / run fs
-  ./scripts/cgrtos.sh test --gdb
-  ./scripts/cgrtos.sh sdk                 # refresh API SDK + Doxygen
+  # 1) Compile for clangd + tests
+  ./scripts/cgrtos.sh build --app test --cores 2 --clean
 
-Environment:
-  SYSROOT          RISC-V toolchain prefix
-  QEMU             qemu-system-riscv64 path
-  GDB              gdb path
-  CORES            default hart count if --cores omitted (1|2|4)
-  CGRTOS_GDB_TERM  auto|wt|tmux|xterm|here
+  # 2) Run without rebuilding
+  ./scripts/cgrtos.sh run --app test --cores 2 --timeout 180
 
-See docs/USER_GUIDE.md for the full guide.
+  # 3) One-shot suite
+  ./scripts/cgrtos.sh test --cores 2
+
+  # 4) Minimal trim compile
+  ./scripts/cgrtos.sh build --app demo --cores 1 --profile minimal
+
+  # 5) Refresh clangd DB only
+  ./scripts/cgrtos.sh compdb --app test --cores 2
+
+Environment: SYSROOT, QEMU, GDB, CORES, BOARD, PROFILE, CGRTOS_GDB_TERM
+
+Full guide: docs/SCRIPTS.md
 EOF
 }
 
 case "${CMD}" in
   help|-h|--help) print_help ;;
   build) do_build ;;
-  run) do_run ;;
-  test) APP=test; do_run ;;
-  demo) APP=demo; do_run ;;
-  bench) APP=bench; TIMEOUT_SEC="${TIMEOUT_SEC:-30}"; do_run ;;
-  stress) APP=stress; TIMEOUT_SEC="${TIMEOUT_SEC:-60}"; do_run ;;
+  compdb) do_compdb ;;
+  run)
+    # Pure run — no make
+    do_run
+    ;;
+  test) APP=test; ensure_built; do_run ;;
+  demo) APP=demo; ensure_built; do_run ;;
+  bench)
+    APP=bench
+    # Only override default 120 if user did not pass --timeout
+    if [[ "${TIMEOUT_SEC}" == "120" ]]; then TIMEOUT_SEC=30; fi
+    ensure_built
+    do_run
+    ;;
+  stress)
+    APP=stress
+    if [[ "${TIMEOUT_SEC}" == "120" ]]; then TIMEOUT_SEC=60; fi
+    ensure_built
+    do_run
+    ;;
   cli) do_cli ;;
   gdb) do_gdb ;;
   docs) do_docs ;;

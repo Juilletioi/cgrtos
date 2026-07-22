@@ -1,6 +1,10 @@
 /**
  * @file clint.c
  * @brief Nuclei SysTimer / CLINT 定时器驱动（纯硬件层）
+ * @author Cong Zhou / Juilletioi
+ * @version 5.0.0
+ * @date 2026-07-22
+ * @copyright CG-RTOS
  *
  * @details
  * - 提供 timer ops；trap 入口 riscv_handle_timer 直接调本文件静态例程。
@@ -20,7 +24,16 @@ extern void cgrtos_isr_exit(void);
 
 /**
  * @brief 读 mtime 自由运行计数器
- * @details 步骤：1. volatile 读 HAL_BOARD_MTIME_ADDR；2. 返回 64 位值。
+ * @details
+ * 1. volatile 读 HAL_BOARD_MTIME_ADDR。
+ * 2. 返回 64 位计数值。
+ * @param[in] dev 设备描述符；本驱动未使用
+ * @return 当前 mtime 计数值
+ * @retval >=0 有效计数
+ * @note 只读 MMIO，可在任意上下文无锁调用
+ * @warning 无
+ * @attention ✅ ISR；❌ 不阻塞
+ * @internal
  */
 static uint64_t clint_hw_mtime_read(hal_device_t *dev)
 {
@@ -29,12 +42,18 @@ static uint64_t clint_hw_mtime_read(hal_device_t *dev)
 }
 
 /**
- * @brief 写本 hart mtimecmp 并 fence
- *
- * @details 步骤：
- * 1. 按 hartid 计算 MTIMECMP 地址。
- * 2. 写入比较值。
- * 3. fence iorw 保证对后续 mtime 可见。
+ * @brief 写本 hart 的 mtimecmp 并执行内存屏障
+ * @details
+ * 1. 按 hartid 计算 MTIMECMP 寄存器地址。
+ * 2. 写入比较值 val。
+ * 3. fence iorw 保证对后续 mtime 读可见。
+ * @param[in] hartid 目标 hart 编号
+ * @param[in] val    新的 mtimecmp 比较值
+ * @return 无
+ * @note 内联函数，供 clint_schedule_next 与 ISR 路径调用
+ * @warning hartid 须合法且对应已映射的 MTIMECMP
+ * @attention ✅ ISR；❌ 不阻塞
+ * @internal
  */
 static inline void mtimecmp_write(uint64_t hartid, uint64_t val)
 {
@@ -43,12 +62,17 @@ static inline void mtimecmp_write(uint64_t hartid, uint64_t val)
 }
 
 /**
- * @brief 按 CONFIG 频率预约下一次 MTIP
- *
- * @details 步骤：
+ * @brief 按 CONFIG 频率预约下一次 MTIP 中断
+ * @details
  * 1. tpi = TIMER_CLOCK_HZ / TICK_RATE_HZ（至少 1）。
  * 2. now = mtime；写入 mtimecmp = now + tpi。
  * 3. 若写后 mtime 已越过比较值，基于最新 mtime 重写，避免丢中断。
+ * @param[in] hartid 本 hart 编号
+ * @return 无
+ * @note 由 init 与 riscv_handle_timer 调用
+ * @warning 依赖 CONFIG_TIMER_CLOCK_HZ 与 CONFIG_TICK_RATE_HZ 正确配置
+ * @attention ✅ ISR；❌ 不阻塞
+ * @internal
  */
 static void clint_schedule_next(uint64_t hartid)
 {
@@ -64,15 +88,19 @@ static void clint_schedule_next(uint64_t hartid)
 }
 
 /**
- * @brief 本 hart 定时器 init
- *
- * @param tick_hz 期望频率（板级可忽略，用 CONFIG_TICK_RATE_HZ）
+ * @brief 本 hart 定时器硬件初始化
+ * @details
+ * 1. 忽略 tick_hz（当前实现以 CONFIG_TICK_RATE_HZ 为准）。
+ * 2. clint_schedule_next(本 hart) 预约首次 tick。
+ * 3. 打开 mie.MTIE 使能本地定时器中断。
+ * @param[in] dev     设备描述符；本驱动未使用
+ * @param[in] tick_hz 期望频率；板级可忽略
  * @return HAL_OK
- *
- * @details 步骤：
- * 1. 忽略或记录 tick_hz（当前实现以 CONFIG 为准）。
- * 2. clint_schedule_next(本 hart)。
- * 3. 打开 mie.MTIE。
+ * @retval HAL_OK 成功
+ * @note 由 HAL hal_timer_init 经 ops->init 调用
+ * @warning 驱动层禁止调用 hal_* 用户 API
+ * @attention ❌ ISR；❌ 不阻塞
+ * @internal
  */
 static hal_status_t clint_hw_init(hal_device_t *dev, uint32_t tick_hz)
 {
@@ -97,19 +125,34 @@ static hal_device_t s_clint_dev = {
     .flags     = 0,
 };
 
+/**
+ * @brief 向 HAL 导出 CLINT/SysTimer 设备描述符
+ * @details
+ * 1. 返回静态 s_clint_dev 指针。
+ * 2. 注册由 hal_board_init → hal_device_register 完成。
+ * @return 非 NULL 静态设备指针；生命周期 = 系统寿命
+ * @retval 非 NULL 成功
+ * @note 勿释放返回值；应用应使用 hal_timer_init / hal_mtime_read
+ * @warning 驱动不得自行调用 hal_device_register
+ * @attention ✅ ISR；❌ 不阻塞
+ */
 hal_device_t *drv_clint_device(void)
 {
     return &s_clint_dev;
 }
 
 /**
- * @brief 机器定时器中断 C 入口（底层：直调驱动，不经 HAL）
- *
- * @details 步骤：
- * 1. cgrtos_isr_enter。
- * 2. 重载本 hart mtimecmp。
+ * @brief 机器定时器中断 C 入口（底层直调驱动，不经 HAL）
+ * @details
+ * 1. cgrtos_isr_enter 标记 ISR 上下文。
+ * 2. clint_schedule_next 重载本 hart mtimecmp。
  * 3. cgrtos_tick_handler 推进内核 tick。
- * 4. cgrtos_isr_exit。
+ * 4. cgrtos_isr_exit 退出 ISR 上下文。
+ * @param[in] f 陷阱栈帧指针；本实现未使用
+ * @return 无
+ * @note 由 startup.S / trap 向量直接调用；禁止再绕回 hal_timer_*
+ * @warning 须在中断上下文调用；不可从任务直接调用
+ * @attention ✅ ISR；❌ 不阻塞
  */
 void riscv_handle_timer(uint64_t *f)
 {

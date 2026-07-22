@@ -21,6 +21,10 @@ export PATH := $(SYSROOT)/bin:$(PATH)
 APP     ?= demo
 # Logical hart count: 1 | 2 | 4 (default 2 preserves historical dual-core behaviour)
 CORES   ?= 2
+# Board BSP dir (hal_board include path)
+BOARD   ?= nuclei_evalsoc
+# PROFILE=minimal → -DCGRTOS_CONFIG_MINIMAL=1
+PROFILE ?=
 ifeq ($(filter $(CORES),1 2 4),)
   $(error CORES must be 1, 2, or 4 (got '$(CORES)'))
 endif
@@ -28,7 +32,7 @@ endif
 ifeq ($(APP),test)
   APP_SRCS := tests/test_all.c tests/test_cases.c tests/stress_cases.c
 else ifeq ($(APP),cli)
-  APP_SRCS := tests/cli_main.c tests/test_cases.c tests/stress_cases.c
+  APP_SRCS := tests/cli_main.c tests/cli_fs.c tests/test_cases.c tests/stress_cases.c
 else ifeq ($(APP),bench)
   APP_SRCS := tests/bench_all.c
 else ifeq ($(APP),stress)
@@ -42,7 +46,11 @@ CFLAGS  := -march=rv64imafdc -mabi=lp64d -mcmodel=medany \
            -fno-stack-protector -O2 -g -Wall \
            -DCONFIG_NUM_CORES=$(CORES) \
            -I$(SYSROOT)/riscv64-unknown-linux-gnu/sysroot/usr/include \
-           -I. -Ikernel -Ihal
+           -I. -Ikernel -Ihal -Iboards/$(BOARD)
+# PROFILE=minimal trims optional features (see kernel/cgrtos_config.h)
+ifeq ($(PROFILE),minimal)
+  CFLAGS += -DCGRTOS_CONFIG_MINIMAL=1
+endif
 LDFLAGS := -nostdlib -nostartfiles -ffreestanding -T cgrtos.lds
 LIBGCC  := -lgcc
 
@@ -116,10 +124,10 @@ clean:
 
 info:
 	@echo "CG-RTOS for Nuclei UX900"
-	@echo "APP=$(APP)"
+	@echo "APP=$(APP) CORES=$(CORES) BOARD=$(BOARD) PROFILE=$(PROFILE)"
 	@echo "CC=$(CC)"
 	@echo "SRCS=$(SRCS)"
-	@echo "See docs/USER_GUIDE.md"
+	@echo "Scripts: docs/SCRIPTS.md  |  ./scripts/build.sh  ./scripts/run.sh"
 
 dump: cgrtos.elf
 	$(OBJDUMP) -d cgrtos.elf | head -100

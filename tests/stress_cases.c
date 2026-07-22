@@ -1,10 +1,14 @@
 /**
  * @file stress_cases.c
  * @brief CG-RTOS 全 feature 并发压力测试实现
+ * @author Cong Zhou / Juilletioi
+ * @version 5.0.0
+ * @date 2026-07-22
+ * @copyright CG-RTOS
  *
+ * @details
  * 同时压测：SMP / RR·CFS·EDF·Hybrid·Priority / sem·mutex·queue·event·notify /
  * 软定时器 / TLSF / 延时超时 / 亲和与负载均衡 / 挂起恢复删除 / 临界区。
- *
  * 由 APP=stress 或 CLI `run stress` 调用 stress_run()。
  */
 #include "../kernel/cgrtos.h"
@@ -55,6 +59,18 @@ static cgrtos_event_group_t *g_eg;
 static cgrtos_task_t *g_notify_tgt[N_NOTIFY];
 static cgrtos_timer_t *g_tmrs[N_TIMERS];
 
+/**
+ * @brief 记录单条压力断言结果并更新全局 pass/fail 计数
+ * @details cond 为真打印 [PASS] 并递增 g_pass，否则 [FAIL] 并递增 g_fail。
+ * @param[in] name 断言描述字符串
+ * @param[in] cond 条件（非零为通过）
+ * @return 无
+ * @retval 无
+ * @note 供 stress_run 内各 expect 调用复用
+ * @warning 多任务并发调用计数无原子保护
+ * @attention ❌ ISR 勿依赖打印副作用；❌ 不阻塞
+ * @internal
+ */
 static void expect(const char *name, int cond)
 {
     if (cond) {
@@ -66,6 +82,16 @@ static void expect(const char *name, int cond)
     }
 }
 
+/**
+ * @brief 按当前 hart 递增对应核命中计数
+ * @details 读 mhartid；hart0 递增 g_core0_hits，否则递增 g_core1_hits。
+ * @return 无
+ * @retval 无
+ * @note 各 worker 热路径调用以验证 SMP 调度
+ * @warning 无
+ * @attention ✅ 任意任务上下文；❌ 不阻塞
+ * @internal
+ */
 static void bump_core(void)
 {
     if ((uint8_t)read_csr(mhartid) == 0) {
@@ -75,6 +101,16 @@ static void bump_core(void)
     }
 }
 
+/**
+ * @brief 等待全局停止标志后永久 yield 以便 runner 删除
+ * @details 轮询 g_stop，期间 cgrtos_delay_ms(20)；置位后进入无限 yield 循环。
+ * @return 无（永不返回）
+ * @retval 无
+ * @note worker 退出主循环后调用，避免自删竞态
+ * @warning 依赖 runner 提升优先级并 task_delete
+ * @attention ❌ ISR；✅ 阻塞 delay/yield
+ * @internal
+ */
 static void wait_until_stop(void)
 {
     while (!g_stop) {
@@ -88,6 +124,17 @@ static void wait_until_stop(void)
 
 /* ---------------- workers ---------------- */
 
+/**
+ * @brief RR 调度压力 worker：忙算 + yield 循环
+ * @details 直至 g_stop：bump_core、递增 g_rr_ops、短循环算术、cgrtos_task_yield。
+ * @param[in] arg 未使用
+ * @return 无（经 wait_until_stop 永不返回）
+ * @retval 无
+ * @note 由 stress_run 以 SCHED_RR 创建
+ * @warning 无
+ * @attention ❌ ISR；✅ yield
+ * @internal
+ */
 static void rr_worker(void *arg)
 {
     (void)arg;
@@ -104,6 +151,17 @@ static void rr_worker(void *arg)
     wait_until_stop();
 }
 
+/**
+ * @brief CFS 调度压力 worker：仅 yield 循环
+ * @details 直至 g_stop：bump_core、递增 g_cfs_ops、cgrtos_task_yield。
+ * @param[in] arg 未使用
+ * @return 无（经 wait_until_stop 永不返回）
+ * @retval 无
+ * @note 双核时通常亲和 hart1
+ * @warning 单核下可能被 PRI 饿死（stress 软通过）
+ * @attention ❌ ISR；✅ yield
+ * @internal
+ */
 static void cfs_worker(void *arg)
 {
     (void)arg;
@@ -115,6 +173,17 @@ static void cfs_worker(void *arg)
     wait_until_stop();
 }
 
+/**
+ * @brief EDF 周期任务 worker：设 deadline 并校验是否错过
+ * @details arg 为周期 tick；循环设 period/deadline、短算术、按时 delay 或计 miss。
+ * @param[in] arg 周期 tick 数（uintptr_t 传递；最小钳制为 5）
+ * @return 无（经 wait_until_stop 永不返回）
+ * @retval 无
+ * @note 成功计 g_edf_ok，超时计 g_edf_miss
+ * @warning deadline 设置依赖 self 有效
+ * @attention ❌ ISR；✅ delay/set_deadline
+ * @internal
+ */
 static void edf_worker(void *arg)
 {
     tick_t period = (tick_t)(uintptr_t)arg;
@@ -152,6 +221,17 @@ static void edf_worker(void *arg)
     wait_until_stop();
 }
 
+/**
+ * @brief Hybrid 调度 worker：RT 分支 delay，非 RT 分支 yield
+ * @details arg 非零走 cgrtos_delay(1)，否则 cgrtos_task_yield；递增 g_hyb_ops。
+ * @param[in] arg RT 标志（uintptr_t：0=非 RT，非 0=RT）
+ * @return 无（经 wait_until_stop 永不返回）
+ * @retval 无
+ * @note hyb0 使用高于 RT 阈值的 prio
+ * @warning RT 路径占用 CPU 时间片
+ * @attention ❌ ISR；✅ delay/yield
+ * @internal
+ */
 static void hybrid_worker(void *arg)
 {
     int rt = (int)(uintptr_t)arg;
@@ -167,6 +247,17 @@ static void hybrid_worker(void *arg)
     wait_until_stop();
 }
 
+/**
+ * @brief 信号量生产者 worker：循环 give
+ * @details 索引 arg 取 g_sem[idx]；成功 give 递增 g_sem_ops 后 yield。
+ * @param[in] arg 信号量对索引（uintptr_t）
+ * @return 无（经 wait_until_stop 永不返回）
+ * @retval 无
+ * @note 与 sem_cons 成对压测
+ * @warning 无
+ * @attention ❌ ISR；✅ sem API/yield
+ * @internal
+ */
 static void sem_prod(void *arg)
 {
     uintptr_t idx = (uintptr_t)arg;
@@ -181,6 +272,17 @@ static void sem_prod(void *arg)
     wait_until_stop();
 }
 
+/**
+ * @brief 信号量消费者 worker：带超时 take
+ * @details 索引 arg 取 g_sem[idx]；take 5ms 超时成功则递增 g_sem_ops。
+ * @param[in] arg 信号量对索引（uintptr_t）
+ * @return 无（经 wait_until_stop 永不返回）
+ * @retval 无
+ * @note stop 阶段 runner 会额外 give 以唤醒
+ * @warning 无
+ * @attention ❌ ISR；✅ 阻塞 take
+ * @internal
+ */
 static void sem_cons(void *arg)
 {
     uintptr_t idx = (uintptr_t)arg;
@@ -194,6 +296,17 @@ static void sem_cons(void *arg)
     wait_until_stop();
 }
 
+/**
+ * @brief 队列生产者 worker：循环 send uint32_t
+ * @details 索引 arg 取 g_q[idx]；send 成功递增 g_q_ops 并 bump 本地 v。
+ * @param[in] arg 队列对索引（uintptr_t）
+ * @return 无（经 wait_until_stop 永不返回）
+ * @retval 无
+ * @note 与 q_cons 成对压测
+ * @warning 无
+ * @attention ❌ ISR；✅ 队列 send（可能阻塞）
+ * @internal
+ */
 static void q_prod(void *arg)
 {
     uintptr_t idx = (uintptr_t)arg;
@@ -209,6 +322,17 @@ static void q_prod(void *arg)
     wait_until_stop();
 }
 
+/**
+ * @brief 队列消费者 worker：带超时 receive
+ * @details 索引 arg 取 g_q[idx]；receive 成功递增 g_q_ops。
+ * @param[in] arg 队列对索引（uintptr_t）
+ * @return 无（经 wait_until_stop 永不返回）
+ * @retval 无
+ * @note stop 阶段 runner 会 poke 空消息唤醒
+ * @warning 无
+ * @attention ❌ ISR；✅ 阻塞 receive
+ * @internal
+ */
 static void q_cons(void *arg)
 {
     uintptr_t idx = (uintptr_t)arg;
@@ -223,6 +347,17 @@ static void q_cons(void *arg)
     wait_until_stop();
 }
 
+/**
+ * @brief 互斥锁压力 worker：加锁临界区算术后解锁
+ * @details lock 10ms 超时；持锁短循环后 unlock 并递增 g_mtx_ops。
+ * @param[in] arg 未使用
+ * @return 无（经 wait_until_stop 永不返回）
+ * @retval 无
+ * @note 共享全局 g_mtx
+ * @warning 锁竞争可能导致部分轮次 lock 超时
+ * @attention ❌ ISR；✅ 阻塞 lock
+ * @internal
+ */
 static void mtx_worker(void *arg)
 {
     (void)arg;
@@ -242,6 +377,17 @@ static void mtx_worker(void *arg)
     wait_until_stop();
 }
 
+/**
+ * @brief 事件组等待 worker：wait_bits 位 0x1
+ * @details 8ms 超时 wait；收到 0x1 递增 g_evt_ops。
+ * @param[in] arg 未使用
+ * @return 无（经 wait_until_stop 永不返回）
+ * @retval 无
+ * @note 与 evt_setter 成对
+ * @warning 无
+ * @attention ❌ ISR；✅ wait_bits 阻塞
+ * @internal
+ */
 static void evt_waiter(void *arg)
 {
     (void)arg;
@@ -256,6 +402,17 @@ static void evt_waiter(void *arg)
     wait_until_stop();
 }
 
+/**
+ * @brief 事件组置位 worker：周期 set 0x1
+ * @details 循环 set 0x1、递增 g_evt_ops、cgrtos_delay(2)。
+ * @param[in] arg 未使用
+ * @return 无（经 wait_until_stop 永不返回）
+ * @retval 无
+ * @note 与 evt_waiter 成对
+ * @warning 无
+ * @attention ❌ ISR；✅ delay/set
+ * @internal
+ */
 static void evt_setter(void *arg)
 {
     (void)arg;
@@ -268,6 +425,17 @@ static void evt_setter(void *arg)
     wait_until_stop();
 }
 
+/**
+ * @brief task notify 等待 worker
+ * @details notify_wait 8ms 超时；成功递增 g_notify_ops。
+ * @param[in] arg 索引（未使用，仅传递）
+ * @return 无（经 wait_until_stop 永不返回）
+ * @retval 无
+ * @note 与 notify_sender 成对
+ * @warning 无
+ * @attention ❌ ISR；✅ 阻塞 notify_wait
+ * @internal
+ */
 static void notify_waiter(void *arg)
 {
     uintptr_t idx = (uintptr_t)arg;
@@ -282,6 +450,17 @@ static void notify_waiter(void *arg)
     wait_until_stop();
 }
 
+/**
+ * @brief task notify 发送 worker
+ * @details 向 g_notify_tgt[idx] 发送 eIncrement notify 并递增 g_notify_ops。
+ * @param[in] arg 目标索引（uintptr_t）
+ * @return 无（经 wait_until_stop 永不返回）
+ * @retval 无
+ * @note 目标句柄由 stress_run 在创建后填充
+ * @warning tgt 为 NULL 时跳过发送
+ * @attention ❌ ISR；✅ yield/notify
+ * @internal
+ */
 static void notify_sender(void *arg)
 {
     uintptr_t idx = (uintptr_t)arg;
@@ -297,6 +476,17 @@ static void notify_sender(void *arg)
     wait_until_stop();
 }
 
+/**
+ * @brief 堆分配 churn worker：轮转 malloc/free
+ * @details 固定槽 HEAP_CHURN_MAX；按 seed 变化尺寸分配，退出前释放残留。
+ * @param[in] arg 分配尺寸种子（uintptr_t）
+ * @return 无（经 wait_until_stop 永不返回）
+ * @retval 无
+ * @note 每 8 次 op yield 一次
+ * @warning 失败 malloc 仍计 op；勿在 ISR 调用堆 API
+ * @attention ❌ ISR；✅ 堆 API/yield
+ * @internal
+ */
 static void heap_churn(void *arg)
 {
     uintptr_t seed = (uintptr_t)arg;
@@ -332,12 +522,34 @@ static void heap_churn(void *arg)
     wait_until_stop();
 }
 
+/**
+ * @brief 软定时器压力回调：递增 g_tmr_fires
+ * @details 定时器 daemon 上下文调用；原子递增计数。
+ * @param[in] arg 未使用
+ * @return 无
+ * @retval 无
+ * @note 由 stress_run 创建 N_TIMERS 个周期定时器
+ * @warning 须保持短小，勿阻塞
+ * @attention ✅ 定时器 daemon 上下文；❌ 非 ISR 直调
+ * @internal
+ */
 static void timer_cb(void *arg)
 {
     (void)arg;
     __atomic_fetch_add(&g_tmr_fires, 1, __ATOMIC_RELAXED);
 }
 
+/**
+ * @brief 占位 worker：仅 delay 循环
+ * @details life_cycle 创建的临时任务入口；bump_core 后 cgrtos_delay(4)。
+ * @param[in] arg 未使用
+ * @return 无（经 wait_until_stop 永不返回）
+ * @retval 无
+ * @note 供 life_cycle 反复 create/delete
+ * @warning 无
+ * @attention ❌ ISR；✅ delay
+ * @internal
+ */
 static void nop_worker(void *arg)
 {
     (void)arg;
@@ -348,6 +560,17 @@ static void nop_worker(void *arg)
     wait_until_stop();
 }
 
+/**
+ * @brief 任务生命周期压力 worker：create/suspend/resume/delete
+ * @details 最多 LIFE_MAX_OPS 次：创建 nop_worker、改 prio/affinity、delete。
+ * @param[in] arg 未使用
+ * @return 无（经 wait_until_stop 永不返回）
+ * @retval 无
+ * @note 每次迭代 delay_ms(40) 降低 UART 日志开销
+ * @warning create 失败则跳过本次
+ * @attention ❌ ISR；✅ 创建/删除任务、delay
+ * @internal
+ */
 static void life_cycle(void *arg)
 {
     (void)arg;
@@ -372,6 +595,17 @@ static void life_cycle(void *arg)
     wait_until_stop();
 }
 
+/**
+ * @brief yield 风暴 worker：批量 yield + 临界区进出
+ * @details 每轮 32 次 yield（计 g_yield_storm）后 enter/exit critical。
+ * @param[in] arg 未使用
+ * @return 无（经 wait_until_stop 永不返回）
+ * @retval 无
+ * @note 压测调度器与 g_cs_count
+ * @warning 临界区须配对
+ * @attention ❌ ISR；✅ yield/临界区
+ * @internal
+ */
 static void yield_storm(void *arg)
 {
     (void)arg;
@@ -387,6 +621,17 @@ static void yield_storm(void *arg)
     wait_until_stop();
 }
 
+/**
+ * @brief 负载均衡推动 worker：周期调用 sched_load_balance
+ * @details 比较 g_lb_migrate_count 增量累加至 g_lb_migrated；delay(8)。
+ * @param[in] arg 未使用
+ * @return 无（经 wait_until_stop 永不返回）
+ * @retval 无
+ * @note 双核场景验证 LB 迁移计数
+ * @warning 无
+ * @attention ❌ ISR；✅ delay/LB API
+ * @internal
+ */
 static void lb_pusher(void *arg)
 {
     (void)arg;
@@ -405,6 +650,16 @@ static void lb_pusher(void *arg)
 
 /* ---------------- orchestrator ---------------- */
 
+/**
+ * @brief 重置压力测试全局状态与 IPC 句柄缓存
+ * @details 清零 pass/fail/stop、各 op 计数、核命中；IPC 指针置 NULL。
+ * @return 无
+ * @retval 无
+ * @note stress_run 开头调用；不释放内核对象（由 teardown 负责）
+ * @warning 无
+ * @attention ❌ ISR；❌ 不阻塞
+ * @internal
+ */
 static void stress_reset_state(void)
 {
     g_pass = 0;
@@ -431,8 +686,14 @@ static void stress_reset_state(void)
 }
 
 /**
- * @brief 运行一轮完整压力测试。
- * @return 0 通过；非 0 有失败。
+ * @brief 运行一轮完整 CG-RTOS 全 feature 并发压力测试
+ * @details 创建多类 worker、共享 IPC、软定时器；运行 STRESS_MS 后校验计数与堆并 teardown。
+ * @return 0 全部通过；非 0 至少一项失败
+ * @retval 0   成功（g_fail==0）
+ * @retval -1  存在失败项
+ * @note 临时提升 runner 优先级至 CONFIG_TIMER_TASK_PRIO-1；结束恢复
+ * @warning 耗时长、占用多任务；单核 CFS/heap 断言软通过
+ * @attention ❌ ISR；✅ 任务上下文、大量阻塞
  */
 int stress_run(void)
 {
@@ -752,11 +1013,29 @@ int stress_run(void)
     return g_fail == 0 ? 0 : -1;
 }
 
+/**
+ * @brief 读取最近一次 stress_run 的通过计数
+ * @details 返回 g_pass；stress_reset_state 在每次 run 开头清零。
+ * @return 通过次数（非负）
+ * @retval >=0 累计通过数
+ * @note 只读；与 stress_fail_count 配对
+ * @warning 无原子保护；并发读可能不一致
+ * @attention ✅ ISR 可读；❌ 不阻塞
+ */
 int stress_pass_count(void)
 {
     return g_pass;
 }
 
+/**
+ * @brief 读取最近一次 stress_run 的失败计数
+ * @details 返回 g_fail；stress_reset_state 在每次 run 开头清零。
+ * @return 失败次数（非负）
+ * @retval >=0 累计失败数
+ * @note 非 0 时 stress_run 返回 -1
+ * @warning 无原子保护；并发读可能不一致
+ * @attention ✅ ISR 可读；❌ 不阻塞
+ */
 int stress_fail_count(void)
 {
     return g_fail;

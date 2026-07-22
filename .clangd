@@ -1,0 +1,28 @@
+# clangd configuration for CG-RTOS (RISC-V freestanding).
+# Prefer compile_commands.json from: ./scripts/cgrtos.sh build|compdb
+CompileFlags:
+  CompilationDatabase: .
+  # Extra flags if the DB entry is missing for a buffer (fallback)
+  Add:
+    - -march=rv64imafdc
+    - -mabi=lp64d
+    - -mcmodel=medany
+    - -nostdlib
+    - -ffreestanding
+    - -fno-builtin
+    - -I.
+    - -Ikernel
+    - -Ihal
+    - -Iboards/nuclei_evalsoc
+  Remove:
+    - -O2
+    - -nostartfiles
+    - -fno-stack-protector
+
+Diagnostics:
+  # Freestanding / thin wrappers generate noisy unused-include warnings
+  UnusedIncludes: None
+  MissingIncludes: None
+
+Index:
+  Background: Build

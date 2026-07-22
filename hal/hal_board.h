@@ -1,18 +1,15 @@
 /**
  * @file hal_board.h
  * @brief Nuclei UX900 / evalsoc 板级 MMIO 地址表（HAL 板级配置）
+ * @author Cong Zhou / Juilletioi
+ * @version 5.0.0
+ * @date 2026-07-22
+ * @copyright CG-RTOS
  *
  * @details
  * 所有外设驱动应通过本头文件获取基址，禁止在驱动源文件中散落硬编码常量。
  * 移植到其他 SoC 时：复制本文件为新板级头，或用 `-DHAL_BOARD_xxx=` 覆盖。
  * 本头仅含地址与布局宏，不含运行时状态；可被多编译单元只读包含。
- * 多核安全由 HAL 核心与驱动 ops 契约保证，见 docs/HAL.md。
- *
- * 布局参考 Nuclei evalsoc Device Tree / UX900 手册：
- * - UART0 @ 0x10013000（SiFive-compatible）
- * - SysTimer mtime @ 0x18030000
- * - CLINT (MSIP / mtimecmp) @ 0x18031000
- * - PLIC @ 0x1C000000（每 hart 提供 M+S 两套 context）
  */
 #ifndef HAL_BOARD_H
 #define HAL_BOARD_H
@@ -54,14 +51,18 @@
 
 /**
  * @brief 指定 hart 的 mtimecmp 地址
- * @param h hart 编号
+ * @details 计算 CLINT 内 mtimecmp 槽绝对地址。
+ * @param h hart 编号（0..CONFIG_MAX_CORES-1）
+ * @warning 宏参数 h 只应出现一次求值安全的表达式；勿传入带副作用的表达式
  */
 #define HAL_BOARD_MTIMECMP_ADDR(h) \
     (HAL_BOARD_CLINT_BASE + 0x4000UL + (unsigned long)(h) * 8UL)
 
 /**
  * @brief 指定 hart 的 MSIP 地址（软件 IPI）
+ * @details 计算 CLINT MSIP 字地址。
  * @param h hart 编号
+ * @warning 勿对 h 使用 ++ 等副作用表达式（多次求值风险）
  */
 #define HAL_BOARD_CLINT_MSIP(h) \
     (HAL_BOARD_CLINT_BASE + (unsigned long)(h) * 4UL)

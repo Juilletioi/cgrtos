@@ -191,11 +191,8 @@ trap_vector:
     j trap_done
 
 handle_ipi:
-    csrr t0,mhartid
-    li t1,0x18031000
-    slli t2,t0,2
-    add t1,t1,t2
-    sw zero,0(t1)
+    csrr a0,mhartid
+    jal board_ipi_clear
     mv a0,sp
     jal riscv_handle_ipi
     j trap_done

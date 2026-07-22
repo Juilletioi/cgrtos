@@ -1,15 +1,19 @@
 /**
  * @file cli_main.c
  * @brief CG-RTOS 交互式 CLI：跑测试 case、读写内存、命令历史上翻
+ * @author Cong Zhou / Juilletioi
+ * @version 5.0.0
+ * @date 2026-07-22
+ * @copyright CG-RTOS
  *
- * 启动：
- *   ./scripts/cgrtos.sh cli
- *
- * 常用：help / list / run <case> / md|mw / stats / heap / ticks / cores
- * 编辑：Backspace、Ctrl-C、↑ 上一条、↓ 下一条
+ * @details
+ * 启动：`./scripts/cgrtos.sh cli`。
+ * 常用：help / list / run \<case\> / md|mw / stats / heap / ticks / cores。
+ * 编辑：Backspace、Ctrl-C、↑ 上一条、↓ 下一条。
  */
 #include "../kernel/cgrtos.h"
 #include "test_cases.h"
+#include "cli_fs.h"
 
 #define CLI_LINE_MAX  96
 #define CLI_HIST_MAX  16
@@ -22,6 +26,17 @@ static int  g_hist_head;         /* next write slot (ring) */
 static char g_draft[CLI_LINE_MAX]; /* line being edited before ↑ */
 static int  g_hist_view = -1;    /* -1 = draft; 0 = newest recalled */
 
+/**
+ * @brief 就地去除字符串首尾空白
+ * @details 左移跳过前导空格/制表符，再剥除尾部空白与 CR/LF。
+ * @param[in,out] s 以 NUL 结尾的可写行缓冲
+ * @return 无
+ * @retval 无
+ * @note 原地修改，不分配内存
+ * @warning s 须可写且以 NUL 结尾
+ * @attention ❌ ISR；✅ 任务上下文
+ * @internal
+ */
 static void cli_trim(char *s)
 {
     char *p = s;
@@ -45,6 +60,19 @@ static void cli_trim(char *s)
     }
 }
 
+/**
+ * @brief 比较两 C 字符串是否完全相等
+ * @details 逐字节比较至双 NUL。
+ * @param[in] a 首串
+ * @param[in] b 次串
+ * @return 相等为 1，否则 0
+ * @retval 1 内容一致
+ * @retval 0 不等或指针差异
+ * @note 区分大小写
+ * @warning 指针须有效或同为 NULL
+ * @attention ✅ ISR；❌ 不阻塞
+ * @internal
+ */
 static int cli_streq(const char *a, const char *b)
 {
     while (*a && *b && *a == *b) {
@@ -54,6 +82,20 @@ static int cli_streq(const char *a, const char *b)
     return *a == 0 && *b == 0;
 }
 
+/**
+ * @brief 判断 s 是否以 prefix 开头且其后为空白或结束
+ * @details 匹配 prefix 后跳过空白，可选写出剩余参数字符串指针。
+ * @param[in]  s      待测完整行
+ * @param[in]  prefix 命令前缀（如 "run"）
+ * @param[out] rest   非 NULL 时写入参数起始；可为 NULL
+ * @return 匹配成功 1，否则 0
+ * @retval 1 prefix 匹配且边界合法
+ * @retval 0 不匹配
+ * @note 用于 `run foo` 类命令解析
+ * @warning rest 指向 s 内部，勿 free
+ * @attention ✅ ISR；❌ 不阻塞
+ * @internal
+ */
 static int cli_startswith(const char *s, const char *prefix, const char **rest)
 {
     while (*prefix) {
@@ -73,6 +115,19 @@ static int cli_startswith(const char *s, const char *prefix, const char **rest)
     return 0;
 }
 
+/**
+ * @brief 有界字符串拷贝
+ * @details 最多拷贝 max-1 字节并保证 dst 以 NUL 结尾。
+ * @param[out] dst 目标缓冲
+ * @param[in]  src 源串
+ * @param[in]  max 目标容量（含 NUL）
+ * @return 无
+ * @retval 无
+ * @note max <= 0 时直接返回
+ * @warning 不报告截断
+ * @attention ✅ ISR；❌ 不阻塞
+ * @internal
+ */
 static void cli_strcpy(char *dst, const char *src, int max)
 {
     int i = 0;
@@ -86,6 +141,17 @@ static void cli_strcpy(char *dst, const char *src, int max)
     dst[i] = 0;
 }
 
+/**
+ * @brief 计算 C 字符串长度
+ * @details 不含终止 NUL。
+ * @param[in] s 源串
+ * @return 字节数
+ * @retval >=0 长度
+ * @note 与 strlen 语义相同
+ * @warning s 须有效
+ * @attention ✅ ISR；❌ 不阻塞
+ * @internal
+ */
 static int cli_strlen(const char *s)
 {
     int n = 0;
@@ -95,7 +161,20 @@ static int cli_strlen(const char *s)
     return n;
 }
 
-/** Parse unsigned (0xhex or decimal). Returns 0 on success. */
+/**
+ * @brief 解析无符号整数（十进制或 0x 十六进制）
+ * @details 支持 0x/0X 前缀；成功时写入 *out，可选 *endp 指向首个非数字字符。
+ * @param[in]  s    输入串
+ * @param[out] out  解析结果
+ * @param[out] endp 非 NULL 时写入结束位置；可为 NULL
+ * @return 0 成功，-1 失败
+ * @retval 0  至少一位有效数字
+ * @retval -1 空串或无数字
+ * @note 用于 md/mw 地址与数值
+ * @warning 不检测溢出
+ * @attention ✅ ISR；❌ 不阻塞
+ * @internal
+ */
 static int cli_parse_u64(const char *s, uint64_t *out, const char **endp)
 {
     uint64_t v = 0;
@@ -139,6 +218,17 @@ static int cli_parse_u64(const char *s, uint64_t *out, const char **endp)
     return 0;
 }
 
+/**
+ * @brief 跳过前导空格与制表符
+ * @details 返回首个非空白字符指针，或指向 NUL。
+ * @param[in] s 输入串
+ * @return 跳过空白后的指针
+ * @retval 非 NULL 始终有效（同 s 或其后）
+ * @note 不修改输入
+ * @warning 无
+ * @attention ✅ ISR；❌ 不阻塞
+ * @internal
+ */
 static const char *cli_skip_ws(const char *s)
 {
     while (*s == ' ' || *s == '\t') {
@@ -147,6 +237,17 @@ static const char *cli_skip_ws(const char *s)
     return s;
 }
 
+/**
+ * @brief 将一行命令压入环形历史
+ * @details 忽略空行；与上一条相同时不重复存储。
+ * @param[in] line 已提交的命令行
+ * @return 无
+ * @retval 无
+ * @note 最多 CLI_HIST_MAX 条，满则覆盖最旧
+ * @warning line 内容会被拷贝到内部缓冲
+ * @attention ❌ ISR；✅ 任务上下文
+ * @internal
+ */
 static void cli_hist_push(const char *line)
 {
     if (!line || !line[0]) {
@@ -166,6 +267,18 @@ static void cli_hist_push(const char *line)
     }
 }
 
+/**
+ * @brief 按视图索引读取历史命令
+ * @details view 0 为最新，1 为上一条，依此类推。
+ * @param[in] view 历史视图索引（0 = 最新）
+ * @return 历史串指针；越界返回 NULL
+ * @retval 非 NULL 有效历史项
+ * @retval NULL  view 非法或历史为空
+ * @note 指针指向内部环缓冲，勿 free
+ * @warning 历史被 push 覆盖后指针可能失效
+ * @attention ✅ ISR 可读；❌ 不阻塞
+ * @internal
+ */
 static const char *cli_hist_get(int view)
 {
     /* view 0 = newest, 1 = previous, ... */
@@ -176,6 +289,18 @@ static const char *cli_hist_get(int view)
     return g_hist[idx];
 }
 
+/**
+ * @brief 重绘当前输入行（提示符 + 清除至行尾 + 文本）
+ * @details 发送 `\r`、提示符、ANSI `\033[K` 再输出 len 字节。
+ * @param[in] text 行内容
+ * @param[in] len  有效字符数
+ * @return 无
+ * @retval 无
+ * @note 用于 ↑/↓ 历史浏览
+ * @warning 依赖 UART 与终端 ANSI 支持
+ * @attention ❌ ISR；✅ 可阻塞 UART
+ * @internal
+ */
 static void cli_redraw(const char *text, int len)
 {
     cgrtos_uart_putc('\r');
@@ -186,7 +311,20 @@ static void cli_redraw(const char *text, int len)
     }
 }
 
-/** Match "md[.b|.h|.w|.d]" / "read[.b|.h|.w|.d]" and return args. */
+/**
+ * @brief 匹配 md/read 内存 dump 命令并解析宽度后缀
+ * @details 支持 `md[.b|.h|.w|.d]` 与 `read[...]`；默认宽度 4 字节。
+ * @param[in]  cmd      完整命令行
+ * @param[out] width    元素宽度（1/2/4/8）
+ * @param[out] rest_out 非 NULL 时写入参数起始
+ * @return 0 匹配成功，-1 不匹配或语法错误
+ * @retval 0  已设置 width 与 rest
+ * @retval -1 非 md/read 或非法后缀
+ * @note .b=1 .h=2 .w=4 .d=8
+ * @warning cmd 须以 NUL 结尾
+ * @attention ✅ ISR；❌ 不阻塞
+ * @internal
+ */
 static int cli_match_md(const char *cmd, int *width, const char **rest_out)
 {
     const char *p;
@@ -227,7 +365,20 @@ static int cli_match_md(const char *cmd, int *width, const char **rest_out)
     return 0;
 }
 
-/** Match "mw[.b|.h|.w|.d]" / "write[.b|.h|.w|.d]". */
+/**
+ * @brief 匹配 mw/write 内存写入命令并解析宽度后缀
+ * @details 支持 `mw[.b|.h|.w|.d]` 与 `write[...]`；默认宽度 4 字节。
+ * @param[in]  cmd      完整命令行
+ * @param[out] width    元素宽度（1/2/4/8）
+ * @param[out] rest_out 非 NULL 时写入参数起始
+ * @return 0 匹配成功，-1 不匹配或语法错误
+ * @retval 0  已设置 width 与 rest
+ * @retval -1 非 mw/write 或非法后缀
+ * @note 与 cli_match_md 对称
+ * @warning 直接写物理/映射地址，慎用
+ * @attention ✅ ISR；❌ 不阻塞
+ * @internal
+ */
 static int cli_match_mw(const char *cmd, int *width, const char **rest_out)
 {
     const char *p;
@@ -269,6 +420,18 @@ static int cli_match_mw(const char *cmd, int *width, const char **rest_out)
     return 0;
 }
 
+/**
+ * @brief 执行内存 dump 子命令
+ * @details 解析地址与可选 count，按 width 逐单元 volatile 读取并格式化输出。
+ * @param[in] args  参数字符串（addr [count]）
+ * @param[in] width 单元字节宽（1/2/4/8）
+ * @return 无
+ * @retval 无
+ * @note count 默认 16，上限 CLI_MD_MAX
+ * @warning 未对齐地址仅警告仍继续读
+ * @attention ❌ ISR；✅ 可阻塞 printf
+ * @internal
+ */
 static void cli_cmd_md(const char *args, int width)
 {
     uint64_t addr = 0, count = 16;
@@ -321,6 +484,18 @@ static void cli_cmd_md(const char *args, int width)
     cgrtos_uart_putc('\n');
 }
 
+/**
+ * @brief 执行内存写入子命令
+ * @details 解析起始地址与连续数值，按 width 写入并打印每项结果。
+ * @param[in] args  参数字符串（addr val [val...]）
+ * @param[in] width 单元字节宽（1/2/4/8）
+ * @return 无
+ * @retval 无
+ * @note 最多写入 CLI_MD_MAX 个单元
+ * @warning 直接写内存，错误地址可能 HardFault
+ * @attention ❌ ISR；✅ 可阻塞 printf
+ * @internal
+ */
 static void cli_cmd_mw(const char *args, int width)
 {
     uint64_t addr = 0, val = 0;
@@ -366,20 +541,33 @@ static void cli_cmd_mw(const char *args, int width)
     }
 }
 
+/**
+ * @brief 打印 CLI 帮助文本
+ * @details 列出命令、键位、宽度后缀与示例。
+ * @return 无
+ * @retval 无
+ * @note 由 help / ? 触发
+ * @warning 无
+ * @attention ❌ ISR；✅ 可阻塞 printf
+ * @internal
+ */
 static void cli_help(void)
 {
     cgrtos_printf("\nCG-RTOS CLI commands:\n");
     cgrtos_printf("  help              show this help\n");
-    cgrtos_printf("  list | ls         list runnable test cases\n");
+    cgrtos_printf("  list              list runnable test cases\n");
     cgrtos_printf("  run <case>|all|stress  run a named case\n");
     cgrtos_printf("  md[.b|.h|.w|.d] <addr> [count]   memory dump (alias: read)\n");
     cgrtos_printf("  mw[.b|.h|.w|.d] <addr> <val>...  memory write (alias: write)\n");
     cgrtos_printf("  stats             dump kernel runtime stats\n");
+    cgrtos_printf("  objects           dump object-pool usage\n");
+    cgrtos_printf("  trace             dump recent kernel trace events\n");
     cgrtos_printf("  ticks             print current tick count\n");
     cgrtos_printf("  heap              print free / min-ever heap\n");
     cgrtos_printf("  cores             print SMP / LB counters\n");
     cgrtos_printf("  yield             yield CPU once\n");
     cgrtos_printf("  clear             clear screen (ANSI)\n");
+    cli_fs_help();
     cgrtos_printf("\nKeys: ↑ previous command  ↓ next  Backspace  Ctrl-C\n");
     cgrtos_printf("Widths: .b=1 .h=2 .w=4(default) .d=8  addr/val: 0x.. or decimal\n");
     cgrtos_printf("\nExamples:\n");
@@ -395,6 +583,16 @@ static void cli_help(void)
     cgrtos_printf("  write 0x80000000 1 2 3\n\n");
 }
 
+/**
+ * @brief 解析并分发一行 CLI 命令
+ * @details trim 后匹配 help/list/run/md/mw/stats/ticks/heap/cores/yield/clear 等。
+ * @param[in,out] line 可写行缓冲；会被 trim 原地修改
+ * @return 无
+ * @retval 无
+ * @note 空行直接返回；未知命令提示 try help
+ * @warning run/md/mw 可能长时间阻塞或写内存
+ * @attention ❌ ISR；✅ 任务上下文、可阻塞
+ */
 static void cli_handle(char *line)
 {
     const char *arg = 0;
@@ -407,7 +605,9 @@ static void cli_handle(char *line)
 
     if (cli_streq(line, "help") || cli_streq(line, "?")) {
         cli_help();
-    } else if (cli_streq(line, "list") || cli_streq(line, "ls")) {
+    } else if (cli_fs_try_handle(line)) {
+        /* filesystem commands (CONFIG_CLI_FS); ls is directory listing */
+    } else if (cli_streq(line, "list")) {
         test_cases_list();
     } else if (cli_startswith(line, "run", &arg)) {
         if (!arg || arg[0] == 0) {
@@ -422,6 +622,10 @@ static void cli_handle(char *line)
         cli_cmd_mw(arg, width);
     } else if (cli_streq(line, "stats")) {
         cgrtos_stats_dump();
+    } else if (cli_streq(line, "objects")) {
+        cgrtos_objects_dump();
+    } else if (cli_streq(line, "trace")) {
+        cgrtos_trace_dump();
     } else if (cli_streq(line, "ticks")) {
         cgrtos_printf("ticks=%lu\n", (unsigned long)cgrtos_get_ticks());
     } else if (cli_streq(line, "heap")) {
@@ -449,6 +653,16 @@ static void cli_handle(char *line)
     }
 }
 
+/**
+ * @brief CLI 主循环任务：UART 行编辑与命令执行
+ * @details 轮询 UART，处理 Enter/Backspace/Ctrl-C 及 ↑/↓ 历史，提交行后调用 cli_handle。
+ * @param[in] arg 未使用
+ * @return 无（永不返回）
+ * @retval 无
+ * @note 优先级 12；启动前清空 RX 缓冲
+ * @warning 单任务独占交互；无行内编辑除 Backspace
+ * @attention ❌ ISR；✅ 阻塞 yield/UART
+ */
 static void cli_task(void *arg)
 {
     (void)arg;
@@ -459,8 +673,10 @@ static void cli_task(void *arg)
     while (cgrtos_uart_pollc() >= 0) {
     }
 
+    cli_fs_session_init();
+
     cgrtos_printf("\n======== CG-RTOS Interactive CLI ========\n");
-    cgrtos_printf("Type 'help' / 'list' / 'run <case>'. ↑ recalls last command.\n");
+    cgrtos_printf("Type 'help' / 'list' / 'run <case>' / FS cmds. ↑ recalls last.\n");
     cgrtos_uart_puts(CLI_PROMPT);
 
     while (1) {
@@ -565,6 +781,18 @@ static void cli_task(void *arg)
     }
 }
 
+/**
+ * @brief hart0 CLI 应用入口
+ * @details cgrtos_init → 创建 cli 任务并绑核 0 → cgrtos_start。
+ * @param[in] hartid 核号
+ * @param[in] fdt    设备树（忽略）
+ * @param[in] end    DDR/链接末地址提示
+ * @return 正常不返回；异常路径可能返回 0
+ * @retval 0 仅异常
+ * @note 任务 ID 假定 create 后为 1
+ * @warning 若 create 失败仍 start，CLI 不会运行
+ * @attention ❌ ISR；✅ 启动调度
+ */
 int main(int hartid, void *fdt, void *end)
 {
     (void)fdt;
@@ -579,6 +807,16 @@ int main(int hartid, void *fdt, void *end)
     return 0;
 }
 
+/**
+ * @brief 次核入口
+ * @details 转调 cgrtos_start_secondary。
+ * @param[in] hartid 次核编号
+ * @return 无（不返回）
+ * @retval 无
+ * @note CLI 交互仅在 hart0 cli 任务
+ * @warning 无
+ * @attention ❌ ISR；✅ 进入调度
+ */
 void secondary_main(int hartid)
 {
     cgrtos_start_secondary(hartid);

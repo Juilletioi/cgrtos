@@ -2,6 +2,11 @@
  * @file hal.h
  * @brief CG-RTOS 统一外设驱动框架与用户 HAL API
  *
+ * @author Cong Zhou / Juilletioi
+ * @version 5.0.0
+ * @date 2026-07-22
+ * @copyright CG-RTOS
+ *
  * @ingroup hal
  *
  * @par 分层模型（箭头 = 调用方向；禁止倒置）
@@ -176,6 +181,7 @@ typedef struct hal_device {
  * @param dev 静态对象指针
  * @return HAL_OK；参数错 HAL_ERR_PARAM；表满或冻结 HAL_ERR_STATE；同名已存在视为 HAL_OK
  * @threadsafe 内部关本核中断 + 注册自旋锁；仍应只在 hart0 启动路径调用
+ * @attention ❌ ISR；❌ 运行期禁止
  */
 hal_status_t hal_device_register(hal_device_t *dev);
 
@@ -183,19 +189,32 @@ hal_status_t hal_device_register(hal_device_t *dev);
  * @brief 按类别查找（返回第一个）
  * @return 设备指针；未找到 NULL
  * @threadsafe 注册表冻结后只读，可无锁并发读
+ * @attention ✅ ISR 可读；❌ 不阻塞
  */
 hal_device_t *hal_device_find(hal_dev_class_t cls);
 
-/** @brief 按名称查找 */
+/**
+ * @brief 按名称查找
+ * @attention ✅ ISR 可读；❌ 不阻塞
+ */
 hal_device_t *hal_device_find_by_name(const char *name);
 
-/** @brief 已注册设备数量 */
+/**
+ * @brief 已注册设备数量
+ * @attention ✅ ISR 可读；❌ 不阻塞
+ */
 int hal_device_count(void);
 
-/** @brief 按索引取设备（0 .. count-1）；越界 NULL */
+/**
+ * @brief 按索引取设备（0 .. count-1）；越界 NULL
+ * @attention ✅ ISR 可读；❌ 不阻塞
+ */
 hal_device_t *hal_device_get(int index);
 
-/** @brief 查询注册表是否已冻结 */
+/**
+ * @brief 查询注册表是否已冻结
+ * @attention ✅ ISR 可读；❌ 不阻塞
+ */
 int hal_registry_frozen(void);
 
 /**
@@ -210,6 +229,7 @@ int hal_registry_frozen(void);
  *
  * @threadsafe 仅 hart0 启动路径调用一次
  * @note 此函数是 HAL 调用驱动的入口；trap 路径不得反向调用本函数。
+ * @attention ❌ ISR；❌ 不阻塞（boot 一次性）
  */
 hal_status_t hal_board_init(void);
 
@@ -221,46 +241,61 @@ hal_status_t hal_board_init(void);
 /**
  * @brief 初始化控制台硬件
  * @return HAL_OK / HAL_ERR_NODEV
+ * @attention ❌ ISR；❌ boot/任务上下文
  */
 hal_status_t hal_console_init(void);
 
 /**
  * @brief 输出一字符（自动加锁）
  * @threadsafe SMP 安全（逐字符）；整行请用 puts/write
+ * @attention ✅ ISR 可用；⚠️ 勿长时间占锁
  */
 void hal_console_putc(char c);
 
 /**
  * @brief 已持锁时输出一字符
  * @warning 未持锁调用会导致数据竞争
+ * @attention ✅ ISR 可用（须已持锁）；❌ 勿嵌套取锁
  */
 void hal_console_putc_unlocked(char c);
 
 /**
  * @brief 非阻塞读一字符
  * @return 0..255；RX 空或未就绪返回 -1
+ * @attention ✅ ISR；❌ 不阻塞
  */
 int hal_console_pollc(void);
 
 /**
  * @brief 阻塞读一字符；调度运行后空闲时 yield
  * @note 等待期间不持控制台锁
+ * @attention ❌ ISR；✅ 可能阻塞/yield
  */
 char hal_console_getc(void);
 
-/** @brief 输出 NUL 字符串（整串持锁，行级原子） */
+/**
+ * @brief 输出 NUL 字符串（整串持锁，行级原子）
+ * @attention ✅ ISR 可用；⚠️ 勿长时间占锁
+ */
 void hal_console_puts(const char *s);
 
 /**
  * @brief 输出原始缓冲区（整段持锁）
  * @return 写出字节数；失败负状态码
+ * @attention ✅ ISR 可用；⚠️ 勿长时间占锁
  */
 int hal_console_write(const void *buf, size_t len);
 
-/** @brief 获取控制台输出锁（不可重入） */
+/**
+ * @brief 获取控制台输出锁（不可重入）
+ * @attention ❌ ISR 勿与任务争锁；❌ 不可重入
+ */
 void hal_console_lock(void);
 
-/** @brief 释放控制台输出锁 */
+/**
+ * @brief 释放控制台输出锁
+ * @attention ❌ ISR 勿误释放；须与 lock 配对
+ */
 void hal_console_unlock(void);
 
 /* -------------------------------------------------------------------------- */
@@ -270,12 +305,14 @@ void hal_console_unlock(void);
 /**
  * @brief 初始化本 hart 系统定时器
  * @param tick_hz 期望 tick；0 表示使用 CONFIG_TICK_RATE_HZ
+ * @attention ❌ ISR；❌ boot/任务上下文
  */
 hal_status_t hal_timer_init(uint32_t tick_hz);
 
 /**
  * @brief 读 mtime
  * @threadsafe ISR / 多核安全（只读）
+ * @attention ✅ ISR；❌ 不阻塞
  */
 uint64_t hal_mtime_read(void);
 
@@ -287,6 +324,7 @@ uint64_t hal_mtime_read(void);
  * @brief 初始化本 hart IRQC
  * @return HAL_OK / HAL_ERR_NODEV
  * @details 步骤：1. 查找 IRQC 设备；2. 调用 ops->init；3. 置 READY。
+ * @attention ❌ ISR；❌ boot/任务上下文
  */
 hal_status_t hal_irqc_init(void);
 
@@ -296,6 +334,7 @@ hal_status_t hal_irqc_init(void);
  * @threadsafe 对本 hart；ISR 路径无全局锁
  * @details 步骤：1. 取设备；2. ops->claim；3. 返回。
  * @note trap 入口应直调驱动，勿为图省事再调用本 API。
+ * @attention ✅ ISR；❌ 不阻塞
  */
 uint32_t hal_irqc_claim(void);
 
@@ -303,6 +342,7 @@ uint32_t hal_irqc_claim(void);
  * @brief 完成中断处理并写 complete
  * @param irq 先前 claim 的源号
  * @details 步骤：1. 取设备；2. ops->complete(dev, irq)。
+ * @attention ✅ ISR；❌ 不阻塞
  */
 void hal_irqc_complete(uint32_t irq);
 
@@ -310,6 +350,7 @@ void hal_irqc_complete(uint32_t irq);
  * @brief 设置本 hart 优先级阈值
  * @param threshold 新阈值；0 允许全部 priority>0
  * @details 步骤：1. 取设备；2. ops->set_threshold。
+ * @attention ✅ ISR；❌ 不阻塞
  */
 void hal_irqc_set_threshold(uint32_t threshold);
 
@@ -317,6 +358,7 @@ void hal_irqc_set_threshold(uint32_t threshold);
  * @brief 读本 hart 优先级阈值
  * @return 当前 threshold；无设备时 0
  * @details 步骤：1. 取设备；2. ops->get_threshold。
+ * @attention ✅ ISR；❌ 不阻塞
  */
 uint32_t hal_irqc_get_threshold(void);
 
@@ -326,6 +368,7 @@ uint32_t hal_irqc_get_threshold(void);
  * @return HAL_OK / HAL_ERR_PARAM / HAL_ERR_NODEV
  * @threadsafe 配置锁保护 RMW；建议 boot/任务上下文
  * @details 步骤：1. 校验；2. 取配置锁；3. ops->set_priority；4. 放锁。
+ * @attention ❌ ISR；❌ 不阻塞
  */
 hal_status_t hal_irqc_set_priority(uint32_t irq, uint32_t priority);
 
@@ -334,6 +377,7 @@ hal_status_t hal_irqc_set_priority(uint32_t irq, uint32_t priority);
  * @param irq 源号
  * @return 优先级；非法/无设备为 0
  * @details 步骤：1. 取设备；2. ops->get_priority。
+ * @attention ✅ ISR 可读；❌ 不阻塞
  */
 uint32_t hal_irqc_get_priority(uint32_t irq);
 
@@ -342,6 +386,7 @@ uint32_t hal_irqc_get_priority(uint32_t irq);
  * @param irq 源号
  * @return HAL_OK / HAL_ERR_PARAM / HAL_ERR_NODEV
  * @details 步骤：1. 取配置锁；2. ops->enable；3. 放锁。
+ * @attention ❌ ISR；❌ 不阻塞
  */
 hal_status_t hal_irqc_enable(uint32_t irq);
 
@@ -350,6 +395,7 @@ hal_status_t hal_irqc_enable(uint32_t irq);
  * @param irq 源号
  * @return HAL_OK / HAL_ERR_PARAM / HAL_ERR_NODEV
  * @details 步骤：1. 取配置锁；2. ops->disable；3. 放锁。
+ * @attention ❌ ISR；❌ 不阻塞
  */
 hal_status_t hal_irqc_disable(uint32_t irq);
 
@@ -359,13 +405,45 @@ hal_status_t hal_irqc_disable(uint32_t irq);
 
 /**
  * @brief 向目标 hart 发送软件 IPI
+ * @details
+ * 1. 查找 IPI 设备；未注册返回 HAL_ERR_NODEV。
+ * 2. 调用 ops->send 写目标 MSIP=1。
+ * @param[in] hart 目标 hart 编号
  * @return HAL_OK / HAL_ERR_PARAM / HAL_ERR_NODEV
+ * @retval HAL_OK        成功
+ * @retval HAL_ERR_PARAM hart 越界
+ * @retval HAL_ERR_NODEV 设备未注册
+ * @note 底层实现见 arch/riscv/ipic.c
+ * @warning 目标 hart 须已上线
+ * @attention ❌ ISR；❌ 不阻塞
  */
 hal_status_t hal_ipi_send(uint8_t hart);
 
+/**
+ * @brief 清目标 hart 的 MSIP 挂起位
+ * @details
+ * 1. 查找 IPI 设备；未注册则忽略。
+ * 2. 调用 ops->clear 写 MSIP=0。
+ * @param[in] hart 目标 hart 编号
+ * @return 无
+ * @note 通常在本核 IPI ISR 中清本核；底层见 arch/riscv/ipic.c
+ * @warning hart 越界时底层行为未定义
+ * @attention ✅ ISR；❌ 不阻塞
+ */
 void hal_ipi_clear(uint8_t hart);
 
-/** @brief 早期打开 MSIE|MTIE|MEIE */
+/**
+ * @brief 早期打开 MSIE|MTIE|MEIE 三类 M 模式中断使能
+ * @details
+ * 1. 查找 CPU 设备；未注册返回 HAL_ERR_NODEV。
+ * 2. 调用 ops->init 置 mie 相应位。
+ * @return HAL_OK / HAL_ERR_NODEV
+ * @retval HAL_OK        成功
+ * @retval HAL_ERR_NODEV 设备未注册
+ * @note 底层实现见 arch/riscv/arch.c；hal_board_init 按序调用
+ * @warning 须在 trap 向量就绪后调用
+ * @attention ❌ ISR；❌ 不阻塞
+ */
 hal_status_t hal_cpu_init(void);
 
 #ifdef __cplusplus

@@ -1,27 +1,25 @@
 /**
  * @file ipc.c
  * @brief 信号量、互斥量、消息队列与事件组 IPC 原语实现
- * 
- * ## 模块设计
- * 
+ * @author Cong Zhou / Juilletioi
+ * @version 5.0.0
+ * @date 2026-07-22
+ * @copyright CG-RTOS
+ *
+ * @details
  * 本模块实现 CGRtOS 四类经典同步/通信对象，均基于优先级等待队列与调度器阻塞机制：
- * 
+ *
  * - **信号量（Semaphore）**：计数型同步对象，`count` 表示可用令牌数；`take` 减计数或阻塞，
  *   `give` 优先唤醒最高优先级等待者，否则递增计数（不超过 `max`）。
- * - **互斥量（Mutex）**：带所有权与递归计数的互斥锁，默认启用优先级继承（PI）：
+ * - **互斥量（Mutex）**：带所有权与递归计数的互斥锁，默认启用优先级继承（PI）；
  *   高优先级任务阻塞时临时提升持有者优先级，释放后恢复 `base_prio`。
  * - **消息队列（Queue）**：定长环形缓冲，每项固定 `item_sz` 字节；独立维护
  *   `send_wait_q` / `recv_wait_q`，满/空时分别阻塞发送者与接收者。
  * - **事件组（Event Group）**：32 位标志位集合，支持 AND/OR 等待模式及退出时清除选项。
- * 
- * ## 公共基础设施
- * 
- * - 全局静态池 `g_sems[]`、`g_mtxs[]`、`g_qs[]`、`g_egs[]` 管理实例生命周期。
- * - `block_current_on_waitq` 统一封装「调度阻塞 + 挂入等待队列」。
- * - `wait_result` 在 yield 返回后检查 `wake_ok` 判定阻塞是否成功。
- * - 各对象可挂接 QueueSet（`qset` 字段），状态变化时调用 `cgrtos_queue_set_poke`。
- * - 所有可变操作在 `cgrtos_enter_critical` / `cgrtos_exit_critical` 临界区内完成。
- * 
+ *
+ * 全局静态池 `g_sems[]`、`g_mtxs[]`、`g_qs[]`、`g_egs[]` 管理实例生命周期；
+ * 各对象可挂接 QueueSet（`qset` 字段）。流缓冲/消息缓冲/队列集/文件系统/定时器见独立模块。
+ *
  * @see cgrtos_sem, cgrtos_mutex, cgrtos_queue, cgrtos_event
  */
 #include "cgrtos.h"
@@ -38,20 +36,18 @@ uint32_t             g_eg_cnt;
 
 /**
  * @brief 将当前任务挂到指定等待队列并标记阻塞原因
- * 
- * @param wait_q  目标等待队列指针（各 IPC 对象的 wait_q 成员）
- * @param reason  阻塞原因枚举（BLOCK_SEM / BLOCK_MUTEX / BLOCK_QUEUE_* / BLOCK_EVENT）
- * @param obj     关联 IPC 对象指针，写入 task->block_obj
- * @param timeout 阻塞超时 tick 数
- * 
- * @return pdPASS 成功挂起；pdFAIL 当前无有效任务（如 idle）
- * 
- * @details
- * 1. 读取当前 hart 的 running 任务指针。
- * 2. 若任务为空或为 idle（id==0），无法阻塞，返回 pdFAIL。
- * 3. 调用调度器将该任务置为 BLOCKED 并记录 reason、关联对象与 timeout。
- * 4. 将任务按优先级插入 wait_q 等待链表。
- * 5. 返回 pdPASS，调用方需在 exit_critical 后 yield。
+ * @details 读取 running 任务；idle 不可阻塞。调用 sched_block 并 wait_list_add；须在 exit_critical 后 yield。
+ * @param[in,out] wait_q 目标等待队列指针（各 IPC 对象的 wait_q 成员）
+ * @param[in] reason 阻塞原因（BLOCK_SEM / BLOCK_MUTEX / BLOCK_QUEUE_* / BLOCK_EVENT）
+ * @param[in] obj 关联 IPC 对象指针，写入 task->block_obj
+ * @param[in] timeout 阻塞超时 tick 数
+ * @return pdPASS 成功挂起；pdFAIL 当前无有效任务
+ * @retval pdPASS 已挂入等待队列
+ * @retval pdFAIL 当前为 idle 或无 running 任务
+ * @note 调用方须在 exit_critical 后 cgrtos_sched_yield
+ * @warning 须在临界区 / g_klock 内调用
+ * @attention ❌ 单独调用非 ISR 安全；✅ 后续由调用方 yield 切换
+ * @internal
  */
 static int block_current_on_waitq(cgrtos_task_t *volatile *wait_q,
 block_reason_t reason, void *obj,
@@ -72,14 +68,16 @@ tick_t timeout)
 
 /**
  * @brief 检查任务被唤醒后的阻塞结果
- * 
- * @param task 被阻塞后重新运行的任务指针
- * 
- * @return pdPASS 唤醒成功（wake_ok==1）；pdFAIL 超时或被 delete 唤醒
- * 
- * @details
- * 1. 若 task 为空，视为失败。
- * 2. 读取 task->wake_ok 标志判定阻塞是否满足条件。
+ * @details yield 返回后读取 task->wake_ok 判定阻塞是否满足条件。
+ * @param[in] task 被阻塞后重新运行的任务指针
+ * @return pdPASS 唤醒成功；errPARAM 或 errTIMEOUT 失败
+ * @retval pdPASS 条件满足（wake_ok==1）
+ * @retval errPARAM task 为空
+ * @retval errTIMEOUT 超时或被 delete 唤醒
+ * @note 须在 unblock 后、任务再次运行时使用
+ * @warning 无
+ * @attention ✅ 任务上下文；❌ 不阻塞
+ * @internal
  */
 static int wait_result(cgrtos_task_t *task)
 {
@@ -92,7 +90,16 @@ static int wait_result(cgrtos_task_t *task)
 #if CONFIG_DETECT_DEADLOCK
 /**
  * @brief 检测 mutex 等待环：owner 链上若回到 self 则死锁
+ * @details 沿 mutex->owner 及 owner 阻塞的 mutex 链遍历，深度上限 16。
+ * @param[in] mutex 待检测互斥量
+ * @param[in] self  当前尝试加锁的任务
+ * @return 1 检测到环；0 无环或链终止
+ * @retval 1 存在死锁环
+ * @retval 0 无环、参数无效或链终止
  * @note 调用方已持 g_klock
+ * @warning 深度截断可能漏检超长链
+ * @attention ❌ 仅临界区内；❌ 不阻塞
+ * @internal
  */
 static int mutex_would_deadlock(cgrtos_mutex_t *mutex, cgrtos_task_t *self)
 {
@@ -118,18 +125,16 @@ static int mutex_would_deadlock(cgrtos_mutex_t *mutex, cgrtos_task_t *self)
 #endif
 
 /**
- * @brief 动态创建计数信号量
- * 
- * @param init 初始计数值
- * @param max  最大计数值（令牌上限）
- * 
- * @return 成功返回信号量指针；参数非法或池满返回 NULL
- * 
- * @details
- * 1. 校验 max>0 且 0<=init<=max。
- * 2. 进入临界区，在 g_sems[] 中查找 max==0 的空槽。
- * 3. 初始化 count、max、lock、wait_q、qset 并递增 g_sem_cnt。
- * 4. 退出临界区并返回新实例指针；无空槽则返回 NULL。
+ * @brief 创建计数信号量（池分配）
+ * @details 在 g_sems[] 找空槽，初始化 count/max/wait_q；校验 max>0 且 0<=init<=max。
+ * @param[in] init 初值；须 0..max
+ * @param[in] max  上限；须 >0
+ * @return 信号量指针
+ * @retval 非 NULL 成功
+ * @retval NULL    参数非法或池满
+ * @note 对象在静态池中，用户不得 free 指针
+ * @warning 无
+ * @attention ❌ ISR；❌ 不阻塞
  */
 cgrtos_sem_t *cgrtos_sem_create(int32_t init, int32_t max)
 {
@@ -157,12 +162,14 @@ cgrtos_sem_t *cgrtos_sem_create(int32_t init, int32_t max)
 }
 
 /**
- * @brief 创建二值信号量（初始 0，最大 1）
- * 
- * @return 二值信号量指针；池满返回 NULL
- * 
- * @details
- * 1. 调用 cgrtos_sem_create(0, 1) 创建初始为空的二值信号量。
+ * @brief 创建二进制信号量
+ * @details 等价 cgrtos_sem_create(0, 1)，初始为空、最大为 1。
+ * @return 信号量指针
+ * @retval 非 NULL 成功
+ * @retval NULL    池满
+ * @note 无
+ * @warning 无
+ * @attention ❌ ISR；❌ 不阻塞
  */
 cgrtos_sem_t *cgrtos_sem_create_binary(void)
 {
@@ -170,18 +177,17 @@ cgrtos_sem_t *cgrtos_sem_create_binary(void)
 }
 
 /**
- * @brief 在调用者提供的静态存储上初始化信号量
- * 
- * @param sem  调用者分配的信号量结构体指针
- * @param init 初始计数值
- * @param max  最大计数值
- * 
- * @return 成功返回 sem；参数非法返回 NULL
- * 
- * @details
- * 1. 校验 sem 非空且 max>0、0<=init<=max。
- * 2. 清零结构体并设置 count、max。
- * 3. 返回 sem（不占用全局池）。
+ * @brief 在调用者存储上静态创建信号量
+ * @details 不占用全局池；清零结构体并设置 count/max，调用方保证 sem 生命周期。
+ * @param[out] sem  用户提供的对象存储；不可为 NULL
+ * @param[in]  init 初值
+ * @param[in]  max  上限
+ * @return sem 或 NULL
+ * @retval sem  成功
+ * @retval NULL 参数非法
+ * @note 无
+ * @warning 勿对池对象与静态对象混用 delete 语义错误
+ * @attention ❌ ISR；❌ 不阻塞
  */
 cgrtos_sem_t *cgrtos_sem_create_static(cgrtos_sem_t *sem, int32_t init, int32_t max)
 {
@@ -198,18 +204,18 @@ cgrtos_sem_t *cgrtos_sem_create_static(cgrtos_sem_t *sem, int32_t init, int32_t 
 
 /**
  * @brief 获取信号量（P 操作 / take）
- * 
- * @param sem     信号量指针
- * @param timeout 阻塞超时 tick 数；0 表示不等待
- * 
- * @return pdPASS 成功获取；pdFAIL 参数错误或超时
- * 
- * @details
- * 1. 校验 sem 非空。
- * 2. 进入临界区，若 count>0 则递减并立即返回成功。
- * 3. 若 timeout==0 且无可用令牌，返回 pdFAIL。
- * 4. 否则将当前任务挂入 sem->wait_q 并 yield。
- * 5. 唤醒后通过 wait_result 检查 wake_ok 返回最终结果。
+ * @details count>0 则递减立即返回；否则按 timeout 挂入优先级等待队列并 yield，
+ *          由 give 或超时唤醒。CONFIG_ISR_API_GUARD 开启时拒绝 ISR 调用。
+ * @param[in] sem     信号量对象；不可为 NULL
+ * @param[in] timeout 0=非阻塞尝试；portMAX_DELAY=永久等待；其它=相对 tick
+ * @return 结果码
+ * @retval pdPASS     成功取得令牌
+ * @retval errPARAM   sem 为空
+ * @retval errISR     在中断上下文调用
+ * @retval errTIMEOUT 超时或非阻塞未取到
+ * @note 等待队列按任务优先级排序；临界区保护 count/wait_q
+ * @warning 无所有权概念，过度 give 受 max 限制；与 mutex 混用场景需自行设计协议
+ * @attention ❌ 禁止 ISR（阻塞路径）；✅ timeout>0 且无令牌时阻塞并可能切换
  */
 int cgrtos_sem_take(cgrtos_sem_t *sem, tick_t timeout)
 {
@@ -250,18 +256,15 @@ int cgrtos_sem_take(cgrtos_sem_t *sem, tick_t timeout)
 }
 
 /**
- * @brief 释放信号量（V 操作 / give）
- * 
- * @param sem 信号量指针
- * 
- * @return pdPASS 成功；pdFAIL 参数错误
- * 
- * @details
- * 1. 校验 sem 非空并进入临界区。
- * 2. 若有等待者，唤醒最高优先级任务并设置 wake_ok=1。
- * 3. 若挂接 QueueSet 则 poke 通知 select 等待者。
- * 4. 无等待者且 count<max 时递增 count。
- * 5. 唤醒等待者时 exit_critical 后 yield 以立即调度被唤醒任务。
+ * @brief 释放信号量（V / give）
+ * @details 有等待者则唤醒最高优先级并 yield；否则 count++（不超过 max）；可能 poke QueueSet。
+ * @param[in] sem 信号量；不可为 NULL
+ * @return 结果码
+ * @retval pdPASS 成功
+ * @retval pdFAIL 参数错误
+ * @note 无所有权概念，过度 give 受 max 限制
+ * @warning 无
+ * @attention ❌ ISR；✅ 唤醒等待者时可能切换
  */
 int cgrtos_sem_give(cgrtos_sem_t *sem)
 {
@@ -297,18 +300,16 @@ int cgrtos_sem_give(cgrtos_sem_t *sem)
 }
 
 /**
- * @brief 从中断上下文释放信号量
- *
- * @param sem   信号量指针
- * @param woken 可选；非空则唤醒更高优先级时置 pdTRUE，否则自动 yield_from_isr
- *
- * @return pdPASS 成功；pdFAIL 参数错误
- *
- * @details
- * 1. 校验 sem 非空并进入临界区。
- * 2. 若有等待者，唤醒最高优先级任务。
- * 3. 无等待者且 count<max 时递增 count。
- * 4. 退出临界区后通过 cgrtos_isr_notify_woken 处理调度请求。
+ * @brief ISR 中释放信号量
+ * @details 不阻塞；可 unblock 等待者并通过 cgrtos_isr_notify_woken 置 woken / 自动 yield_from_isr。
+ * @param[in]  sem   信号量；不可为 NULL
+ * @param[out] woken 可选；唤醒更高优先级等待者时置 pdTRUE
+ * @return 结果码
+ * @retval pdPASS 成功
+ * @retval pdFAIL 参数错误
+ * @note 无
+ * @warning 忽略 woken 且未自动 yield 可能导致延迟调度
+ * @attention ✅ ISR；❌ 不阻塞
  */
 int cgrtos_sem_give_from_isr(cgrtos_sem_t *sem, BaseType_t *woken)
 {
@@ -343,15 +344,15 @@ int cgrtos_sem_give_from_isr(cgrtos_sem_t *sem, BaseType_t *woken)
 }
 
 /**
- * @brief ISR 中非阻塞获取信号量（不等待）
- *
- * @param sem 信号量指针
- * @return pdPASS 取到令牌；pdFAIL 无令牌或参数错误
- *
- * @details
- * 1. 校验 sem；进入临界区。
- * 2. count>0 则递减并返回 pdPASS；否则 pdFAIL。
- * 3. 不唤醒任何任务（take 不会产生 woken）。
+ * @brief ISR 中非阻塞获取信号量
+ * @details 仅当 count>0 时递减；从不等待、不唤醒任何任务。
+ * @param[in] sem 信号量；不可为 NULL
+ * @return 结果码
+ * @retval pdPASS 取到令牌
+ * @retval pdFAIL 无令牌或参数错误
+ * @note 无
+ * @warning 无
+ * @attention ✅ ISR；❌ 不阻塞
  */
 int cgrtos_sem_take_from_isr(cgrtos_sem_t *sem)
 {
@@ -369,17 +370,15 @@ int cgrtos_sem_take_from_isr(cgrtos_sem_t *sem)
 }
 
 /**
- * @brief 删除信号量并唤醒所有等待者
- * 
- * @param sem 信号量指针
- * 
- * @return pdPASS 成功；pdFAIL 参数错误
- * 
- * @details
- * 1. 校验 sem 非空并进入临界区。
- * 2. 逐个弹出 wait_q 中等待者，置 wake_ok=0 并 unblock（表示失败唤醒）。
- * 3. 清零信号量结构体并递减 g_sem_cnt。
- * 4. 退出临界区后 yield 以调度被唤醒任务。
+ * @brief 删除信号量并唤醒等待者（失败唤醒）
+ * @details 等待者 wake_ok=0 并 unblock；清零结构体并回收池槽；exit 后 yield。
+ * @param[in] sem 信号量；不可为 NULL
+ * @return 结果码
+ * @retval pdPASS 成功
+ * @retval pdFAIL 参数错误
+ * @note 无
+ * @warning 删除后禁止再使用指针
+ * @attention ❌ ISR；✅ 可能切换
  */
 int cgrtos_sem_delete(cgrtos_sem_t *sem)
 {
@@ -408,14 +407,14 @@ int cgrtos_sem_delete(cgrtos_sem_t *sem)
 }
 
 /**
- * @brief 动态创建互斥量
- * 
- * @return 成功返回互斥量指针；池满返回 NULL
- * 
- * @details
- * 1. 进入临界区，在 g_mtxs[] 中查找 in_use==0 的空槽。
- * 2. 清零结构体，设置 in_use=1、inherit=1（默认启用优先级继承）。
- * 3. 递增 g_mtx_cnt 并返回新实例指针。
+ * @brief 创建互斥量（默认启用优先级继承）
+ * @details 在 g_mtxs[] 池分配空槽；清零结构体，设置 in_use=1、inherit=1。
+ * @return 互斥量指针
+ * @retval 非 NULL 成功
+ * @retval NULL    池满
+ * @note 支持递归加锁（上限 CONFIG_MUTEX_MAX_RECURSIVE）
+ * @warning 勿在 ISR 中 lock
+ * @attention ❌ ISR；❌ 不阻塞
  */
 cgrtos_mutex_t *cgrtos_mutex_create(void)
 {
@@ -436,15 +435,14 @@ cgrtos_mutex_t *cgrtos_mutex_create(void)
 
 /**
  * @brief 在调用者提供的静态存储上初始化互斥量
- * 
- * @param mutex 调用者分配的互斥量结构体指针
- * 
- * @return 成功返回 mutex；参数非法返回 NULL
- * 
- * @details
- * 1. 校验 mutex 非空。
- * 2. 清零结构体，设置 in_use=1、inherit=1。
- * 3. 返回 mutex（不占用全局池）。
+ * @details 校验 mutex 非空；清零结构体，设置 in_use=1、inherit=1；不占用全局池。
+ * @param[in] mutex 调用者分配的互斥量结构体指针；不可为 NULL
+ * @return 互斥量指针
+ * @retval 非 NULL 成功
+ * @retval NULL    mutex 为空
+ * @note delete 时不回收池槽（调用者管理存储）
+ * @warning 同一 storage 未 delete 前勿重复 init
+ * @attention ❌ ISR；❌ 不阻塞
  */
 cgrtos_mutex_t *cgrtos_mutex_create_static(cgrtos_mutex_t *mutex)
 {
@@ -459,8 +457,16 @@ cgrtos_mutex_t *cgrtos_mutex_create_static(cgrtos_mutex_t *mutex)
 
 #if CONFIG_USE_DPCP
 /**
- * @brief 创建 DPCP 互斥量
- * @details inherit=0；dpcp=1；写入天花板。
+ * @brief 创建启用 DPCP 天花板的互斥量
+ * @details 基于 cgrtos_mutex_create；inherit=0、dpcp=1，写入 ceiling_prio / ceiling_rel。
+ * @param[in] ceiling_prio FP 优先级天花板 0..CONFIG_MAX_PRIORITY
+ * @param[in] ceiling_rel  EDF 相对 deadline 天花板；0=仅用优先级天花板
+ * @return 互斥量指针
+ * @retval 非 NULL 成功
+ * @retval NULL    参数非法或池满
+ * @note 与动态 PI 互斥
+ * @warning 天花板过低无法抑制反转；过高影响其他任务
+ * @attention ❌ ISR；❌ 不阻塞
  */
 cgrtos_mutex_t *cgrtos_mutex_create_dpcp(uint8_t ceiling_prio, tick_t ceiling_rel)
 {
@@ -480,7 +486,17 @@ cgrtos_mutex_t *cgrtos_mutex_create_dpcp(uint8_t ceiling_prio, tick_t ceiling_re
 }
 
 /**
- * @brief 更新天花板（须无 owner）
+ * @brief 更新 DPCP 天花板（须无 owner）
+ * @details 临界区内写入 ceiling_prio/ceiling_rel；若已有 owner 则 pdFAIL。
+ * @param[in] mutex        互斥量；不可为 NULL
+ * @param[in] ceiling_prio FP 优先级天花板 0..CONFIG_MAX_PRIORITY
+ * @param[in] ceiling_rel  EDF 相对 deadline 天花板；0=仅用优先级天花板
+ * @return 结果码
+ * @retval pdPASS 成功
+ * @retval pdFAIL 参数非法或 mutex 已被持有
+ * @note 自动设置 dpcp=1、inherit=0
+ * @warning 持锁期间修改天花板无效
+ * @attention ❌ ISR；❌ 不阻塞
  */
 int cgrtos_mutex_set_ceiling(cgrtos_mutex_t *mutex, uint8_t ceiling_prio,
                              tick_t ceiling_rel)
@@ -521,7 +537,14 @@ int cgrtos_mutex_set_ceiling(cgrtos_mutex_t *mutex, uint8_t ceiling_prio,
 #if CONFIG_USE_DPCP
 /**
  * @brief DPCP：对 owner 应用天花板（优先级与/或 EDF deadline）
- * @risk 必须在 g_klock 内；READY 时先出队再改字段再入队，避免队列乱序。
+ * @details READY 时先出队再改 prio/deadline 再入队；跨核 RUNNING 时发 IPI。须持 g_klock。
+ * @param[in,out] mutex 已加锁的 DPCP 互斥量
+ * @return 无
+ * @retval 无
+ * @note 设置 ceiling_applied=1 并保存 saved_prio/saved_deadline
+ * @warning 必须在 g_klock 内；READY 队列须 remove/add 避免乱序
+ * @attention ❌ ISR；❌ 不阻塞；✅ 可能 IPI 触发远端重调度
+ * @internal
  */
 static void mutex_apply_dpcp(cgrtos_mutex_t *mutex)
 {
@@ -561,6 +584,14 @@ static void mutex_apply_dpcp(cgrtos_mutex_t *mutex)
 
 /**
  * @brief DPCP：解锁时恢复 owner 的 prio/deadline
+ * @details 从 saved_prio/saved_deadline 还原；READY 时先 remove 再 restore 再 add。
+ * @param[in,out] mutex 已启用 DPCP 且 ceiling_applied 的互斥量
+ * @return 无
+ * @retval 无
+ * @note 清除 ceiling_applied 标志
+ * @warning 须在 g_klock 内调用
+ * @attention ❌ ISR；❌ 不阻塞
+ * @internal
  */
 static void mutex_restore_dpcp(cgrtos_mutex_t *mutex)
 {
@@ -583,6 +614,18 @@ static void mutex_restore_dpcp(cgrtos_mutex_t *mutex)
 }
 #endif /* CONFIG_USE_DPCP */
 
+/**
+ * @brief 优先级继承：将 mutex owner 提升至 waiter 优先级
+ * @details DPCP mutex 跳过；waiter->prio 须高于 owner。READY 时更新就绪队列；跨核 RUNNING 发 IPI。
+ * @param[in,out] mutex  互斥量
+ * @param[in]     waiter 更高优先级等待者
+ * @return 无
+ * @retval 无
+ * @note 仅 inherit 启用且非 DPCP 时生效
+ * @warning 须在 g_klock 内调用
+ * @attention ❌ ISR；❌ 不阻塞；✅ 可能 IPI
+ * @internal
+ */
 static void mutex_apply_inheritance(cgrtos_mutex_t *mutex, cgrtos_task_t *waiter)
 {
     /* 1. 检查 PI 前置条件（DPCP 用天花板，不做动态 PI） */
@@ -616,13 +659,14 @@ static void mutex_apply_inheritance(cgrtos_mutex_t *mutex, cgrtos_task_t *waiter
 
 /**
  * @brief 根据等待队列最高优先级任务对持有者做 PI 提升
- * 
- * @param mutex 互斥量指针
- * 
- * @details
- * 1. 若未启用 inherit 或无 owner 或 wait_q 为空，直接返回。
- * 2. 取 wait_q 队首（最高优先级等待者）。
- * 3. 若其优先级高于 owner，调用 mutex_apply_inheritance 提升 owner。
+ * @details wait_q 队首为最高优先级等待者；若其 prio 高于 owner 则调用 mutex_apply_inheritance。
+ * @param[in,out] mutex 互斥量指针
+ * @return 无
+ * @retval 无
+ * @note DPCP mutex 直接返回
+ * @warning 须在 g_klock 内调用
+ * @attention ❌ ISR；❌ 不阻塞
+ * @internal
  */
 static void mutex_boost_from_waiters(cgrtos_mutex_t *mutex)
 {
@@ -642,13 +686,14 @@ static void mutex_boost_from_waiters(cgrtos_mutex_t *mutex)
 
 /**
  * @brief 释放互斥量后将持有者优先级恢复为 base_prio
- * 
- * @param mutex 互斥量指针
- * 
- * @details
- * 1. 若未启用 inherit 或无 owner，直接返回。
- * 2. 若 owner->prio 已等于 base_prio，无需恢复。
- * 3. 若 owner 在 READY 队列，先 remove 再恢复 prio 后 re-add。
+ * @details owner->prio 不等于 base_prio 时，READY 状态先 remove 再恢复再 add。
+ * @param[in,out] mutex 互斥量指针
+ * @return 无
+ * @retval 无
+ * @note 无 inherit 或无 owner 时直接返回
+ * @warning 须在 g_klock 内调用
+ * @attention ❌ ISR；❌ 不阻塞
+ * @internal
  */
 static void mutex_restore_inheritance(cgrtos_mutex_t *mutex)
 {
@@ -668,20 +713,21 @@ static void mutex_restore_inheritance(cgrtos_mutex_t *mutex)
 }
 
 /**
- * @brief 获取互斥量锁
- * 
- * @param mutex   互斥量指针
- * @param timeout 阻塞超时 tick 数；0 表示不等待
- * 
- * @return pdPASS 成功加锁；pdFAIL 参数错误、非 owner 解锁或超时
- * 
- * @details
- * 1. 校验 mutex 非空并进入临界区。
- * 2. 若当前任务已是 owner，递增 recursive 计数并返回（递归锁）。
- * 3. 若无 owner，将当前任务设为 owner 并返回。
- * 4. 若 timeout==0 且锁被占用，返回 pdFAIL。
- * 5. 应用优先级继承后将当前任务挂入 wait_q 并 yield。
- * 6. 唤醒后通过 wait_result 返回结果。
+ * @brief 获取互斥量锁（可递归）
+ * @details 空闲则占用并可选应用 DPCP；同 owner 递增 recursive；否则执行 PI（非 DPCP）
+ *          并阻塞等待。CONFIG_DETECT_DEADLOCK 开启时沿 owner 链检测等待环。
+ * @param[in] mutex   互斥量；不可为 NULL
+ * @param[in] timeout 0=非阻塞；portMAX_DELAY=永久；其它=相对 tick
+ * @return 结果码
+ * @retval pdPASS      加锁成功
+ * @retval errPARAM    参数非法
+ * @retval errISR      中断上下文调用
+ * @retval errTIMEOUT  超时或非阻塞失败
+ * @retval errDEADLOCK 检测到死锁环
+ * @retval errOVERFLOW 递归层数超过 CONFIG_MUTEX_MAX_RECURSIVE
+ * @note 必须与 unlock 严格成对；临界区保护 owner/wait_q
+ * @warning 锁顺序不当仍可能死锁；持锁期间长时间阻塞其它资源会扩大优先级反转窗口
+ * @attention ❌ 禁止 ISR；✅ 可能阻塞并引起上下文切换；可能抬升持有者优先级
  */
 int cgrtos_mutex_lock(cgrtos_mutex_t *mutex, tick_t timeout)
 {
@@ -754,19 +800,15 @@ int cgrtos_mutex_lock(cgrtos_mutex_t *mutex, tick_t timeout)
 }
 
 /**
- * @brief 释放互斥量锁
- * 
- * @param mutex 互斥量指针
- * 
- * @return pdPASS 成功；pdFAIL 参数错误或当前任务非 owner
- * 
- * @details
- * 1. 校验 mutex 非空并进入临界区，确认当前任务为 owner。
- * 2. 若 recursive>0，递减后返回（递归解锁）。
- * 3. 恢复持有者优先级（mutex_restore_inheritance），清除 owner。
- * 4. 若有等待者，将其设为 owner 并 wake_ok=1 unblock。
- * 5. 对新 owner 执行 mutex_boost_from_waiters 处理剩余等待者的 PI。
- * 6. 唤醒等待者时 yield 以立即调度。
+ * @brief 互斥量解锁
+ * @details 递归则减层；否则恢复 PI/DPCP、清除 owner，并可能 handoff 给最高等待者后 yield。
+ * @param[in] mutex 互斥量；不可为 NULL；当前任务须为 owner
+ * @return 结果码
+ * @retval pdPASS 成功
+ * @retval pdFAIL 非 owner 或参数非法
+ * @note 须与 lock 成对调用
+ * @warning 非持有者 unlock 失败
+ * @attention ❌ ISR；✅ 可能切换
  */
 int cgrtos_mutex_unlock(cgrtos_mutex_t *mutex)
 {
@@ -828,17 +870,15 @@ int cgrtos_mutex_unlock(cgrtos_mutex_t *mutex)
 }
 
 /**
- * @brief 删除互斥量并唤醒所有等待者
- * 
- * @param mutex 互斥量指针
- * 
- * @return pdPASS 成功；pdFAIL 参数错误
- * 
- * @details
- * 1. 校验 mutex 非空并进入临界区。
- * 2. 逐个弹出 wait_q 等待者，置 wake_ok=0 并 unblock。
- * 3. 清零结构体并递减 g_mtx_cnt。
- * 4. 退出临界区后 yield。
+ * @brief 删除互斥量
+ * @details 唤醒 wait_q 中所有等待者（wake_ok=0）；清零结构体并回收池槽；exit 后 yield。
+ * @param[in] mutex 互斥量；不可为 NULL
+ * @return 结果码
+ * @retval pdPASS 成功
+ * @retval pdFAIL 参数错误
+ * @note 无
+ * @warning 仍有 owner 时行为以实现为准，应先确保解锁
+ * @attention ❌ ISR；✅ 可能切换
  */
 int cgrtos_mutex_delete(cgrtos_mutex_t *mutex)
 {
@@ -865,11 +905,13 @@ int cgrtos_mutex_delete(cgrtos_mutex_t *mutex)
 
 /**
  * @brief 查询互斥量递归额外层数
- * @param mutex 互斥量指针
- * @return recursive 字段；mutex 为空返回 0
- * @details
- * 1. 临界区内读取 recursive。
- * 2. 语义：总持有次数 = recursive + 1（当 owner 非空）；无人持有时为 0。
+ * @details 临界区内读取 recursive；总持有次数 = recursive + 1（owner 非空时）；无人持有返回 0。
+ * @param[in] mutex 互斥量指针
+ * @return 递归层数（不含首次 lock）
+ * @retval >=0 当前 recursive 值；mutex 为空返回 0
+ * @note 只读快照
+ * @warning 无
+ * @attention ✅ ISR 可读；❌ 不阻塞
  */
 uint32_t cgrtos_mutex_get_recursive_count(cgrtos_mutex_t *mutex)
 {
@@ -884,10 +926,14 @@ uint32_t cgrtos_mutex_get_recursive_count(cgrtos_mutex_t *mutex)
 
 /**
  * @brief 查询互斥量当前持有者
- * @param mutex 互斥量指针
- * @return owner TCB；无人持有或参数非法返回 NULL
- * @details
- * 1. 临界区内快照 owner 指针并返回。
+ * @details 临界区内快照 owner TCB 指针并返回。
+ * @param[in] mutex 互斥量指针
+ * @return 持有者任务指针
+ * @retval 非 NULL 当前 owner
+ * @retval NULL    无人持有或 mutex 为空
+ * @note 只读快照
+ * @warning 返回指针在 unlock 后可能失效
+ * @attention ✅ ISR 可读；❌ 不阻塞
  */
 cgrtos_task_t *cgrtos_mutex_get_holder(cgrtos_mutex_t *mutex)
 {
@@ -902,16 +948,13 @@ cgrtos_task_t *cgrtos_mutex_get_holder(cgrtos_mutex_t *mutex)
 
 /**
  * @brief 强制释放指定任务持有的全部互斥量（任务删除安全）
- * @param task 即将删除 / 已标记删除的任务
- * @details
- * 1. task 为空则返回。
- * 2. 扫描 g_mtxs[]：对 owner==task 的互斥量：
- *    a. 调用 mutex_restore_inheritance 恢复 PI；
- *    b. 清零 owner / recursive；
- *    c. 若有等待者：handoff 给最高优先级等待者（wake_ok=1），并 boost；
- *    d. 否则锁空闲。
- * 3. 调用方须已在临界区，或本函数自行 enter/exit（本实现自带临界区）。
- * @note 防止“持锁任务被删导致等待者永久阻塞”。
+ * @details 扫描 g_mtxs[]：对 owner==task 的互斥量恢复 PI、清零 owner/recursive；若有等待者则 handoff 并 boost。
+ * @param[in] task 即将删除的任务 TCB；NULL 则直接返回
+ * @return 无
+ * @retval 无
+ * @note 由 cgrtos_task_delete 等路径调用；防止持锁任务被删导致永久阻塞
+ * @warning 会改变等待者优先级继承状态
+ * @attention ❌ ISR；✅ 可能 unblock 等待者（不主动 yield）
  */
 void cgrtos_mutex_force_release_owned(cgrtos_task_t *task)
 {
@@ -946,18 +989,16 @@ void cgrtos_mutex_force_release_owned(cgrtos_task_t *task)
 }
 
 /**
- * @brief 动态创建定长消息队列
- * 
- * @param len     队列可容纳的消息条数
- * @param item_sz 每条消息的字节大小
- * 
- * @return 成功返回队列指针；参数非法、内存不足或池满返回 NULL
- * 
- * @details
- * 1. 校验 len>0、item_sz>0 且 len*item_sz 不溢出。
- * 2. 进入临界区，在 g_qs[] 中查找 buf==NULL 的空槽。
- * 3. 从 TLSF 堆分配 len*item_sz 字节环形缓冲。
- * 4. 初始化队列字段并递增 g_q_cnt。
+ * @brief 创建消息队列（池分配 + 堆缓冲）
+ * @details 在 g_qs[] 找空槽，从 TLSF 堆分配 len*item_sz 环形缓冲并初始化字段。
+ * @param[in] len     队列可容纳的消息条数；须 >0
+ * @param[in] item_sz 每条消息的字节大小；须 >0
+ * @return 队列指针
+ * @retval 非 NULL 成功
+ * @retval NULL    参数非法、内存不足或池满
+ * @note 对象在静态池中，缓冲由 delete 时 free（非 static 队列）
+ * @warning len*item_sz 溢出时拒绝创建
+ * @attention ❌ ISR；❌ 不阻塞
  */
 cgrtos_queue_t *cgrtos_queue_create(uint32_t len, uint32_t item_sz)
 {
@@ -994,18 +1035,17 @@ cgrtos_queue_t *cgrtos_queue_create(uint32_t len, uint32_t item_sz)
 
 /**
  * @brief 在调用者提供的静态存储上初始化消息队列
- * 
- * @param q       调用者分配的队列结构体指针
- * @param storage 调用者提供的环形缓冲存储区
- * @param len     队列容量（条数）
- * @param item_sz 每条消息字节大小
- * 
- * @return 成功返回 q；参数非法返回 NULL
- * 
- * @details
- * 1. 校验 q、storage、len、item_sz 均非零。
- * 2. 清零结构体，绑定 buf、len、item_sz，标记 storage_static=1。
- * 3. 返回 q（缓冲由调用者管理，delete 时不 free）。
+ * @details 校验 q/storage/len/item_sz；清零结构体，绑定 buf，标记 storage_static=1；delete 时不 free 缓冲。
+ * @param[in] q       调用者分配的队列结构体指针
+ * @param[in] storage 环形缓冲存储区（至少 len * item_sz 字节）
+ * @param[in] len     队列容量（条数）；须 >0
+ * @param[in] item_sz 每条消息字节大小；须 >0
+ * @return 队列指针
+ * @retval 非 NULL 成功
+ * @retval NULL    参数非法
+ * @note 不占用全局池
+ * @warning storage 生命周期须覆盖队列使用期
+ * @attention ❌ ISR；❌ 不阻塞
  */
 cgrtos_queue_t *cgrtos_queue_create_static(cgrtos_queue_t *q, void *storage,
 uint32_t len, uint32_t item_sz)
@@ -1022,16 +1062,16 @@ uint32_t len, uint32_t item_sz)
 }
 
 /**
- * @brief 向环形队列尾部写入一条消息
- * 
- * @param q    队列指针
- * @param data 待写入消息数据（长度 item_sz 字节）
- * 
+ * @brief 向环形队列尾部写入一条消息（假定未满，临界区内）
+ * @details 将 data 拷贝到 buf[head * item_sz]，head 取模递增，cnt 加一。
+ * @param[in,out] q    队列指针
+ * @param[in]     data 待写入消息（item_sz 字节）
  * @return pdPASS
- * 
- * @details
- * 1. 将 data 拷贝到 buf[head * item_sz]。
- * 2. head 取模递增，cnt 加一。
+ * @retval pdPASS 写入成功
+ * @note 由 queue_send_internal 调用；调用方须保证 q->cnt < q->len
+ * @warning 队列已满时行为未定义
+ * @attention ❌ 仅临界区内；❌ 不阻塞
+ * @internal
  */
 static int queue_push(cgrtos_queue_t *q, const void *data)
 {
@@ -1042,16 +1082,16 @@ static int queue_push(cgrtos_queue_t *q, const void *data)
 }
 
 /**
- * @brief 从环形队列头部读出一条消息
- * 
- * @param q   队列指针
- * @param buf 接收缓冲区（至少 item_sz 字节）
- * 
+ * @brief 从环形队列头部读出一条消息（假定非空，临界区内）
+ * @details 从 buf[tail * item_sz] 拷贝到 buf，tail 取模递增，cnt 减一。
+ * @param[in,out] q   队列指针
+ * @param[out]    buf 接收缓冲区（至少 item_sz 字节）
  * @return pdPASS
- * 
- * @details
- * 1. 从 buf[tail * item_sz] 拷贝到 buf。
- * 2. tail 取模递增，cnt 减一。
+ * @retval pdPASS 读出成功
+ * @note 由 queue receive 路径调用；调用方须保证 q->cnt > 0
+ * @warning 队列为空时行为未定义
+ * @attention ❌ 仅临界区内；❌ 不阻塞
+ * @internal
  */
 static int queue_pop(cgrtos_queue_t *q, void *buf)
 {
@@ -1062,19 +1102,18 @@ static int queue_pop(cgrtos_queue_t *q, void *buf)
 }
 
 /**
- * @brief 队列发送内部实现（假定队列未满，在临界区内调用）
- * 
- * @param q          队列指针
- * @param data       待发送消息
- * @param need_yield 若非 NULL 且唤醒接收者则置 1
- * 
+ * @brief 队列发送内部实现（假定在临界区内调用）
+ * @details 未满则 queue_push 并可能唤醒 recv 等待者；挂接 QueueSet 时 poke；满返回 errQUEUE_FULL。
+ * @param[in,out] q          队列指针
+ * @param[in]     data       待发送消息
+ * @param[out]    need_yield 非 NULL 且唤醒接收者时置 1
  * @return pdPASS 成功；errQUEUE_FULL 队列已满
- * 
- * @details
- * 1. 若 cnt<len，调用 queue_push 写入消息。
- * 2. 若有 recv_wait_q 等待者，弹出最高优先级者并 unblock。
- * 3. 若挂接 QueueSet 则 poke 通知。
- * 4. 队列已满返回 errQUEUE_FULL。
+ * @retval pdPASS         写入并可能唤醒等待者
+ * @retval errQUEUE_FULL  无空闲槽位
+ * @note 由 cgrtos_queue_send / send_from_isr 调用
+ * @warning 须在 enter_critical 内；满时不会阻塞
+ * @attention ❌ 仅临界区内；✅ 可能标记 need_yield
+ * @internal
  */
 static int queue_send_internal(cgrtos_queue_t *q, const void *data, int *need_yield)
 {
@@ -1098,19 +1137,19 @@ static int queue_send_internal(cgrtos_queue_t *q, const void *data, int *need_yi
 
 /**
  * @brief 向队列发送一条消息
- * 
- * @param q       队列指针
- * @param data    消息数据指针
- * @param timeout 队列满时的阻塞超时；0 表示不等待
- * 
- * @return pdPASS 成功；errQUEUE_FULL 非阻塞时满；pdFAIL 参数错误或超时
- * 
- * @details
- * 1. 校验 q、data 非空。
- * 2. 循环：进入临界区，若未满则 queue_send_internal 发送并返回。
- * 3. 若 timeout==0 且队列满，返回 errQUEUE_FULL。
- * 4. 将当前任务挂入 send_wait_q 并 yield。
- * 5. 唤醒后将 timeout 置 0 重试（防止被其他发送者抢占槽位）。
+ * @details 队列未满则写入并可能唤醒 recv 等待者；满时按 timeout 挂入 send_wait_q 并 yield 重试。
+ * @param[in] q       队列；不可为 NULL
+ * @param[in] data    消息数据指针（长度 item_sz 字节）；不可为 NULL
+ * @param[in] timeout 0=非阻塞；portMAX_DELAY=永久；其它=相对 tick
+ * @return 结果码
+ * @retval pdPASS         成功
+ * @retval errPARAM       q 或 data 为空
+ * @retval errISR         ISR 中调用阻塞路径（CONFIG_ISR_API_GUARD）
+ * @retval errQUEUE_FULL  非阻塞时队列满
+ * @retval pdFAIL         超时或被 delete 唤醒
+ * @note 唤醒后 timeout 置 0 重试，防止槽位被抢占
+ * @warning data 指向的内存在拷贝完成前须保持有效
+ * @attention ❌ 阻塞路径禁止 ISR；✅ timeout>0 且满时阻塞并切换
  */
 int cgrtos_queue_send(cgrtos_queue_t *q, const void *data, tick_t timeout)
 {
@@ -1163,18 +1202,17 @@ int cgrtos_queue_send(cgrtos_queue_t *q, const void *data, tick_t timeout)
 
 /**
  * @brief 从中断上下文向队列发送一条消息
- *
- * @param q     队列指针
- * @param data  消息数据指针（长度由队列创建时的 item_sz 决定）
- * @param woken 可选；非空则唤醒接收等待者时置 pdTRUE，否则自动 yield_from_isr
- *
- * @return pdPASS 成功；errQUEUE_FULL 队列满；pdFAIL 参数错误
- *
- * @details
- * 1. 校验 q、data 非空。
- * 2. 进入临界区；若 cnt < len 则 queue_send_internal（可能唤醒 recv 等待者并置 need_yield）。
- * 3. 若已满则 rc=errQUEUE_FULL，不阻塞。
- * 4. 退出临界区后 cgrtos_isr_notify_woken(woken, need_yield)。
+ * @details 临界区内若未满则 queue_send_internal；满则 errQUEUE_FULL；退出后 cgrtos_isr_notify_woken。
+ * @param[in]  q     队列指针；不可为 NULL
+ * @param[in]  data  消息数据（长度 item_sz）；不可为 NULL
+ * @param[out] woken 可选；唤醒接收者时置 pdTRUE
+ * @return 结果码
+ * @retval pdPASS         成功
+ * @retval errQUEUE_FULL  队列满
+ * @retval pdFAIL         参数错误
+ * @note 不阻塞
+ * @warning data 须在拷贝完成前有效
+ * @attention ✅ ISR；❌ 不阻塞；✅ 可能 yield_from_isr
  */
 int cgrtos_queue_send_from_isr(cgrtos_queue_t *q, const void *data, BaseType_t *woken)
 {
@@ -1197,18 +1235,19 @@ int cgrtos_queue_send_from_isr(cgrtos_queue_t *q, const void *data, BaseType_t *
 
 /**
  * @brief 从队列接收一条消息
- * 
- * @param q       队列指针
- * @param buf     接收缓冲区
- * @param timeout 队列空时的阻塞超时；0 表示不等待
- * 
- * @return pdPASS 成功；errQUEUE_EMPTY 非阻塞时空；pdFAIL 参数错误或超时
- * 
- * @details
- * 1. 校验 q、buf 非空。
- * 2. 循环：进入临界区，若 cnt>0 则 queue_pop 并唤醒 send_wait_q 等待者。
- * 3. 若 timeout==0 且队列空，返回 errQUEUE_EMPTY。
- * 4. 挂入 recv_wait_q 并 yield，唤醒后 timeout 置 0 重试。
+ * @details 队列非空则 queue_pop 并可能唤醒 send 等待者；空时按 timeout 挂入 recv_wait_q 并 yield 重试。
+ * @param[in]  q       队列；不可为 NULL
+ * @param[out] buf     接收缓冲区（至少 item_sz 字节）；不可为 NULL
+ * @param[in]  timeout 0=非阻塞；portMAX_DELAY=永久；其它=相对 tick
+ * @return 结果码
+ * @retval pdPASS          成功
+ * @retval errPARAM        q 或 buf 为空
+ * @retval errISR          ISR 中调用阻塞路径（CONFIG_ISR_API_GUARD）
+ * @retval errQUEUE_EMPTY  非阻塞时队列空
+ * @retval pdFAIL          超时或被 delete 唤醒
+ * @note 唤醒后 timeout 置 0 重试
+ * @warning buf 须足够容纳 item_sz 字节
+ * @attention ❌ 阻塞路径禁止 ISR；✅ timeout>0 且空时阻塞并切换
  */
 int cgrtos_queue_receive(cgrtos_queue_t *q, void *buf, tick_t timeout)
 {
@@ -1258,18 +1297,16 @@ int cgrtos_queue_receive(cgrtos_queue_t *q, void *buf, tick_t timeout)
 
 /**
  * @brief 从中断上下文从队列接收一条消息
- *
- * @param q     队列指针
- * @param buf   接收缓冲区（至少 item_sz 字节）
- * @param woken 可选；非空则唤醒发送等待者时置 pdTRUE，否则自动 yield_from_isr
- *
- * @return pdPASS 成功；errQUEUE_EMPTY 队列空（含参数非法时）
- *
- * @details
- * 1. 校验 q、buf；非法时返回 errQUEUE_EMPTY。
- * 2. 进入临界区；cnt==0 则立即返回 errQUEUE_EMPTY。
- * 3. queue_pop 取出一条；若 send_wait_q 有等待者则 unblock 并 need_yield=1。
- * 4. 退出临界区后 cgrtos_isr_notify_woken。
+ * @details 临界区内 cnt==0 则 errQUEUE_EMPTY；否则 queue_pop 并可能唤醒 send 等待者。
+ * @param[in]  q     队列指针
+ * @param[out] buf   接收缓冲区（至少 item_sz 字节）
+ * @param[out] woken 可选；唤醒发送者时置 pdTRUE
+ * @return 结果码
+ * @retval pdPASS          成功
+ * @retval errQUEUE_EMPTY  队列空或参数非法
+ * @note 不阻塞
+ * @warning buf 须足够容纳 item_sz 字节
+ * @attention ✅ ISR；❌ 不阻塞；✅ 可能 yield_from_isr
  */
 int cgrtos_queue_receive_from_isr(cgrtos_queue_t *q, void *buf, BaseType_t *woken)
 {
@@ -1297,14 +1334,13 @@ int cgrtos_queue_receive_from_isr(cgrtos_queue_t *q, void *buf, BaseType_t *woke
 
 /**
  * @brief 查询队列中待接收的消息条数
- * 
- * @param q 队列指针
- * 
- * @return 消息条数；q 为 NULL 时返回 0
- * 
- * @details
- * 1. 校验 q 非空。
- * 2. 临界区内读取 cnt 并返回。
+ * @details 临界区内读取 q->cnt 快照。
+ * @param[in] q 队列指针
+ * @return 待接收消息条数
+ * @retval >=0 当前 cnt；q 为 NULL 时返回 0
+ * @note 只读
+ * @warning 并发 send/recv 时值为瞬时快照
+ * @attention ✅ ISR 可读；❌ 不阻塞
  */
 uint32_t cgrtos_queue_messages_waiting(cgrtos_queue_t *q)
 {
@@ -1319,17 +1355,14 @@ uint32_t cgrtos_queue_messages_waiting(cgrtos_queue_t *q)
 
 /**
  * @brief 删除队列并释放资源
- * 
- * @param q 队列指针
- * 
- * @return pdPASS 成功；pdFAIL 参数错误
- * 
- * @details
- * 1. 校验 q 非空并进入临界区。
- * 2. 唤醒 recv_wait_q 与 send_wait_q 中所有等待者（wake_ok=0）。
- * 3. 保存 buf 指针与 storage_static 标志，清零结构体并递减 g_q_cnt。
- * 4. 退出临界区后，若非静态存储则 free(buf)。
- * 5. 若有被唤醒任务则 yield。
+ * @details 唤醒 recv/send 等待者（wake_ok=0）；非静态存储则 free 环形缓冲；清零结构体并回收池槽。
+ * @param[in] q 队列；不可为 NULL
+ * @return 结果码
+ * @retval pdPASS 成功
+ * @retval pdFAIL 参数错误
+ * @note storage_static=1 的队列不 free 缓冲
+ * @warning 删除后禁止再使用指针
+ * @attention ❌ ISR；✅ 可能切换
  */
 int cgrtos_queue_delete(cgrtos_queue_t *q)
 {
@@ -1371,13 +1404,13 @@ int cgrtos_queue_delete(cgrtos_queue_t *q)
 
 /**
  * @brief 动态创建事件组
- * 
- * @return 成功返回事件组指针；池满返回 NULL
- * 
- * @details
- * 1. 进入临界区，在 g_egs[] 中查找 in_use==0 的空槽。
- * 2. 清零结构体，设置 in_use=1，递增 g_eg_cnt。
- * 3. 返回新实例指针。
+ * @details 在 g_egs[] 池分配空槽；清零结构体，设置 in_use=1。
+ * @return 事件组指针
+ * @retval 非 NULL 成功
+ * @retval NULL    池满
+ * @note 对象在静态池中，用户不得 free 指针
+ * @warning 无
+ * @attention ❌ ISR；❌ 不阻塞
  */
 cgrtos_event_group_t *cgrtos_event_group_create(void)
 {
@@ -1397,15 +1430,14 @@ cgrtos_event_group_t *cgrtos_event_group_create(void)
 
 /**
  * @brief 在调用者提供的静态存储上初始化事件组
- * 
- * @param eg 调用者分配的事件组结构体指针
- * 
- * @return 成功返回 eg；参数非法返回 NULL
- * 
- * @details
- * 1. 校验 eg 非空。
- * 2. 清零结构体，设置 in_use=1。
- * 3. 返回 eg（不占用全局池）。
+ * @details 校验 eg 非空；清零结构体，设置 in_use=1；不占用全局池。
+ * @param[in] eg 调用者分配的事件组结构体指针
+ * @return 事件组指针
+ * @retval 非 NULL 成功
+ * @retval NULL    eg 为空
+ * @note delete 时不回收池槽
+ * @warning 同一 storage 未 delete 前勿重复 init
+ * @attention ❌ ISR；❌ 不阻塞
  */
 cgrtos_event_group_t *cgrtos_event_group_create_static(cgrtos_event_group_t *eg)
 {
@@ -1419,16 +1451,16 @@ cgrtos_event_group_t *cgrtos_event_group_create_static(cgrtos_event_group_t *eg)
 
 /**
  * @brief 判断事件组当前标志是否满足任务的等待条件
- * 
- * @param eg   事件组指针
- * @param task 等待中的任务
- * 
+ * @details 校验 block_reason==BLOCK_EVENT；AND 模式要求 (flags&mask)==mask，OR 模式要求 (flags&mask)!=0。
+ * @param[in] eg   事件组指针
+ * @param[in] task 等待中的任务
  * @return 1 条件满足；0 不满足或 task 非 EVENT 阻塞
- * 
- * @details
- * 1. 校验 task 有效且 block_reason 为 BLOCK_EVENT。
- * 2. 若 event_wait_all 为真，检查 (flags & mask) == mask（AND 模式）。
- * 3. 否则检查 (flags & mask) != 0（OR 模式）。
+ * @retval 1 等待条件已满足
+ * @retval 0 不满足或参数无效
+ * @note 由 event_group_set / set_from_isr 遍历 wait_q 时使用
+ * @warning 须在 g_klock 内读取 flags 与 task 字段
+ * @attention ❌ 仅临界区内；❌ 不阻塞
+ * @internal
  */
 static int event_match(cgrtos_event_group_t *eg, cgrtos_task_t *task)
 {
@@ -1443,17 +1475,15 @@ static int event_match(cgrtos_event_group_t *eg, cgrtos_task_t *task)
 
 /**
  * @brief 设置事件组标志位
- * 
- * @param eg    事件组指针
- * @param flags 要置位的标志掩码
- * 
- * @return 设置后的完整 flags 值；eg 为 NULL 时返回 0
- * 
- * @details
- * 1. 校验 eg 非空并进入临界区。
- * 2. 执行 flags |= 待置位掩码。
- * 3. 遍历 wait_q，对满足 event_match 的等待者 remove、wake_ok=1、unblock。
- * 4. 保存当前 flags，退出临界区后 yield。
+ * @details flags |= 掩码；遍历 wait_q 对满足 event_match 的等待者 unblock；exit 后 yield。
+ * @param[in] eg    事件组；不可为 NULL
+ * @param[in] flags 要置位的标志掩码
+ * @return 设置后的完整 flags 值
+ * @retval 非 0  成功（含置位后的位图）
+ * @retval 0     eg 为 NULL
+ * @note 无
+ * @warning 无
+ * @attention ❌ ISR；✅ 可能切换
  */
 event_flags_t cgrtos_event_group_set(cgrtos_event_group_t *eg, event_flags_t flags)
 {
@@ -1483,18 +1513,16 @@ event_flags_t cgrtos_event_group_set(cgrtos_event_group_t *eg, event_flags_t fla
 
 /**
  * @brief 从中断上下文设置事件组标志位
- *
- * @param eg    事件组指针
- * @param flags 要置位的标志掩码（与现有 flags 按位或）
- * @param woken 可选；非空则唤醒任一等待者时置 pdTRUE，否则自动 yield_from_isr
- *
- * @return 设置后的完整 flags 值；eg 为 NULL 时返回 0
- *
- * @details
- * 1. 校验 eg；进入临界区。
- * 2. eg->flags |= flags。
- * 3. 遍历 wait_q：对满足 event_match 的等待者 remove、wake_ok=1、unblock，并 need_yield=1。
- * 4. 退出临界区后 cgrtos_isr_notify_woken；返回最新 flags。
+ * @details eg->flags |= flags；遍历 wait_q 对满足 event_match 的等待者 unblock；cgrtos_isr_notify_woken。
+ * @param[in]  eg    事件组指针
+ * @param[in]  flags 要置位的标志掩码
+ * @param[out] woken 可选；唤醒等待者时置 pdTRUE
+ * @return 设置后的完整 flags 值
+ * @retval 非 0  成功
+ * @retval 0     eg 为 NULL
+ * @note 不阻塞
+ * @warning 无
+ * @attention ✅ ISR；❌ 不阻塞；✅ 可能 yield_from_isr
  */
 event_flags_t cgrtos_event_group_set_from_isr(cgrtos_event_group_t *eg,
                                               event_flags_t flags,
@@ -1528,17 +1556,15 @@ event_flags_t cgrtos_event_group_set_from_isr(cgrtos_event_group_t *eg,
 
 /**
  * @brief ISR 清除事件组指定标志位（不唤醒等待者）
- *
- * @param eg    事件组指针
- * @param flags 要清除的标志掩码（从当前 flags 中按位清除）
- *
- * @return 清除后的完整 flags 值；eg 为 NULL 时返回 0
- *
- * @details
- * 1. 校验 eg；进入临界区。
- * 2. eg->flags &= ~flags。
- * 3. 不遍历 wait_q、不 unblock（清位不会使等待条件变为真）。
- * 4. 退出临界区并返回新 flags；无 woken/yield。
+ * @details 临界区内 eg->flags &= ~flags；不遍历 wait_q、不 unblock。
+ * @param[in] eg    事件组指针
+ * @param[in] flags 要清除的标志掩码
+ * @return 清除后的完整 flags 值
+ * @retval 非 0  成功
+ * @retval 0     eg 为 NULL
+ * @note 清位不会使 AND/OR 等待条件变为真
+ * @warning 无
+ * @attention ✅ ISR；❌ 不阻塞；❌ 不唤醒
  */
 event_flags_t cgrtos_event_group_clear_from_isr(cgrtos_event_group_t *eg,
                                                 event_flags_t flags)
@@ -1555,16 +1581,15 @@ event_flags_t cgrtos_event_group_clear_from_isr(cgrtos_event_group_t *eg,
 
 /**
  * @brief 清除事件组指定标志位
- * 
- * @param eg    事件组指针
- * @param flags 要清除的标志掩码
- * 
- * @return 清除后的完整 flags 值；eg 为 NULL 时返回 0
- * 
- * @details
- * 1. 校验 eg 非空并进入临界区。
- * 2. 执行 flags &= ~待清除掩码。
- * 3. 返回当前 flags 并退出临界区。
+ * @details 临界区内 eg->flags &= ~flags；不唤醒等待者。
+ * @param[in] eg    事件组指针
+ * @param[in] flags 要清除的标志掩码
+ * @return 清除后的完整 flags 值
+ * @retval 非 0  成功
+ * @retval 0     eg 为 NULL
+ * @note 任务上下文版本；与 clear_from_isr 语义一致但不走 woken 路径
+ * @warning 无
+ * @attention ❌ ISR；❌ 不阻塞；❌ 不唤醒
  */
 event_flags_t cgrtos_event_group_clear(cgrtos_event_group_t *eg, event_flags_t flags)
 {
@@ -1580,16 +1605,17 @@ event_flags_t cgrtos_event_group_clear(cgrtos_event_group_t *eg, event_flags_t f
 
 /**
  * @brief 等待事件组标志（不清除）
- * 
- * @param eg       事件组指针
- * @param flags    等待的标志掩码
- * @param wait_all 1=AND 等待全部置位；0=OR 等待任一置位
- * @param timeout  阻塞超时 tick 数；0 表示不等待
- * 
- * @return 满足条件的 flags 子集；超时或未满足返回 0
- * 
- * @details
- * 1. 委托 cgrtos_event_group_wait_bits，clear_on_exit 固定为 0。
+ * @details 委托 cgrtos_event_group_wait_bits，clear_on_exit 固定为 0。
+ * @param[in] eg       事件组指针
+ * @param[in] flags    等待的标志掩码
+ * @param[in] wait_all 1=AND 全部置位；0=OR 任一置位
+ * @param[in] timeout  0=非阻塞；portMAX_DELAY=永久；其它=相对 tick
+ * @return 满足条件的 flags 子集
+ * @retval 非 0  条件满足
+ * @retval 0     超时或未满足
+ * @note 成功返回时不自动清除位
+ * @warning 多任务同时 wait 须自行设计协议
+ * @attention ❌ 阻塞路径禁止 ISR；✅ timeout>0 且未满足时阻塞并切换
  */
 event_flags_t cgrtos_event_group_wait(cgrtos_event_group_t *eg, event_flags_t flags,
 uint8_t wait_all, tick_t timeout)
@@ -1599,22 +1625,18 @@ uint8_t wait_all, tick_t timeout)
 
 /**
  * @brief 等待事件组标志（可选退出时清除）
- * 
- * @param eg            事件组指针
- * @param flags         等待的标志掩码
- * @param clear_on_exit 1=成功返回后清除已满足的 flags 位
- * @param wait_all      1=AND 等待；0=OR 等待
- * @param timeout       阻塞超时 tick 数；0 表示不等待
- * 
- * @return 满足条件的 flags 子集；超时或未满足返回 0
- * 
- * @details
- * 1. 校验 eg 非空并进入临界区。
- * 2. 按 wait_all 模式检查当前 flags 是否已满足。
- * 3. 已满足则返回匹配子集，可选清除对应位。
- * 4. timeout==0 且未满足则返回 0。
- * 5. 记录 event_wait_mask、event_wait_all 到当前任务并挂入 wait_q。
- * 6. yield 后再次检查 flags，返回结果并可选清除。
+ * @details 已满足则立即返回匹配子集；否则记录 wait_mask/wait_all 挂入 wait_q 并 yield 后再次检查。
+ * @param[in] eg            事件组；不可为 NULL
+ * @param[in] flags         等待的标志掩码
+ * @param[in] clear_on_exit 1=成功返回后清除已满足的 flags 位
+ * @param[in] wait_all      1=AND 等待全部置位；0=OR 等待任一置位
+ * @param[in] timeout       0=非阻塞；portMAX_DELAY=永久；其它=相对 tick
+ * @return 满足条件的 flags 子集
+ * @retval 非 0  条件满足（flags 与当前位图的交集）
+ * @retval 0     超时、未满足、参数非法或 ISR 阻塞路径
+ * @note clear_on_exit 仅在成功返回时清除对应位
+ * @warning 多个任务同时 wait 同一组时须自行设计同步协议
+ * @attention ❌ 阻塞路径禁止 ISR；✅ timeout>0 且未满足时阻塞并切换
  */
 event_flags_t cgrtos_event_group_wait_bits(cgrtos_event_group_t *eg, event_flags_t flags,
 uint8_t clear_on_exit, uint8_t wait_all,
@@ -1669,14 +1691,14 @@ tick_t timeout)
 
 /**
  * @brief 读取事件组当前全部标志位
- * 
- * @param eg 事件组指针
- * 
- * @return 当前 flags；eg 为 NULL 时返回 0
- * 
- * @details
- * 1. 校验 eg 非空。
- * 2. 临界区内读取 flags 并返回。
+ * @details 临界区内读取 eg->flags 快照。
+ * @param[in] eg 事件组指针
+ * @return 当前 flags 位图
+ * @retval 非 0  当前标志（eg 有效时）
+ * @retval 0     eg 为 NULL
+ * @note 只读
+ * @warning 并发 set/clear 时值为瞬时快照
+ * @attention ✅ ISR 可读；❌ 不阻塞
  */
 event_flags_t cgrtos_event_group_get(cgrtos_event_group_t *eg)
 {
@@ -1691,16 +1713,14 @@ event_flags_t cgrtos_event_group_get(cgrtos_event_group_t *eg)
 
 /**
  * @brief 删除事件组并唤醒所有等待者
- * 
- * @param eg 事件组指针
- * 
- * @return pdPASS 成功；pdFAIL 参数错误
- * 
- * @details
- * 1. 校验 eg 非空并进入临界区。
- * 2. 逐个弹出 wait_q 等待者，置 wake_ok=0 并 unblock。
- * 3. 清零结构体并递减 g_eg_cnt。
- * 4. 退出临界区后若有被唤醒任务则 yield。
+ * @details 弹出 wait_q 全部等待者（wake_ok=0）并 unblock；清零结构体；可能 yield。
+ * @param[in] eg 事件组指针
+ * @return 结果码
+ * @retval pdPASS 成功
+ * @retval pdFAIL eg 为空
+ * @note 动态池对象递减 g_eg_cnt；静态对象仅清零
+ * @warning 删除后禁止再使用指针
+ * @attention ❌ ISR；✅ 可能切换
  */
 int cgrtos_event_group_delete(cgrtos_event_group_t *eg)
 {

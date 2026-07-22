@@ -1,12 +1,17 @@
 /**
  * @file task.c
  * @brief 任务生命周期、通知、延迟与 idle
+ * @author Cong Zhou / Juilletioi
+ * @version 5.0.0
+ * @date 2026-07-22
+ * @copyright CG-RTOS
+ *
  * @details 提供任务创建/删除/挂起/恢复、优先级与亲和性、
  *          周期/截止时间、通知、延迟及 per-core idle 任务实现。
  *
- * 任务栈内嵌于 TCB（CONFIG_TASK_STACK_WORDS）。
- * 亲和性：cpu_aff==0xFF 表示可迁移；否则固定到指定 hart。
- * Idle：可选 busy mtime 泵（QEMU）；执行工作窃取。
+ *          任务栈内嵌于 TCB（CONFIG_TASK_STACK_WORDS）。
+ *          亲和性：cpu_aff==0xFF 表示可迁移；否则固定到指定 hart。
+ *          Idle：可选 busy mtime 泵（QEMU）；执行工作窃取。
  */
 #include "cgrtos.h"
 #include <string.h>
@@ -28,6 +33,16 @@ extern char __global_pointer$;
 extern cgrtos_hook_fn_t g_idle_hook;
 #if CONFIG_IDLE_SLEEP_HOOK
 cgrtos_hook_fn_t g_idle_sleep_hook;
+/**
+ * @brief 注册 idle 睡眠前钩子函数
+ * @details 将全局 g_idle_sleep_hook 设为 hook；在 idle 任务进入 WFI/忙等前调用。
+ * @param[in] hook 钩子回调；NULL 表示清除
+ * @return 无
+ * @retval 无
+ * @note 钩子须短小非阻塞
+ * @warning 钩子内阻塞会延迟 idle 循环与工作窃取
+ * @attention ❌ ISR；❌ 可能阻塞或上下文切换
+ */
 void cgrtos_set_idle_sleep_hook(cgrtos_hook_fn_t hook)
 {
     g_idle_sleep_hook = hook;
@@ -36,23 +51,14 @@ void cgrtos_set_idle_sleep_hook(cgrtos_hook_fn_t hook)
 #endif
 
 /**
- * @brief 初始化任务栈帧，使其可从 context_switch 首次启动
- * @param task 目标任务 TCB，其内嵌 stack[] 将被填充
- * @param fn   任务入口函数，写入 trap 帧 mepc
- * @param arg  传递给入口的 a0 参数
- * @return 初始栈指针，指向 trap 帧底部（34 字寄存器 + 对齐区）
- * @details
- * 1. 将栈顶向下预留 16 字节对齐区，再向下分配 34 个 uint64_t 的 trap 帧。
- * 2. 若启用栈溢出检测，用 0xA5 填充整栈并在 stack[0] 写入金丝雀；否则仅清零 trap 帧。
- * 3. 按 trap_vector / context_switch 布局写入 gp、a0、mcause、mepc、mstatus、mscratch。
- * 4. mstatus 设为 M 模式、MPIE=1、MIE=0，使 mret 进入任务时中断仍关闭直至调度器开启。
- * 5. 返回 sp 供 TCB->sp 保存，供 start_first_task / context_switch 使用。
- */
-
-/**
- * @brief 任务入口 trampoline：调用用户函数后强制 exit，闭环 TERMINATED
- * @details 步骤：1. 取本核 current；2. 调 entry_fn(entry_arg)；3. cgrtos_task_exit。
- * @note mepc 指向本函数；禁止用户函数 return 后跑飞。
+ * @brief 任务入口 trampoline：调用用户函数后强制 exit
+ * @details 取本核 current，调用 entry_fn(entry_arg)，随后 cgrtos_task_exit 闭环 TERMINATED。
+ * @param[in] arg 未使用（参数经 TCB entry_arg 传递）
+ * @return 无（经 cgrtos_task_exit 永不返回）
+ * @retval 无
+ * @note mepc 指向本函数；禁止用户函数 return 后跑飞
+ * @warning 无
+ * @attention @internal
  */
 static void task_bootstrap(void *arg)
 {
@@ -65,6 +71,19 @@ static void task_bootstrap(void *arg)
     cgrtos_task_exit();
 }
 
+/**
+ * @brief 初始化任务栈帧，使其可从 context_switch 首次启动
+ * @details 栈顶向下预留 16 字节对齐区并分配 34 字 trap 帧；可选整栈 0xA5 填充与金丝雀；
+ *          按 trap_vector 布局写入 gp/a0/mcause/mepc/mstatus/mscratch。
+ * @param[in] task 目标任务 TCB，其内嵌 stack[] 将被填充
+ * @param[in] fn   任务入口函数，写入 trap 帧 mepc
+ * @param[in] arg  传递给入口的 a0 参数
+ * @return 初始栈指针，指向 trap 帧底部
+ * @retval 非 NULL trap 帧底 sp
+ * @note mstatus 设为 M 模式、MPIE=1、MIE=0
+ * @warning 栈布局须与 trap_vector / context_switch 约定一致
+ * @attention @internal
+ */
 static uint64_t *task_init_stack(cgrtos_task_t *task, task_func_t fn, void *arg)
 {
     /* 1. 栈顶 16 字节对齐后向下分配 trap 帧 */
@@ -93,12 +112,13 @@ static uint64_t *task_init_stack(cgrtos_task_t *task, task_func_t fn, void *arg)
 
 /**
  * @brief 在 g_tasks 数组中分配可复用的空闲 TCB 槽位
- * @return 可用 TCB 指针；任务表满或所有候选槽仍被某核 g_current 引用时返回 NULL
- * @details
- * 1. 线性扫描 g_tasks[0..CONFIG_MAX_TASKS)，寻找 id==0 或 state==TASK_DELETED 的槽。
- * 2. 对每个候选槽，遍历所有 hart 的 g_current[]，确认无核仍持有该 TCB 指针。
- * 3. 若某核 g_current 仍指向该 TCB，跳过以免删除与切换竞态导致 use-after-free。
- * 4. 返回第一个通过存活检查的 TCB 指针；扫描完毕无可用槽则返回 NULL。
+ * @details 线性扫描 id==0 或 state==DELETED/TERMINATED 的槽；确认无核 g_current 仍引用后返回。
+ * @return 可用 TCB 指针；任务表满或候选槽仍被引用时返回 NULL
+ * @retval 非 NULL 可复用 TCB
+ * @retval NULL    无可用槽或存在 use-after-free 竞态
+ * @note 调用方须已持临界区
+ * @warning 跳过仍被 g_current 引用的槽以防 UAF
+ * @attention @internal
  */
 static cgrtos_task_t *task_alloc_slot(void)
 {
@@ -126,12 +146,14 @@ static cgrtos_task_t *task_alloc_slot(void)
 
 /**
  * @brief 按单调递增的任务 ID 在 g_tasks 中查找 TCB
- * @param id 创建时分配的任务 ID（g_next_id 序列）
+ * @details 线性扫描 g_tasks 全表，比较 task->id 与目标 id。
+ * @param[in] id 创建时分配的任务 ID（g_next_id 序列）
  * @return 匹配的 TCB 指针；未找到返回 NULL
- * @details
- * 1. 线性扫描 g_tasks 全表。
- * 2. 比较 task->id 与目标 id，相等则返回该 TCB 地址。
- * 3. 扫描结束无匹配则返回 NULL。
+ * @retval 非 NULL 找到
+ * @retval NULL    未找到
+ * @note 无锁查找，SMP 下存在撕裂风险
+ * @warning 无
+ * @attention @internal
  */
 static cgrtos_task_t *task_find(task_id_t id)
 {
@@ -145,11 +167,14 @@ static cgrtos_task_t *task_find(task_id_t id)
 
 /**
  * @brief 将内核内部 task_state_t 映射为对外 API 枚举 eTaskState_t
- * @param state 内部任务状态（TASK_READY / RUNNING / …）
- * @return 对应的 eTaskState_t；未知状态返回 eInvalid
- * @details
- * 1. 按 switch-case 逐一映射 READY/RUNNING/BLOCKED/SUSPENDED/DELETED。
- * 2. 未覆盖的枚举值走 default 分支返回 eInvalid。
+ * @details 按 switch-case 映射 READY/RUNNING/BLOCKED/SUSPENDED/DELETED/TERMINATED；未知返回 eInvalid。
+ * @param[in] state 内部任务状态
+ * @return 对应的 eTaskState_t
+ * @retval eReady/eRunning/eBlocked/eSuspended/eDeleted/eTerminated 对应状态
+ * @retval eInvalid 未知状态
+ * @note 无
+ * @warning 无
+ * @attention @internal
  */
 static eTaskState_t task_state_to_enum(task_state_t state)
 {
@@ -166,21 +191,19 @@ static eTaskState_t task_state_to_enum(task_state_t state)
 
 /**
  * @brief 创建新任务并加入就绪队列
- * @param name   任务名（可为 NULL，默认 "task"）
- * @param fn     入口函数，不可为 NULL
- * @param arg    传递给入口的 void* 参数
- * @param prio   优先级；超过 CONFIG_MAX_PRIORITY 则截断至最大值
- * @param policy 调度策略（RR/PRIORITY/CFS/EDF/HYBRID）
+ * @details 从 TCB 池分配槽，初始化栈（经 bootstrap）、策略与亲和性，加入就绪结构；
+ *          SMP 下可能向目标核发 IPI。
+ * @param[in] name   任务名（可为 NULL，默认 "task"）
+ * @param[in] fn     入口函数，不可为 NULL
+ * @param[in] arg    传递给入口的 void* 参数
+ * @param[in] prio   优先级；超过 CONFIG_MAX_PRIORITY 则截断至最大值
+ * @param[in] policy 调度策略（RR/PRIORITY/CFS/EDF/HYBRID）
  * @return 新任务 ID；参数无效、任务表满或槽位分配失败时返回 (task_id_t)-1
- * @details
- * 1. 校验 fn 非空，并将 prio 截断到 CONFIG_MAX_PRIORITY。
- * 2. 进入临界区，检查 g_task_count 是否已达 CONFIG_MAX_TASKS 上限。
- * 3. 调用 task_alloc_slot 获取可复用 TCB，失败则退出临界区并返回 -1。
- * 4. 清零 TCB，初始化各调度链表节点（delayed/cfs/edf），分配单调递增 id。
- * 5. 设置名称、优先级、策略、亲和性（默认 0xFF 可迁移）及初始 run_cpu。
- * 6. 调用 task_init_stack 构建 trap 帧，记录 last_run，加入就绪队列。
- * 7. 退出临界区；SMP 下若任务落在对端核则发 IPI 唤醒调度。
- * 8. 非临时任务名 "tmp" 时打印创建日志，返回新 id。
+ * @retval >0           成功
+ * @retval (task_id_t)-1 参数非法 / 池满 / 策略禁用
+ * @note 任务入口返回后经 bootstrap 调用 cgrtos_task_exit
+ * @warning 禁止应用直接改写返回 ID 对应 TCB 字段
+ * @attention ❌ ISR；❌ 通常不阻塞调用者（可能 IPI 触发他核调度）
  */
 task_id_t cgrtos_task_create(const char *name, task_func_t fn, void *arg,
                              uint8_t prio, sched_policy_t policy)
@@ -289,18 +312,14 @@ task_id_t cgrtos_task_create(const char *name, task_func_t fn, void *arg,
 
 /**
  * @brief 删除指定任务（安全：禁删 idle、释锁、延迟回收槽）
- * @param id 待删除任务 ID
+ * @details 释放其持有互斥量、摘就绪/等待队列、置 DELETED；若仍在他核运行则 IPI 后延迟 reclaim。
+ * @param[in] id 待删除任务 ID
  * @return pdPASS 成功；任务不存在 / 试图删 idle 返回 pdFAIL
- * @details
- * 1. 进入临界区，按 id 查找 TCB；无效则 pdFAIL。
- * 2. 禁止删除各核 idle TCB（比较指针）。
- * 3. 调用 cgrtos_mutex_force_release_owned 释放其持有的全部互斥量。
- * 4. READY → 摘就绪队列；BLOCKED → purge_waits。
- * 5. 清除 EDF 周期并解除时间轮。
- * 6. 置 state=TASK_DELETED；g_task_count--；g_task_delete_count++。
- * 7. **不立即清 id**：若仍为某核 g_current，保留 id 防槽位复用；
- *    仅当已不在任何核运行时才 id=0 立刻回收。
- * 8. 远程核仍跑该 TCB 则发 IPI；exit_critical 后 yield。
+ * @retval pdPASS 成功标记删除
+ * @retval pdFAIL 任务不存在或试图删除 idle
+ * @note 自删除会 yield 切走；仍运行时不立即清 id
+ * @warning 删除仍持锁任务依赖 force_release
+ * @attention ❌ ISR；✅ 可能触发调度（自删/同核 RUNNING）
  */
 int cgrtos_task_delete(task_id_t id)
 {
@@ -388,11 +407,13 @@ int cgrtos_task_delete(task_id_t id)
 
 /**
  * @brief 切换离开已删除任务后回收 TCB（清 id）
- * @param task 可能为 TASK_DELETED 的 TCB
- * @details
- * 1. task 为空或 state 非 DELETED 则返回。
- * 2. 若仍被任意核 g_current 引用则暂不回收。
- * 3. 否则将 id 置 0，允许 task_alloc_slot 复用。
+ * @details task 为空或 state 非 DELETED 则返回；仍被任意核 g_current 引用则暂不回收，否则 id=0。
+ * @param[in] task 可能为 TASK_DELETED 的 TCB
+ * @return 无
+ * @retval 无
+ * @note 由调度器上下文切换路径调用
+ * @warning 过早清 id 将导致槽位复用 UAF
+ * @attention ❌ ISR；❌ block/switch
  */
 void cgrtos_task_reclaim_deleted(cgrtos_task_t *task)
 {
@@ -409,12 +430,14 @@ void cgrtos_task_reclaim_deleted(cgrtos_task_t *task)
 
 /**
  * @brief 检查任务栈金丝雀
- * @param id 任务 ID
+ * @details 查找 TCB；CONFIG_CHECK_STACK_OVERFLOW 关闭时直接 pdPASS；否则比较 stack[0] 与金丝雀值。
+ * @param[in] id 任务 ID
  * @return pdPASS 完好；pdFAIL 溢出/无效
- * @details
- * 1. 查找 TCB；失败返回 pdFAIL。
- * 2. CONFIG_CHECK_STACK_OVERFLOW 关闭时直接 pdPASS。
- * 3. 比较 stack[0] 与 STACK_CANARY_VALUE。
+ * @retval pdPASS 栈底金丝雀完好
+ * @retval pdFAIL 溢出或无效任务
+ * @note 需 CONFIG_CHECK_STACK_OVERFLOW 才有实际检测
+ * @warning 无
+ * @attention ✅ ISR；❌ block/switch
  */
 int cgrtos_task_check_stack(task_id_t id)
 {
@@ -432,11 +455,13 @@ int cgrtos_task_check_stack(task_id_t id)
 
 /**
  * @brief 栈溢出统一处理：计数 → 钩子 → 默认断言停机
- * @param task 溢出任务（可空）
- * @details
- * 1. 递增 g_stack_overflow_count（定义于 cgrtos.c）。
- * 2. 若注册了栈溢出钩子则调用。
- * 3. 打印任务名并 cgrtos_assert_failed 停机。
+ * @details 递增 g_stack_overflow_count；若注册钩子则调用；打印任务名并 cgrtos_assert_failed 停机。
+ * @param[in] task 溢出任务（可空）
+ * @return 无（不返回）
+ * @retval 无
+ * @note 调度器切换 / tick 抽检路径调用
+ * @warning 默认路径将 halt 系统
+ * @attention ✅ ISR；❌ block/switch
  */
 void cgrtos_task_handle_stack_overflow(cgrtos_task_t *task)
 {
@@ -454,8 +479,14 @@ void cgrtos_task_handle_stack_overflow(cgrtos_task_t *task)
 
 /**
  * @brief 查询任务累计运行 tick（exec）
- * @param id 任务 ID
+ * @details 线性查找 TCB 并返回 exec 字段。
+ * @param[in] id 任务 ID
  * @return exec；无效任务返回 0
+ * @retval >=0 累计运行 tick
+ * @retval 0     无效任务
+ * @note 无锁快照，SMP 下可能略有滞后
+ * @warning 无
+ * @attention ✅ ISR；❌ block/switch
  */
 tick_t cgrtos_task_get_runtime(task_id_t id)
 {
@@ -468,13 +499,14 @@ tick_t cgrtos_task_get_runtime(task_id_t id)
 
 /**
  * @brief 挂起指定任务，使其不再参与调度
- * @param id 任务 ID
+ * @details 从就绪队列移除并置 SUSPENDED；对 RUNNING 目标会请求重调度。
+ * @param[in] id 任务 ID
  * @return pdPASS 成功；任务不存在返回 pdFAIL
- * @details
- * 1. 进入临界区，查找 TCB；未找到则返回 pdFAIL。
- * 2. 若 READY，从就绪队列移除；若 BLOCKED，清除等待关系。
- * 3. 设置 state=TASK_SUSPENDED，退出临界区。
- * 4. 调用 sched_yield 触发可能的调度切换。
+ * @retval pdPASS 成功
+ * @retval pdFAIL 无效 ID
+ * @note 可用 resume 恢复
+ * @warning 挂起持有互斥量的任务可能导致优先级反转/死锁
+ * @attention ❌ ISR；✅ 可能引起切换
  */
 int cgrtos_task_suspend(task_id_t id)
 {
@@ -499,12 +531,14 @@ int cgrtos_task_suspend(task_id_t id)
 
 /**
  * @brief 恢复此前被挂起的任务
- * @param id 任务 ID
+ * @details 置 READY 并入队；退出临界区后 yield，使高优先级就绪任务有机会运行。
+ * @param[in] id 任务 ID
  * @return pdPASS 成功；任务不存在或当前非 SUSPENDED 返回 pdFAIL
- * @details
- * 1. 进入临界区，查找 TCB；不存在或 state 非 SUSPENDED 则失败。
- * 2. 调用 sched_add_ready 重新加入就绪队列。
- * 3. 退出临界区并 yield，使高优先级就绪任务有机会运行。
+ * @retval pdPASS 成功
+ * @retval pdFAIL 无效或不在挂起态
+ * @note 无
+ * @warning 无
+ * @attention ❌ ISR；✅ 可能引起切换
  */
 int cgrtos_task_resume(task_id_t id)
 {
@@ -523,15 +557,15 @@ int cgrtos_task_resume(task_id_t id)
 
 /**
  * @brief 修改任务调度优先级
- * @param id   任务 ID
- * @param prio 新优先级（0..CONFIG_MAX_PRIORITY）
+ * @details READY 时先 remove 再改 prio/base_prio 再 add_ready；非 READY 仅更新字段；最后 yield。
+ * @param[in] id   任务 ID
+ * @param[in] prio 新优先级（0..CONFIG_MAX_PRIORITY）
  * @return pdPASS 成功；prio 越界或任务不存在返回 pdFAIL
- * @details
- * 1. 校验 prio 不超过 CONFIG_MAX_PRIORITY。
- * 2. 进入临界区查找 TCB；未找到则失败。
- * 3. 若任务当前在 READY 队列，先 remove 再改 prio/base_prio，再 add_ready（保持队列有序）。
- * 4. 非 READY 状态仅更新 prio/base_prio 字段。
- * 5. 退出临界区并 yield。
+ * @retval pdPASS 成功
+ * @retval pdFAIL 越界或任务不存在
+ * @note 与 PI/DPCP 共存时有效 prio 可能仍被抬升
+ * @warning 降低持锁任务优先级可能加剧优先级反转窗口
+ * @attention ❌ ISR；✅ 可能 yield
  */
 int cgrtos_task_set_priority(task_id_t id, uint8_t prio)
 {
@@ -570,8 +604,15 @@ int cgrtos_task_set_priority(task_id_t id, uint8_t prio)
 #if CONFIG_USE_PREEMPT_THRESH
 /**
  * @brief 设置抢占阈值
- * @details 步骤：1. 查 TCB；2. thresh 须 >= base_prio 且 <= MAX；3. 写入字段；4. yield。
- * @risk 阈值过高会推迟高优先级响应，仅用于短临界段降低抖动。
+ * @details 查 TCB；thresh 须 >= base_prio 且 <= MAX；写入 preempt_thresh 后 yield。
+ * @param[in] id     任务 ID
+ * @param[in] thresh 阈值；须 >= base_prio 且 <= CONFIG_MAX_PRIORITY
+ * @return pdPASS 成功；参数非法或任务不存在返回 pdFAIL
+ * @retval pdPASS 成功
+ * @retval pdFAIL 参数非法或任务不存在
+ * @note 默认 create 时 thresh=prio（经典抢占）
+ * @warning 阈值过高会推迟高优先级响应，仅用于短临界段降抖动
+ * @attention ❌ ISR；✅ 可能 yield
  */
 int cgrtos_task_set_preempt_threshold(task_id_t id, uint8_t thresh)
 {
@@ -594,6 +635,17 @@ int cgrtos_task_set_preempt_threshold(task_id_t id, uint8_t thresh)
     return pdPASS;
 }
 
+/**
+ * @brief 读取任务抢占阈值
+ * @details 临界区内读取 preempt_thresh 字段。
+ * @param[in] id 任务 ID
+ * @return 阈值数值；无效任务返回 0
+ * @retval 0..CONFIG_MAX_PRIORITY 有效阈值
+ * @retval 0 亦可能表示无效任务
+ * @note 无
+ * @warning 无
+ * @attention ❌ ISR（持 g_klock）；❌ 不阻塞
+ */
 uint8_t cgrtos_task_get_preempt_threshold(task_id_t id)
 {
     cgrtos_enter_critical();
@@ -608,9 +660,13 @@ uint8_t cgrtos_task_get_preempt_threshold(task_id_t id)
 #endif /* CONFIG_USE_PREEMPT_THRESH */
 
 /**
- * @brief 当前任务退出：TERMINATED → 复用 delete 路径
- * @details 步骤：1. 取 current；2. 置 TERMINATED；3. 调 delete(self) 进入 DELETED/回收。
- * @note 永不返回；idle 禁止。
+ * @brief 当前任务正常退出（TERMINATED→DELETED）
+ * @details 置 TERMINATED 后调用 delete(self)；之后死循环 yield。bootstrap 在入口返回时自动调用。
+ * @return 无（永不返回）
+ * @retval 无
+ * @note idle 禁止退出
+ * @warning 在持有互斥量时退出依赖 delete 的 force_release
+ * @attention ❌ ISR；✅ 必定引起调度
  */
 void cgrtos_task_exit(void)
 {
@@ -637,6 +693,18 @@ void cgrtos_task_exit(void)
 }
 
 #if CONFIG_SCHED_STATS
+/**
+ * @brief 查询任务调度统计快照
+ * @details 临界区内填充 max/last/latency_sum/samples、exec_ticks 与 cpu_util_permille。
+ * @param[in]  id  任务 ID
+ * @param[out] out 输出结构；不可为 NULL
+ * @return pdPASS 成功；参数或任务无效返回 pdFAIL
+ * @retval pdPASS 成功
+ * @retval pdFAIL out 为 NULL 或任务不存在
+ * @note 需 CONFIG_SCHED_STATS 编译启用
+ * @warning 无
+ * @attention ❌ ISR（持 g_klock）；❌ 不阻塞
+ */
 int cgrtos_task_get_sched_stats(task_id_t id, cgrtos_task_sched_stats_t *out)
 {
     if (!out) {
@@ -666,14 +734,15 @@ int cgrtos_task_get_sched_stats(task_id_t id, cgrtos_task_sched_stats_t *out)
 
 /**
  * @brief 设置任务 CPU 亲和性（硬绑定或可迁移）
- * @param id  任务 ID
- * @param cpu 目标核编号；0xFF 表示无亲和性限制、可负载均衡迁移
+ * @details 0xFF 表示可迁移；否则硬绑定到指定 hart；READY 时重入队；绑定非本核则 IPI 后 yield。
+ * @param[in] id  任务 ID
+ * @param[in] cpu 目标核编号；0xFF 表示无亲和性限制、可负载均衡迁移
  * @return pdPASS 成功；cpu 非法、次核离线或任务不存在返回 pdFAIL
- * @details
- * 1. 校验 cpu：须为 0xFF 或有效核号；硬绑定到离线次核则拒绝。
- * 2. 进入临界区查找 TCB；READY 时先从就绪队列移除。
- * 3. 写入 cpu_aff；若仍 READY 则按新亲和性重新入队。
- * 4. 若绑定到非本核，向目标核发 IPI；最后 yield。
+ * @retval pdPASS 成功
+ * @retval pdFAIL 无效任务或 cpu 非法/次核离线
+ * @note 可能伴随迁移 IPI
+ * @warning 硬绑满核可能导致过载无法迁移
+ * @attention ❌ ISR；✅ 可能引起切换
  */
 int cgrtos_task_set_affinity(task_id_t id, uint8_t cpu)
 {
@@ -712,14 +781,15 @@ int cgrtos_task_set_affinity(task_id_t id, uint8_t cpu)
 
 /**
  * @brief 设置 EDF 任务的周期（tick）
- * @param id     任务 ID
- * @param period 周期 tick 数；0 表示清除周期
- * @return pdPASS 成功；任务不存在返回 pdFAIL
- * @details
- * 1. 进入临界区查找 TCB；失败则返回 pdFAIL。
- * 2. 写入 task->period。
- * 3. 若策略为 SCHED_EDF 且 period>0，设置 deadline=g_ticks+period 并挂载 EDF 时间轮。
- * 4. 退出临界区并返回 pdPASS。
+ * @details 写入 period；若策略为 SCHED_EDF 且 period>0，设置 deadline=g_ticks+period 并挂载 EDF 时间轮。
+ * @param[in] id     任务 ID
+ * @param[in] period 周期 tick 数；0 表示清除周期
+ * @return pdPASS 成功；任务不存在或 CONFIG_USE_EDF=0 返回 pdFAIL
+ * @retval pdPASS 成功
+ * @retval pdFAIL 任务不存在或 EDF 未启用
+ * @note 仅对 SCHED_EDF 有意义
+ * @warning 过短周期可能导致持续过载与错过 deadline
+ * @attention ❌ ISR；❌ 通常不阻塞
  */
 int cgrtos_task_set_period(task_id_t id, tick_t period)
 {
@@ -748,14 +818,15 @@ int cgrtos_task_set_period(task_id_t id, tick_t period)
 
 /**
  * @brief 设置任务的绝对截止时间（tick）
- * @param id       任务 ID
- * @param deadline 绝对 deadline（相对 g_ticks 的时间点）
+ * @details 更新 deadline；若任务 READY 则按新键重入就绪结构；period>0 时同步释放轮。
+ * @param[in] id       任务 ID
+ * @param[in] deadline 绝对 deadline（相对 g_ticks 的时间点）
  * @return pdPASS 成功；任务不存在返回 pdFAIL
- * @details
- * 1. 进入临界区查找 TCB；失败则返回 pdFAIL。
- * 2. 更新 task->deadline。
- * 3. 若任务 READY，从就绪队列移除并按新 deadline 重新入队（EDF 排序）。
- * 4. 若策略为 EDF 且 period>0，退出临界区后调用 edf_arm 同步时间轮。
+ * @retval pdPASS 成功
+ * @retval pdFAIL 任务不存在
+ * @note 无
+ * @warning deadline 已过期时仍可能被选中运行（取决于 pick 规则）
+ * @attention ❌ ISR；❌ 通常不阻塞
  */
 int cgrtos_task_set_deadline(task_id_t id, tick_t deadline)
 {
@@ -781,11 +852,14 @@ int cgrtos_task_set_deadline(task_id_t id, tick_t deadline)
 
 /**
  * @brief 查询任务当前实际运行的 CPU 核号
- * @param id 任务 ID
+ * @details 返回 TCB 的 run_cpu 字段。
+ * @param[in] id 任务 ID
  * @return run_cpu 字段；无效任务返回 0xFF
- * @details
- * 1. 调用 task_find 定位 TCB。
- * 2. 未找到则返回 0xFF；否则返回 task->run_cpu。
+ * @retval 0..CONFIG_NUM_CORES-1 有效核号
+ * @retval 0xFF 无效任务
+ * @note 无
+ * @warning 无锁快照，SMP 下可能略有滞后
+ * @attention ✅ ISR；❌ 不阻塞
  */
 uint8_t cgrtos_task_get_run_cpu(task_id_t id)
 {
@@ -798,11 +872,14 @@ uint8_t cgrtos_task_get_run_cpu(task_id_t id)
 
 /**
  * @brief 按 ID 获取任务 TCB 句柄（内部结构指针）
- * @param id 任务 ID
+ * @details 委托 task_find 在 g_tasks 中线性查找匹配 id 的槽位。
+ * @param[in] id 任务 ID
  * @return TCB 指针；未找到返回 NULL
- * @details
- * 1. 委托 task_find 在 g_tasks 中线性查找匹配 id 的槽位。
- * 2. 直接返回查找结果，供 IPC/同步原语等内核模块引用任务对象。
+ * @retval 非 NULL 找到
+ * @retval NULL    未找到
+ * @note 应用应视 TCB 为只读句柄，禁止直接改字段
+ * @warning 返回指针在任务删除后可能失效（UAF）
+ * @attention ✅ 可在 ISR 调用（无锁查找）；❌ 不阻塞
  */
 cgrtos_task_t *cgrtos_task_get_handle(task_id_t id)
 {
@@ -811,11 +888,14 @@ cgrtos_task_t *cgrtos_task_get_handle(task_id_t id)
 
 /**
  * @brief 查询任务当前对外可见状态
- * @param id 任务 ID
+ * @details 查找 TCB 并调用 task_state_to_enum 映射内部 state 到 eTaskState_t。
+ * @param[in] id 任务 ID
  * @return eTaskState_t；无效或已删除槽返回 eInvalid
- * @details
- * 1. 查找 TCB；不存在或 id==0（空槽）则返回 eInvalid。
- * 2. 调用 task_state_to_enum 将内部 state 转为 API 枚举并返回。
+ * @retval eReady/eRunning/eBlocked/eSuspended/eDeleted/eTerminated 对应状态
+ * @retval eInvalid 无效 ID
+ * @note 无
+ * @warning 无锁快照，SMP 下可能略有滞后
+ * @attention ✅ ISR；❌ 不阻塞
  */
 eTaskState_t cgrtos_task_get_state(task_id_t id)
 {
@@ -828,13 +908,14 @@ eTaskState_t cgrtos_task_get_state(task_id_t id)
 
 /**
  * @brief 计算任务栈高水位（从未使用端起算的剩余空闲栈字节数）
- * @param id 任务 ID
+ * @details 自栈底扫描 stack[]：溢出检测模式下跳过金丝雀统计 0xA5 字；否则统计零字；乘以字长返回字节数。
+ * @param[in] id 任务 ID
  * @return 剩余未触碰栈空间字节数；无效任务返回 0
- * @details
- * 1. 查找 TCB；失败返回 0。
- * 2. 自栈底（低地址）向上扫描 stack[]：溢出检测模式下跳过金丝雀，统计连续 0xA5 填充字。
- * 3. 非检测模式下统计连续零字；遇到首个被改写字即停止。
- * 4. 将累计字数乘以 sizeof(uint64_t) 返回字节数。
+ * @retval >0 估测剩余空闲栈
+ * @retval 0  无效任务或已几乎用尽
+ * @note 需 CONFIG_CHECK_STACK_OVERFLOW 填栈才准确
+ * @warning 非精确值，仅调试用
+ * @attention ✅ 任务上下文更安全；❌ 不阻塞
  */
 uint32_t cgrtos_task_get_stack_high_water_mark(task_id_t id)
 {
@@ -867,9 +948,12 @@ uint32_t cgrtos_task_get_stack_high_water_mark(task_id_t id)
 
 /**
  * @brief 当前任务主动让出 CPU（协作式调度入口）
- * @details
- * 1. 直接调用 cgrtos_sched_yield，由调度器选择下一就绪任务。
- * 2. 若当前无更高或同优先级就绪任务，可能立即返回继续运行。
+ * @details 直接调用 cgrtos_sched_yield，由调度器选择下一就绪任务。
+ * @return 无
+ * @retval 无
+ * @note 调度挂起时为空操作
+ * @warning 无
+ * @attention ❌ ISR（ISR 请用 yield_from_isr）；✅ 引起切换
  */
 void cgrtos_task_yield(void)
 {
@@ -879,14 +963,16 @@ void cgrtos_task_yield(void)
 #if CONFIG_USE_TASK_NOTIFICATIONS
 /**
  * @brief 按 eNotifyAction_t 规则将 value 合并到已有通知值
- * @param old_val 合并前的 notify_value
- * @param value   本次通知携带的载荷
- * @param action  合并动作（置位/递增/覆盖/无覆盖写入）
+ * @details eSetBits 按位或；eIncrement 加一；eSetValueWithOverwrite 直接替换；
+ *          eSetValueWithoutOverwrite 仅在 old 为 0 时写入；未知 action 保持 old_val。
+ * @param[in] old_val 合并前的 notify_value
+ * @param[in] value   本次通知携带的载荷
+ * @param[in] action  合并动作
  * @return 合并后的新 notify_value
- * @details
- * 1. 根据 action 分支：eSetBits 按位或；eIncrement 加一。
- * 2. eSetValueWithOverwrite 直接替换；eSetValueWithoutOverwrite 仅在 old 为 0 时写入。
- * 3. 未知 action 保持 old_val 不变。
+ * @retval 任意 uint32_t 合并结果
+ * @note 无
+ * @warning 无
+ * @attention @internal
  */
 static uint32_t notify_apply(uint32_t old_val, uint32_t value, eNotifyAction_t action)
 {
@@ -907,14 +993,15 @@ static uint32_t notify_apply(uint32_t old_val, uint32_t value, eNotifyAction_t a
 
 /**
  * @brief 向目标任务发送通知（任务上下文，可阻塞调度）
- * @param task   目标任务 TCB
- * @param value  通知载荷
- * @param action 值更新动作
+ * @details 按 action 合并 notify_value 并置 notify_pending；若目标 BLOCK_NOTIFY 则 unblock 后 yield。
+ * @param[in] task   目标任务 TCB
+ * @param[in] value  通知载荷
+ * @param[in] action 值更新动作
  * @return 更新前的 notify_value；task 为 NULL 时返回 0
- * @details
- * 1. 进入临界区，保存 prev=notify_value，按 action 写入新值并置 notify_pending。
- * 2. 若目标因 BLOCK_NOTIFY 阻塞，置 wake_ok 并 sched_unblock。
- * 3. 退出临界区后 yield，使被唤醒任务有机会运行；返回 prev。
+ * @retval 任意 uint32_t 旧值
+ * @note 无
+ * @warning 与 ISR 通知并发时依赖临界区
+ * @attention ❌ ISR 请用 from_isr；✅ 可能唤醒切换
  */
 uint32_t cgrtos_task_notify(cgrtos_task_t *task, uint32_t value,
                             eNotifyAction_t action)
@@ -943,19 +1030,17 @@ uint32_t cgrtos_task_notify(cgrtos_task_t *task, uint32_t value,
 
 /**
  * @brief 向目标任务发送通知（ISR 上下文）
- *
- * @param task   目标任务 TCB
- * @param value  通知载荷（按 action 解释）
- * @param action 值更新动作（eSetBits / eSetValueWithOverwrite 等）
- * @param woken  可选；非空则唤醒阻塞在 notify 上的任务时置 pdTRUE，否则自动 yield
- *
+ * @details 临界区内更新 notify_value 并置 pending；可 unblock BLOCK_NOTIFY 等待者；
+ *          退出后 cgrtos_isr_notify_woken 处理 yield。
+ * @param[in]  task   目标任务 TCB
+ * @param[in]  value  通知载荷（按 action 解释）
+ * @param[in]  action 值更新动作（eSetBits / eSetValueWithOverwrite 等）
+ * @param[out] woken  可选；非空则唤醒阻塞在 notify 上的任务时置 pdTRUE
  * @return 更新前的 notify_value；task 为 NULL 时返回 0
- *
- * @details
- * 1. 校验 task；进入临界区。
- * 2. 保存 prev=notify_value，按 action 用 notify_apply 更新，并置 notify_pending=1。
- * 3. 若目标处于 TASK_BLOCKED 且 block_reason==BLOCK_NOTIFY：wake_ok=1、unblock、need_yield=1。
- * 4. 退出临界区后 cgrtos_isr_notify_woken；返回 prev。
+ * @retval 任意 uint32_t 旧值
+ * @note 须在允许的中断优先级内调用
+ * @warning 忽略 woken 且未自动 yield 可能导致延迟调度
+ * @attention ✅ ISR；❌ 不阻塞调用 ISR
  */
 uint32_t cgrtos_task_notify_from_isr(cgrtos_task_t *task, uint32_t value,
                                      eNotifyAction_t action, BaseType_t *woken)
@@ -982,17 +1067,17 @@ uint32_t cgrtos_task_notify_from_isr(cgrtos_task_t *task, uint32_t value,
 
 /**
  * @brief 当前任务等待通知到达（可选超时）
- * @param clear_on_entry 进入等待前从 notify_value 清除的位掩码
- * @param clear_on_exit  成功收到后从 notify_value 清除的位掩码
- * @param value          可选输出指针，接收 notify_value
- * @param timeout        最大阻塞 tick；0 表示不阻塞、立即返回
+ * @details 可按掩码在进入/退出时清位；已有 pending 则 fast path；否则 sched_block(BLOCK_NOTIFY) 后 yield。
+ * @param[in]  clear_on_entry 进入等待前从 notify_value 清除的位掩码
+ * @param[in]  clear_on_exit  成功收到后从 notify_value 清除的位掩码
+ * @param[out] value          可选输出指针，接收 notify_value
+ * @param[in]  timeout        最大阻塞 tick；0 表示不阻塞、立即返回
  * @return 收到的通知值；超时或无通知返回 0
- * @details
- * 1. 获取当前核 g_current；无效则返回 0。
- * 2. 临界区内按 clear_on_entry 清除指定位；若已有 pending 通知则立即取走并返回。
- * 3. timeout==0 且无 pending 则非阻塞返回 0。
- * 4. 否则 sched_block(BLOCK_NOTIFY)，yield 后再次进入临界区读取结果。
- * 5. 按 clear_on_exit 清除位、清零 notify_pending，返回通知值。
+ * @retval 非0 成功取得通知
+ * @retval 0   超时或失败
+ * @note 通知值本为 0 时与超时返回 0 可能混淆
+ * @warning 无
+ * @attention ❌ ISR；✅ 可能阻塞并切换
  */
 uint32_t cgrtos_task_notify_wait(uint32_t clear_on_entry, uint32_t clear_on_exit,
                                  uint32_t *value, tick_t timeout)
@@ -1052,10 +1137,13 @@ uint32_t cgrtos_task_notify_wait(uint32_t clear_on_entry, uint32_t clear_on_exit
 
 /**
  * @brief 忙等直至 mtime 达到绝对截止时刻（亚 tick 精度补齐）
- * @param deadline 目标 mtime 计数（绝对值，非相对增量）
- * @details
- * 1. 循环读取 cgrtos_mtime_read()，直至当前 mtime >= deadline。
- * 2. 纯自旋，不调用 sched_block，用于 delay_us 尾段亚 tick 精确等待。
+ * @details 循环读取 cgrtos_mtime_read() 直至 mtime >= deadline；纯自旋，不调用 sched_block。
+ * @param[in] deadline 目标 mtime 计数（绝对值，非相对增量）
+ * @return 无
+ * @retval 无
+ * @note 用于 delay_us 尾段亚 tick 精确等待
+ * @warning 长忙等会占用 CPU
+ * @attention @internal
  */
 static void delay_busy_until_mtime(uint64_t deadline)
 {
@@ -1346,7 +1434,15 @@ void cgrtos_init_idle_tasks(void)
 }
 
 /**
- * @brief 导出任务列表（模块6）
+ * @brief 导出任务列表到缓冲区
+ * @details 临界区内扫描 g_tasks，跳过 id==0 或 DELETED 槽；填充 out[n] 并统计总数。
+ * @param[out] out 输出数组；NULL 时仅计数
+ * @param[in]  max  out 容量（条数）
+ * @return 存活任务总数；out 非 NULL 时最多写入 max 条
+ * @retval >=0 任务总数
+ * @note out 为 NULL 时返回当前任务数
+ * @warning 无
+ * @attention ❌ ISR（持 g_klock）；❌ 不阻塞
  */
 uint32_t cgrtos_task_list_export(cgrtos_task_info_t *out, uint32_t max)
 {

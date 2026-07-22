@@ -1,6 +1,10 @@
 /**
  * @file hal_compat.c
  * @brief 历史 cgrtos_* 外设 API → HAL 用户 API 薄封装
+ * @author Cong Zhou / Juilletioi
+ * @version 5.0.0
+ * @date 2026-07-22
+ * @copyright CG-RTOS
  *
  * @details
  * ## 分层位置
@@ -34,10 +38,14 @@
 
 /**
  * @brief 体系结构早期初始化（兼容）
- *
  * @details 步骤：
  * 1. 调用 `hal_cpu_init()`（打开 mie 中 MSIE|MTIE|MEIE）。
  * 2. 忽略返回值（历史 API 为 void；失败时后续外设 init 会暴露）。
+ * @return 无
+ * @retval 无
+ * @note 等价于 boot 阶段 CPU 设备 init
+ * @warning 返回值被丢弃，失败需靠后续 init 察觉
+ * @attention ❌ ISR；❌ 不阻塞
  */
 void cgrtos_arch_init(void)
 {
@@ -51,6 +59,11 @@ void cgrtos_arch_init(void)
 /**
  * @brief 初始化 UART 控制台（兼容）
  * @details 步骤：1. 转调 `hal_console_init()`；2. 忽略状态码（历史 void）。
+ * @return 无
+ * @retval 无
+ * @note 新代码应直接调用 hal_console_init
+ * @warning 返回值被丢弃
+ * @attention ❌ ISR；❌ 不阻塞
  */
 void cgrtos_uart_init(void)
 {
@@ -59,8 +72,13 @@ void cgrtos_uart_init(void)
 
 /**
  * @brief 输出一字符（兼容）
- * @param c 字符；驱动侧对 '\\n' 会补 '\\r'
  * @details 步骤：1. 转调 `hal_console_putc`（内部持控制台锁）。
+ * @param[in] c 字符；驱动侧对 '\\n' 会补 '\\r'
+ * @return 无
+ * @retval 无
+ * @note 经 HAL 自动加锁
+ * @warning 持锁期间禁止 yield
+ * @attention ❌ ISR；❌ 不阻塞
  */
 void cgrtos_uart_putc(char c)
 {
@@ -69,8 +87,12 @@ void cgrtos_uart_putc(char c)
 
 /**
  * @brief 阻塞读一字符（兼容）
- * @return 收到的字符
  * @details 步骤：1. 转调 `hal_console_getc`（空闲可 yield，不长期占锁）。
+ * @return 收到的字符
+ * @retval char 读到的字节
+ * @note 行为与 hal_console_getc 完全一致
+ * @warning 调度未启动时忙等
+ * @attention ❌ ISR；✅ 可能阻塞/切换（调度已启动时 yield）
  */
 char cgrtos_uart_getc(void)
 {
@@ -79,8 +101,13 @@ char cgrtos_uart_getc(void)
 
 /**
  * @brief 非阻塞读一字符（兼容）
- * @return 0..255 数据；-1 表示 RX 空
  * @details 步骤：1. 转调 `hal_console_pollc`；2. 原样返回（-1 非 HAL 错误码）。
+ * @return 0..255 数据；-1 表示 RX 空
+ * @retval >=0 收到字节
+ * @retval -1 RX 空或无设备
+ * @note -1 为 poll 语义，非 HAL_ERR_*
+ * @warning 单次 poll，不 yield
+ * @attention ❌ ISR；❌ 不阻塞
  */
 int cgrtos_uart_pollc(void)
 {
@@ -89,8 +116,13 @@ int cgrtos_uart_pollc(void)
 
 /**
  * @brief 输出 NUL 字符串（兼容）
- * @param s 字符串；NULL 安全由 HAL 处理
  * @details 步骤：1. 转调 `hal_console_puts`（整串持锁）。
+ * @param[in] s 字符串；NULL 安全由 HAL 处理
+ * @return 无
+ * @retval 无
+ * @note NULL 由 HAL 忽略
+ * @warning 持锁期间禁止 yield
+ * @attention ❌ ISR；❌ 不阻塞
  */
 void cgrtos_uart_puts(const char *s)
 {
@@ -103,8 +135,13 @@ void cgrtos_uart_puts(const char *s)
 
 /**
  * @brief 初始化本核系统定时器（兼容）
- * @param rate 期望 tick Hz；0 时 HAL 使用 CONFIG_TICK_RATE_HZ
  * @details 步骤：1. 转调 `hal_timer_init((uint32_t)rate)`。
+ * @param[in] rate 期望 tick Hz；0 时 HAL 使用 CONFIG_TICK_RATE_HZ
+ * @return 无
+ * @retval 无
+ * @note 历史名 cgrtos_clint_*，实际走 HAL TIMER 类
+ * @warning 返回值被丢弃
+ * @attention ❌ ISR；❌ 不阻塞
  */
 void cgrtos_clint_init(tick_t rate)
 {
@@ -113,8 +150,12 @@ void cgrtos_clint_init(tick_t rate)
 
 /**
  * @brief 读 mtime（兼容）
- * @return 64 位自由运行计数
  * @details 步骤：1. 转调 `hal_mtime_read()`。
+ * @return 64 位自由运行计数
+ * @retval uint64_t 当前 mtime
+ * @note 无锁只读转发
+ * @warning 0 可能表示无设备，需结合上下文
+ * @attention ✅ ISR；❌ 不阻塞
  */
 uint64_t cgrtos_mtime_read(void)
 {
@@ -128,6 +169,11 @@ uint64_t cgrtos_mtime_read(void)
 /**
  * @brief 初始化本 hart PLIC（兼容）
  * @details 步骤：1. 转调 `hal_irqc_init()`（内含首次 `cgrtos_irq_init`）。
+ * @return 无
+ * @retval 无
+ * @note 历史 PLIC 名映射到 HAL IRQC 类
+ * @warning 返回值被丢弃
+ * @attention ❌ ISR；❌ 不阻塞
  */
 void cgrtos_plic_init(void)
 {
@@ -136,9 +182,13 @@ void cgrtos_plic_init(void)
 
 /**
  * @brief PLIC claim（兼容）
- * @return 中断源 ID；0=无
  * @details 步骤：1. 转调 `hal_irqc_claim()`。
+ * @return 中断源 ID；0=无 pending
+ * @retval >0 已 claim 源号
+ * @retval 0 无 pending
  * @note 应用/测试可用；trap 入口应直调驱动，不经本函数。
+ * @warning complete 前勿重复 claim
+ * @attention ✅ ISR；❌ 不阻塞
  */
 uint32_t cgrtos_plic_claim(void)
 {
@@ -147,8 +197,13 @@ uint32_t cgrtos_plic_claim(void)
 
 /**
  * @brief PLIC complete（兼容）
- * @param irq 先前 claim 的源号
  * @details 步骤：1. 转调 `hal_irqc_complete(irq)`。
+ * @param[in] irq 先前 claim 的源号
+ * @return 无
+ * @retval 无
+ * @note 须与 cgrtos_plic_claim 配对
+ * @warning irq 须为最近一次 claim 的源
+ * @attention ✅ ISR；❌ 不阻塞
  */
 void cgrtos_plic_complete(uint32_t irq)
 {
@@ -157,8 +212,13 @@ void cgrtos_plic_complete(uint32_t irq)
 
 /**
  * @brief 设置本 hart PLIC threshold（兼容）
- * @param threshold 新阈值
  * @details 步骤：1. 转调 `hal_irqc_set_threshold(threshold)`。
+ * @param[in] threshold 新阈值
+ * @return 无
+ * @retval 无
+ * @note per-hart 阈值，无 HAL 配置锁
+ * @warning 无设备时 HAL 静默忽略
+ * @attention ✅ ISR；❌ 不阻塞
  */
 void cgrtos_plic_set_threshold(uint32_t threshold)
 {
@@ -167,8 +227,12 @@ void cgrtos_plic_set_threshold(uint32_t threshold)
 
 /**
  * @brief 读本 hart PLIC threshold（兼容）
- * @return 当前阈值
  * @details 步骤：1. 转调 `hal_irqc_get_threshold()`。
+ * @return 当前阈值
+ * @retval uint32_t 阈值
+ * @note 只读转发
+ * @warning 无设备时返回 0
+ * @attention ✅ ISR；❌ 不阻塞
  */
 uint32_t cgrtos_plic_get_threshold(void)
 {
@@ -177,12 +241,17 @@ uint32_t cgrtos_plic_get_threshold(void)
 
 /**
  * @brief 设置中断源优先级（兼容）
- * @param irq      源编号
- * @param priority 优先级
- * @return pdPASS / pdFAIL
  * @details 步骤：
  * 1. 调用 `hal_irqc_set_priority`。
  * 2. HAL_OK → pdPASS，否则 pdFAIL。
+ * @param[in] irq      源编号
+ * @param[in] priority 优先级
+ * @return pdPASS / pdFAIL
+ * @retval pdPASS 设置成功
+ * @retval pdFAIL HAL 返回非 OK
+ * @note 状态码从 HAL 映射为 pdPASS/pdFAIL
+ * @warning 底层持 IRQC 配置锁
+ * @attention ❌ ISR；❌ 不阻塞
  */
 int cgrtos_plic_set_priority(uint32_t irq, uint32_t priority)
 {
@@ -191,9 +260,13 @@ int cgrtos_plic_set_priority(uint32_t irq, uint32_t priority)
 
 /**
  * @brief 读中断源优先级（兼容）
- * @param irq 源编号
- * @return 优先级；非法为 0
  * @details 步骤：1. 转调 `hal_irqc_get_priority(irq)`。
+ * @param[in] irq 源编号
+ * @return 优先级；非法为 0
+ * @retval uint32_t 当前优先级
+ * @note 只读转发
+ * @warning 非法 irq 行为取决于驱动
+ * @attention ✅ ISR；❌ 不阻塞
  */
 uint32_t cgrtos_plic_get_priority(uint32_t irq)
 {
@@ -202,9 +275,14 @@ uint32_t cgrtos_plic_get_priority(uint32_t irq)
 
 /**
  * @brief 对本 hart 使能中断源（兼容）
- * @param irq 源编号
- * @return pdPASS / pdFAIL
  * @details 步骤：1. `hal_irqc_enable`；2. 映射状态码。
+ * @param[in] irq 源编号
+ * @return pdPASS / pdFAIL
+ * @retval pdPASS 使能成功
+ * @retval pdFAIL HAL 返回非 OK
+ * @note per-hart enable，底层持配置锁
+ * @warning 持锁期间禁止 yield
+ * @attention ❌ ISR；❌ 不阻塞
  */
 int cgrtos_plic_enable(uint32_t irq)
 {
@@ -213,9 +291,14 @@ int cgrtos_plic_enable(uint32_t irq)
 
 /**
  * @brief 对本 hart 禁用中断源（兼容）
- * @param irq 源编号
- * @return pdPASS / pdFAIL
  * @details 步骤：1. `hal_irqc_disable`；2. 映射状态码。
+ * @param[in] irq 源编号
+ * @return pdPASS / pdFAIL
+ * @retval pdPASS 禁用成功
+ * @retval pdFAIL HAL 返回非 OK
+ * @note per-hart disable，底层持配置锁
+ * @warning 持锁期间禁止 yield
+ * @attention ❌ ISR；❌ 不阻塞
  */
 int cgrtos_plic_disable(uint32_t irq)
 {
@@ -228,10 +311,15 @@ int cgrtos_plic_disable(uint32_t irq)
 
 /**
  * @brief 向目标核发送软件 IPI（兼容）
- * @param core 目标 hart id
  * @details 步骤：
  * 1. 调用 `hal_ipi_send(core)`。
  * 2. 忽略返回值（历史 API 为 void；非法 hart 时为空操作）。
+ * @param[in] core 目标 hart id
+ * @return 无
+ * @retval 无
+ * @note 返回值被丢弃
+ * @warning 非法 hart 时 HAL 可能返回错误但被忽略
+ * @attention ✅ ISR；❌ 不阻塞
  */
 void cgrtos_smp_send_ipi(uint8_t core)
 {

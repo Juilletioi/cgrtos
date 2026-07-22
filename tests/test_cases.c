@@ -1,14 +1,22 @@
+/**
+ * @file test_cases.c
+ * @brief 功能测试用例实现与 CLI/自动化套件运行器
+ * @author Cong Zhou / Juilletioi
+ * @version 5.0.0
+ * @date 2026-07-22
+ * @copyright CG-RTOS
+ *
+ * @details
+ * 命名用例表供 APP=test 与 CLI `run <name>` 共享。各 case_* 通过 expect()
+ * 输出 [PASS]/[FAIL]；`all` 结束时打印 === TEST_SUITE_PASSED/FAILED ===，
+ * 供 scripts/cgrtos.sh / run_qemu.sh 解析。
+ */
+
 #include "../kernel/cgrtos.h"
+#include "../kernel/vfs.h"
 #include "../hal/hal_board.h"
 #include "test_cases.h"
 #include "stress_cases.h"
-
-/*
- * Named test cases shared by the automated suite and CLI.
- * Markers consumed by scripts/cgrtos.sh / run_qemu.sh:
- *   [PASS] / [FAIL]
- *   === TEST_SUITE_PASSED === / === TEST_SUITE_FAILED ===
- */
 
 static volatile int g_fail;
 static volatile int g_pass;
@@ -38,6 +46,18 @@ static volatile int g_isr_woken_seen;
 static volatile int g_irq_handler_hits;
 static volatile uint32_t g_irq_last;
 
+/**
+ * @brief 记录单条断言结果并更新全局 pass/fail 计数
+ * @details cond 为真打印 [PASS]，否则 [FAIL]；分别递增 g_pass / g_fail。
+ * @param[in] name 断言描述字符串
+ * @param[in] cond 条件（非零为通过）
+ * @return 无
+ * @retval 无
+ * @note 供所有 case_* 用例复用
+ * @warning 多任务并发调用计数无原子保护
+ * @attention ❌ ISR 勿依赖打印副作用；❌ 不阻塞
+ * @internal
+ */
 static void expect(const char *name, int cond)
 {
     if (cond) {
@@ -49,6 +69,17 @@ static void expect(const char *name, int cond)
     }
 }
 
+/**
+ * @brief 阻塞等待指定 tick 数（或 yield-only）
+ * @details n==0 仅 cgrtos_task_yield；否则 cgrtos_delay(n)。避免忙等饿死。
+ * @param[in] n 等待 tick 数；0 表示仅让出
+ * @return 无
+ * @retval 无
+ * @note EDF 占满核时忙等会 TIMEOUT
+ * @warning 无
+ * @attention ❌ ISR；✅ 可能阻塞
+ * @internal
+ */
 static void wait_ticks(tick_t n)
 {
     /* 阻塞等待：勿用 yield 忙等——EDF 占满核时会饿死本任务导致 TIMEOUT */
@@ -59,6 +90,17 @@ static void wait_ticks(tick_t n)
     cgrtos_delay(n);
 }
 
+/**
+ * @brief notify 用例等待任务：阻塞等待 task notify
+ * @details cgrtos_task_notify_wait 成功后写入 g_notify_got；之后永久 delay。
+ * @param[in] arg 未使用
+ * @return 无（永不返回）
+ * @retval 无
+ * @note 由 case_notify 创建
+ * @warning 无
+ * @attention ❌ ISR；✅ 阻塞 wait
+ * @internal
+ */
 static void notify_waiter(void *arg)
 {
     (void)arg;
@@ -71,12 +113,33 @@ static void notify_waiter(void *arg)
     }
 }
 
+/**
+ * @brief 软定时器测试回调：递增 g_timer_fires
+ * @param[in] arg 未使用
+ * @return 无
+ * @retval 无
+ * @note 供 case_timer / case_hooks / case_isr 复用
+ * @warning 无
+ * @attention ✅ 定时器 daemon 上下文；❌ 非 ISR 直调
+ * @internal
+ */
 static void timer_cb(void *arg)
 {
     (void)arg;
     g_timer_fires++;
 }
 
+/**
+ * @brief CFS 公平性测试工作线程：在窗口内自增计数并 yield
+ * @details 约 60ms 内循环 (*cnt)++ 与 yield；结束后永久 delay。
+ * @param[in] arg 指向 volatile uint32_t 计数器的指针
+ * @return 无（永不返回）
+ * @retval 无
+ * @note 由 case_sched / case_m4_safe 创建
+ * @warning 无
+ * @attention ❌ ISR；✅ yield/delay
+ * @internal
+ */
 static void cfs_worker(void *arg)
 {
     volatile uint32_t *cnt = (volatile uint32_t *)arg;
@@ -90,6 +153,17 @@ static void cfs_worker(void *arg)
     }
 }
 
+/**
+ * @brief EDF 周期任务：设置 period/deadline 并统计按时/逾期完成
+ * @details arg 为 period(tick)；每周期 bounded compute 后比较 done 与 wake，更新 g_edf_ok/g_edf_miss。
+ * @param[in] arg period tick 数（uintptr_t 传递）
+ * @return 无（长期运行后 idle delay）
+ * @retval 无
+ * @note 由 case_sched / case_m5_perf / case_sched_m1 创建
+ * @warning 单核与多核 MC-EDF 行为不同
+ * @attention ❌ ISR；✅ delay/set_deadline
+ * @internal
+ */
 static void edf_worker(void *arg)
 {
     tick_t period = (tick_t)(uintptr_t)arg;
@@ -134,6 +208,16 @@ static void edf_worker(void *arg)
     }
 }
 
+/**
+ * @brief Hybrid 调度 RT 侧：notify_wait 计数 g_hybrid_rt_hits
+ * @param[in] arg 未使用
+ * @return 无（永不返回）
+ * @retval 无
+ * @note 与 hybrid_cfs_hog 对跑验证 RT 不被饿死
+ * @warning 无
+ * @attention ❌ ISR；✅ 阻塞 notify_wait
+ * @internal
+ */
 static void hybrid_rt_worker(void *arg)
 {
     (void)arg;
@@ -145,6 +229,16 @@ static void hybrid_rt_worker(void *arg)
     }
 }
 
+/**
+ * @brief Hybrid 调度 CFS hog：短窗口内 busy+yield 占 CPU
+ * @param[in] arg 未使用
+ * @return 无（永不返回）
+ * @retval 无
+ * @note 绑核 1 与 RT 任务分离
+ * @warning 无
+ * @attention ❌ ISR；✅ yield
+ * @internal
+ */
 static void hybrid_cfs_hog(void *arg)
 {
     (void)arg;
@@ -162,6 +256,16 @@ static void hybrid_cfs_hog(void *arg)
     }
 }
 
+/**
+ * @brief RR 测试工作线程：yield + 40ms delay 循环
+ * @param[in] arg 未使用
+ * @return 无（永不返回）
+ * @retval 无
+ * @note 供 case_task / case_sched / case_sched_m1 复用
+ * @warning 无
+ * @attention ❌ ISR；✅ delay/yield
+ * @internal
+ */
 static void rr_worker(void *arg)
 {
     (void)arg;
@@ -171,6 +275,17 @@ static void rr_worker(void *arg)
     }
 }
 
+/**
+ * @brief SMP 亲和性测试：检测是否在 hart 1 上运行
+ * @details read_csr(mhartid)==1 时置 g_smp_core1=1。
+ * @param[in] arg 未使用
+ * @return 无（永不返回）
+ * @retval 无
+ * @note 由 case_smp 创建并 set_affinity(1)
+ * @warning 次核未 online 时软跳过
+ * @attention ❌ ISR；✅ delay
+ * @internal
+ */
 static void aff_worker(void *arg)
 {
     (void)arg;
@@ -183,6 +298,16 @@ static void aff_worker(void *arg)
     }
 }
 
+/**
+ * @brief 负载均衡测试工作线程：统计在 core1 上的执行次数
+ * @param[in] arg 未使用
+ * @return 无（永不返回）
+ * @retval 无
+ * @note 与 cgrtos_sched_load_balance 配合
+ * @warning 无
+ * @attention ❌ ISR；✅ yield
+ * @internal
+ */
 static void lb_worker(void *arg)
 {
     (void)arg;
@@ -200,11 +325,29 @@ static void lb_worker(void *arg)
     }
 }
 
+/**
+ * @brief Idle 钩子测试：递增 g_hook_idle
+ * @return 无
+ * @retval 无
+ * @note 由 case_hooks 注册
+ * @warning 无
+ * @attention ✅ idle 上下文；❌ 不阻塞
+ * @internal
+ */
 static void idle_hook_fn(void)
 {
     g_hook_idle++;
 }
 
+/**
+ * @brief Tick 钩子测试：递增 g_hook_ticks
+ * @return 无
+ * @retval 无
+ * @note 由 case_hooks 注册
+ * @warning 无
+ * @attention ✅ tick ISR 上下文；❌ 须保持短小
+ * @internal
+ */
 static void tick_hook_fn(void)
 {
     g_hook_ticks++;
@@ -212,12 +355,17 @@ static void tick_hook_fn(void)
 
 /**
  * @brief 真实 tick ISR 钩子：按 phase 轮转调用 FromISR API 并收集 woken
- *
  * @details
  * 1. phase = g_isr_tick_ops & 7，依次覆盖 sem_give、queue_send、event_set、
  *    stream_send、message_send、timer_start、event_clear、sem_take。
  * 2. 各 API 传入 &woken；若 woken!=pdFALSE 则计数并 portYIELD_FROM_ISR。
  * 3. g_isr_tick_ops++，供 case_isr 断言至少执行多轮。
+ * @return 无
+ * @retval 无
+ * @note 由 case_isr 经 cgrtos_set_tick_hook 安装
+ * @warning 须在 tick ISR 上下文保持短小，避免拖长中断延迟
+ * @attention ✅ tick ISR；❌ 禁止阻塞 API
+ * @internal
  */
 static void isr_pack_tick_hook(void)
 {
@@ -254,8 +402,15 @@ static void isr_pack_tick_hook(void)
 
 /**
  * @brief case_irq 用的模拟 PLIC handler：累计命中次数并记录 irq 号
- * @param irq 中断源号
- * @param arg 未使用
+ * @details cgrtos_irq_dispatch 模拟 claim 后路径调用；递增 g_irq_handler_hits 并写入 g_irq_last。
+ * @param[in] irq 中断源号
+ * @param[in] arg 未使用
+ * @return 无
+ * @retval 无
+ * @note 注册于 irq 5，unregister 后不再触发
+ * @warning 非真实硬件中断上下文，仅验证分发契约
+ * @attention ✅ ISR 风格回调；❌ 不阻塞
+ * @internal
  */
 static void irq_test_handler(uint32_t irq, void *arg)
 {
@@ -266,6 +421,15 @@ static void irq_test_handler(uint32_t irq, void *arg)
 
 /* ---- named cases (former run_tests sections) ---- */
 
+/**
+ * @brief 测试用例 delay — tick/delay_ms/delay_us/delay_until
+ * @details 覆盖 delay(0)、delay_ms 范围、delay_until 周期与 miss、us 忙等路径。
+ * @return 无
+ * @retval 无
+ * @note 通过 expect() 累计结果
+ * @warning 时间断言含 QEMU 容差
+ * @attention ❌ ISR；✅ 阻塞 delay API
+ */
 static void case_delay(void)
 {
     tick_t t0, t1, dt, wake;
@@ -319,6 +483,15 @@ static void case_delay(void)
     expect("delay_us_hybrid", md >= 4000 && md < 200000);
 }
 
+/**
+ * @brief 测试用例 mem — TLSF 堆 malloc/calloc/free
+ * @details 对齐、读写、double-free、碎片、OOM、大块等路径。
+ * @return 无
+ * @retval 无
+ * @note 可能大量分配；结束后尽量 reclaim
+ * @warning OOM 循环依赖 CONFIG_HEAP_SIZE
+ * @attention ❌ ISR；✅ 堆 API
+ */
 static void case_mem(void)
 {
     unsigned long total = cgrtos_get_free_heap();
@@ -465,6 +638,14 @@ static void case_mem(void)
     }
 }
 
+/**
+ * @brief 测试用例 sem — 信号量 create/take/give/ISR/delete
+ * @return 无
+ * @retval 无
+ * @note 含二进制信号量与 timeout
+ * @warning 无
+ * @attention ❌ ISR；✅ 阻塞 take
+ */
 static void case_sem(void)
 {
     cgrtos_sem_t *sem = cgrtos_sem_create(0, 5);
@@ -481,6 +662,14 @@ static void case_sem(void)
     cgrtos_sem_delete(bin);
 }
 
+/**
+ * @brief 测试用例 mutex — lock/unlock/递归/查询/delete
+ * @return 无
+ * @retval 无
+ * @note 含 8 层深度递归
+ * @warning 无
+ * @attention ❌ ISR；✅ 阻塞 lock
+ */
 static void case_mutex(void)
 {
     cgrtos_mutex_t *mtx = cgrtos_mutex_create();
@@ -515,6 +704,17 @@ static volatile int g_del_holder_ran;
 static cgrtos_mutex_t *g_del_mtx;
 static task_id_t g_del_holder_id;
 
+/**
+ * @brief 安全删除测试：持锁任务 delay 后自删
+ * @details 验证 force_release/handoff 给 waiter。
+ * @param[in] arg 未使用
+ * @return 无（删除路径不返回）
+ * @retval 无
+ * @note 与 del_waiter_task 配对
+ * @warning 无
+ * @attention ❌ ISR；✅ mutex/delay/delete
+ * @internal
+ */
 static void del_holder_task(void *arg)
 {
     (void)arg;
@@ -530,6 +730,16 @@ static void del_holder_task(void *arg)
     }
 }
 
+/**
+ * @brief 安全删除测试：阻塞等锁，holder 自删后应获得锁
+ * @param[in] arg 未使用
+ * @return 无（永不返回）
+ * @retval 无
+ * @note 成功时 g_del_waiter_got=1
+ * @warning 无
+ * @attention ❌ ISR；✅ 阻塞 lock
+ * @internal
+ */
 static void del_waiter_task(void *arg)
 {
     (void)arg;
@@ -543,6 +753,14 @@ static void del_waiter_task(void *arg)
     }
 }
 
+/**
+ * @brief 测试用例 safety — stats/非法 delete/栈检测/持锁自删 handoff
+ * @return 无
+ * @retval 无
+ * @note 创建 dhold/dwait 任务并 suspend/resume 调度
+ * @warning 依赖单核 affinity 绑定
+ * @attention ❌ ISR；✅ 多任务阻塞
+ */
 static void case_safety(void)
 {
     cgrtos_runtime_stats_t st0, st1;
@@ -590,6 +808,13 @@ static void case_safety(void)
     expect("stats_creates", st1.task_creates > st0.task_creates);
 }
 
+/**
+ * @brief 测试用例 queue — send/receive/ISR/messages_waiting/delete
+ * @return 无
+ * @retval 无
+ * @warning 无
+ * @attention ❌ ISR；✅ 队列 API
+ */
 static void case_queue(void)
 {
     cgrtos_queue_t *q = cgrtos_queue_create(4, sizeof(uint32_t));
@@ -605,6 +830,13 @@ static void case_queue(void)
     expect("queue_delete", cgrtos_queue_delete(q) == pdPASS);
 }
 
+/**
+ * @brief 测试用例 event — set/wait/clear/wait_all/timeout/ISR/delete
+ * @return 无
+ * @retval 无
+ * @warning 无
+ * @attention ❌ ISR；✅ wait_bits 阻塞
+ */
 static void case_event(void)
 {
     cgrtos_event_group_t *eg = cgrtos_event_group_create();
@@ -633,6 +865,16 @@ static void case_event(void)
 static volatile uint32_t g_preempt_hi;
 static volatile uint32_t g_preempt_lo_spins;
 
+/**
+ * @brief 抢占测试高优先级任务：置位 g_preempt_hi 后 idle
+ * @param[in] arg 未使用
+ * @return 无（永不返回）
+ * @retval 无
+ * @note prio=20 vs 测试任务 busy loop
+ * @warning 无
+ * @attention ❌ ISR；✅ delay
+ * @internal
+ */
 static void preempt_hi_task(void *arg)
 {
     (void)arg;
@@ -642,6 +884,14 @@ static void preempt_hi_task(void *arg)
     }
 }
 
+/**
+ * @brief 测试用例 preempt — 高优先级抢占 busy 低优先级
+ * @return 无
+ * @retval 无
+ * @note 低优先级忙等+yield 直至 hi 运行
+ * @warning 无
+ * @attention ❌ ISR；✅ 创建/删除任务
+ */
 static void case_preempt(void)
 {
     g_preempt_hi = 0;
@@ -660,6 +910,13 @@ static void case_preempt(void)
     cgrtos_task_delete(hi);
 }
 
+/**
+ * @brief 测试用例 streambuf — 流缓冲 create/send/recv/reset/delete
+ * @return 无
+ * @retval 无
+ * @warning 无
+ * @attention ❌ ISR；✅ stream API
+ */
 static void case_streambuf(void)
 {
     cgrtos_stream_buffer_t *sb = cgrtos_stream_buffer_create(64, 4);
@@ -675,6 +932,13 @@ static void case_streambuf(void)
     expect("sb_delete", cgrtos_stream_buffer_delete(sb) == pdPASS);
 }
 
+/**
+ * @brief 测试用例 msgbuf — 消息缓冲分帧 send/recv/delete
+ * @return 无
+ * @retval 无
+ * @warning 无
+ * @attention ❌ ISR；✅ message buffer API
+ */
 static void case_msgbuf(void)
 {
     cgrtos_message_buffer_t *mb = cgrtos_message_buffer_create(128);
@@ -691,6 +955,13 @@ static void case_msgbuf(void)
     expect("mb_delete", cgrtos_message_buffer_delete(mb) == pdPASS);
 }
 
+/**
+ * @brief 测试用例 qset — 队列集 add/select/receive
+ * @return 无
+ * @retval 无
+ * @warning 无
+ * @attention ❌ ISR；✅ queue set 阻塞 select
+ */
 static void case_qset(void)
 {
     cgrtos_queue_set_t *set = cgrtos_queue_set_create(4);
@@ -710,8 +981,17 @@ static void case_qset(void)
     cgrtos_queue_delete(q2);
 }
 
+/**
+ * @brief 测试用例 fs — RAM 文件系统 mkdir/open/read/write/stat/readdir
+ * @return 无
+ * @retval 无
+ * @note 每次 cgrtos_fs_init 重置卷
+ * @warning 无
+ * @attention ❌ ISR；✅ FS 阻塞路径
+ */
 static void case_fs(void)
 {
+    cgrtos_statfs_t sfs;
     cgrtos_fs_init();
     expect("fs_mkdir", cgrtos_fs_mkdir("/data") == 0);
     int fd = cgrtos_fs_open("/data/note.txt", CGRTOS_O_CREAT | CGRTOS_O_RDWR);
@@ -732,10 +1012,77 @@ static void case_fs(void)
     int got = cgrtos_fs_readdir(dir, &ent);
     expect("fs_readdir", got == 1 && ent.name[0] == 'n');
     expect("fs_closedir", cgrtos_fs_closedir(dir) == 0);
-    expect("fs_unlink", cgrtos_fs_unlink("/data/note.txt") == 0);
+
+    expect("fs_rename", cgrtos_fs_rename("/data/note.txt", "/data/renamed.txt") == 0);
+    expect("fs_stat_ren", cgrtos_fs_stat("/data/renamed.txt", &st) == 0 && st.size == 9);
+    expect("fs_stat_old_gone", cgrtos_fs_stat("/data/note.txt", &st) != 0);
+
+    expect("fs_statfs", cgrtos_fs_statfs(&sfs) == 0 &&
+           sfs.inodes_used >= 2 && sfs.inodes_total == CGRTOS_FS_MAX_INODES &&
+           sfs.max_file == CGRTOS_FS_MAX_FILE_BYTES);
+    expect("fs_sync", cgrtos_fs_sync() == 0);
+
+    expect("fs_unlink", cgrtos_fs_unlink("/data/renamed.txt") == 0);
     expect("fs_rmdir", cgrtos_fs_rmdir("/data") == 0);
+
+    /* format wipes volume; recreate smoke */
+    expect("fs_format", cgrtos_fs_format() == 0);
+    expect("fs_after_fmt_gone", cgrtos_fs_stat("/data", &st) != 0);
+    expect("fs_mkdir2", cgrtos_fs_mkdir("/data") == 0);
+    expect("fs_rmdir2", cgrtos_fs_rmdir("/data") == 0);
 }
 
+/**
+ * @brief 测试用例 vfs — 挂载表与统一 open/read/write API
+ * @details 验证 vfs_init/mount 列表、路径路由到 RAM 后端、以及 umount 根保护。
+ * @return 无
+ * @retval 无
+ * @note 依赖 CONFIG_USE_VFS=1
+ * @warning 无
+ * @attention ❌ ISR；✅ 可能阻塞
+ */
+static void case_vfs(void)
+{
+#if CONFIG_USE_VFS
+    vfs_mount_info_t mounts[VFS_MAX_MOUNTS];
+    cgrtos_statfs_t sfs;
+    char buf[16];
+    int fd;
+    int n;
+
+    vfs_init();
+    n = vfs_list_mounts(mounts, VFS_MAX_MOUNTS);
+    expect("vfs_list", n >= 1 && mounts[0].mp[0] == '/' &&
+           mounts[0].fstype[0] == 'r'); /* "ram" */
+
+    expect("vfs_mkdir", vfs_mkdir("/vtmp") == 0);
+    fd = vfs_open("/vtmp/x.bin", CGRTOS_O_CREAT | CGRTOS_O_RDWR | CGRTOS_O_TRUNC);
+    expect("vfs_open", fd >= 0);
+    expect("vfs_write", vfs_write(fd, "VFSOK", 5) == 5);
+    expect("vfs_lseek", vfs_lseek(fd, 0, 0) == 0);
+    expect("vfs_read", vfs_read(fd, buf, 5) == 5 && buf[0] == 'V' && buf[4] == 'K');
+    expect("vfs_close", vfs_close(fd) == 0);
+    expect("vfs_rename", vfs_rename("/vtmp/x.bin", "/vtmp/y.bin") == 0);
+    expect("vfs_statfs", vfs_statfs("/", &sfs) == 0 && sfs.inodes_used >= 2);
+    expect("vfs_sync", vfs_sync(0) == 0);
+    expect("vfs_unlink", vfs_unlink("/vtmp/y.bin") == 0);
+    expect("vfs_rmdir", vfs_rmdir("/vtmp") == 0);
+
+    /* unsupported fstype must fail; root umount alone must fail */
+    expect("vfs_mount_bad", vfs_mount("littlefs", "/mnt", 0) != 0);
+    expect("vfs_umount_root", vfs_umount("/") != 0);
+#else
+    expect("vfs_skipped", 1);
+#endif
+}
+
+/**
+ * @brief 测试用例 notify — task notify / notify_wait
+ * @return 无
+ * @retval 无
+ * @warning 无
+ * @attention ❌ ISR；✅ 创建任务与 notify
+ */
 static void case_notify(void)
 {
     task_id_t nid = cgrtos_task_create("nwait", notify_waiter, 0, 8, SCHED_PRIORITY);
@@ -747,6 +1094,13 @@ static void case_notify(void)
     expect("task_notify", g_notify_got == 0xA5);
 }
 
+/**
+ * @brief 测试用例 timer — 软定时器 start/stop/change/reset/delete
+ * @return 无
+ * @retval 无
+ * @warning 时间断言含 tick 容差
+ * @attention ❌ ISR；✅ timer API
+ */
 static void case_timer(void)
 {
     g_timer_fires = 0;
@@ -764,6 +1118,13 @@ static void case_timer(void)
     expect("timer_delete", cgrtos_timer_delete(tmr) == pdPASS);
 }
 
+/**
+ * @brief 测试用例 task — 生命周期 suspend/resume/prio/stack/delete
+ * @return 无
+ * @retval 无
+ * @warning 无
+ * @attention ❌ ISR；✅ 任务管理 API
+ */
 static void case_task(void)
 {
     task_id_t id = cgrtos_task_create("life", rr_worker, 0, 3, SCHED_RR);
@@ -779,6 +1140,15 @@ static void case_task(void)
     expect("task_delete", cgrtos_task_delete(id) == pdPASS);
 }
 
+/**
+ * @brief 测试用例 sched — CFS 公平性、EDF、Hybrid、RR
+ * @details 多段创建 worker 并 wait_ticks 后断言统计量。
+ * @return 无
+ * @retval 无
+ * @note 多核时 EDF 软亲和 0xFF
+ * @warning QEMU 时间 skew 影响比例断言
+ * @attention ❌ ISR；✅ 长时阻塞与多任务
+ */
 static void case_sched(void)
 {
 /* Run fairness tests on core0 so they don't require secondary (also pin for SMP). */
@@ -852,6 +1222,16 @@ static volatile int g_m1_exit_done;
 static cgrtos_mutex_t *g_m1_dpcp_mtx;
 static volatile tick_t g_m1_dl_under_lock;
 
+/**
+ * @brief Module1 PT 测试低优先级 worker（可选高抢占阈值）
+ * @param[in] arg 未使用
+ * @return 无（永不返回）
+ * @retval 无
+ * @note CONFIG_USE_PREEMPT_THRESH 下 set_preempt_threshold(20)
+ * @warning 无
+ * @attention ❌ ISR；✅ 纯计算循环
+ * @internal
+ */
 static void m1_lo_worker(void *arg)
 {
     (void)arg;
@@ -871,6 +1251,15 @@ static void m1_lo_worker(void *arg)
     }
 }
 
+/**
+ * @brief Module1 PT 测试高优先级 worker
+ * @param[in] arg 未使用
+ * @return 无（永不返回）
+ * @retval 无
+ * @warning 无
+ * @attention ❌ ISR
+ * @internal
+ */
 static void m1_hi_worker(void *arg)
 {
     (void)arg;
@@ -883,6 +1272,16 @@ static void m1_hi_worker(void *arg)
     }
 }
 
+/**
+ * @brief Module1 任务正常返回路径测试 worker
+ * @details 置 g_m1_exit_done=1 后 return 触发 task_exit。
+ * @param[in] arg 未使用
+ * @return 无（任务退出）
+ * @retval 无
+ * @warning 无
+ * @attention ❌ ISR
+ * @internal
+ */
 static void m1_exit_worker(void *arg)
 {
     (void)arg;
@@ -891,6 +1290,16 @@ static void m1_exit_worker(void *arg)
 }
 
 #if CONFIG_USE_DPCP && CONFIG_USE_EDF
+/**
+ * @brief Module1 DPCP 测试：持锁期间 deadline 应被天花板压低
+ * @param[in] arg 未使用
+ * @return 无（永不返回）
+ * @retval 无
+ * @note 写入 g_m1_dl_under_lock 供断言
+ * @warning 需 CONFIG_USE_DPCP && CONFIG_USE_EDF
+ * @attention ❌ ISR；✅ mutex/deadline
+ * @internal
+ */
 static void m1_dpcp_worker(void *arg)
 {
     (void)arg;
@@ -912,11 +1321,27 @@ static void m1_dpcp_worker(void *arg)
 /* ---- Modules 2-6 ---- */
 static volatile int g_m2_isr_hits;
 
+/**
+ * @brief Module2 ISR API 守卫钩子：递增 g_m2_isr_hits
+ * @return 无
+ * @retval 无
+ * @note 配合 cgrtos_set_isr_api_hook
+ * @warning 无
+ * @attention ✅ 钩子上下文
+ * @internal
+ */
 static void m2_isr_hook(void)
 {
     g_m2_isr_hits++;
 }
 
+/**
+ * @brief 测试用例 m2_ipc — 超时/死锁检测/ISR 守卫（module2）
+ * @return 无
+ * @retval 无
+ * @warning 部分子测受 Kconfig 门控
+ * @attention ❌ ISR；✅ IPC API
+ */
 static void case_m2_ipc(void)
 {
     cgrtos_sem_t *s = cgrtos_sem_create(0, 1);
@@ -956,6 +1381,13 @@ static void case_m2_ipc(void)
 
 static uint8_t g_m3_pool_storage[64 * 8];
 
+/**
+ * @brief 测试用例 m3_mem — 固定池 mempool 与 double-free（module3）
+ * @return 无
+ * @retval 无
+ * @warning 无
+ * @attention ❌ ISR；✅ 池/堆 API
+ */
 static void case_m3_mem(void)
 {
     cgrtos_mempool_t *p = cgrtos_mempool_create(g_m3_pool_storage, 64, 8);
@@ -978,11 +1410,27 @@ static void case_m3_mem(void)
 
 static volatile int g_m4_create_hits;
 
+/**
+ * @brief Module4 任务创建钩子：递增 g_m4_create_hits
+ * @return 无
+ * @retval 无
+ * @note 配合 cgrtos_set_task_create_hook
+ * @warning 无
+ * @attention ✅ 钩子上下文
+ * @internal
+ */
 static void m4_create_hook(void)
 {
     g_m4_create_hits++;
 }
 
+/**
+ * @brief 测试用例 m4_safe — 创建钩子/watchdog/MPU API（module4）
+ * @return 无
+ * @retval 无
+ * @warning CONFIG_USE_HOOKS 门控部分断言
+ * @attention ❌ ISR
+ */
 static void case_m4_safe(void)
 {
 #if CONFIG_USE_HOOKS
@@ -1001,6 +1449,13 @@ static void case_m4_safe(void)
     expect("m4_mpu_api", 1);
 }
 
+/**
+ * @brief 测试用例 m5_perf — EDF 进度与 sched_ready_count（module5）
+ * @return 无
+ * @retval 无
+ * @warning 无
+ * @attention ❌ ISR；✅ EDF 任务
+ */
 static void case_m5_perf(void)
 {
 #if CONFIG_USE_EDF
@@ -1019,8 +1474,19 @@ static void case_m5_perf(void)
     expect("m5_ready_cnt", cgrtos_sched_ready_count(0) >= 0);
 }
 
+/**
+ * @brief 测试用例 m6_dbg — klog 级别与 task_list_export（module6）
+ * @return 无
+ * @retval 无
+ * @warning 无
+ * @attention ❌ ISR
+ */
 static void case_m6_dbg(void)
 {
+    cgrtos_objects_stats_t ost;
+    uint32_t tbuf[16 * 4];
+    uint32_t tn;
+
     cgrtos_log_set_level(CGRTOS_LOG_INFO);
     CGRTOS_LOGI("m6", "hello");
     expect("m6_level", cgrtos_log_get_level() == CGRTOS_LOG_INFO);
@@ -1029,8 +1495,36 @@ static void case_m6_dbg(void)
     uint32_t n = cgrtos_task_list_export(info, 16);
     expect("m6_export", n >= 1);
     expect("m6_name", info[0].name[0] != 0);
+
+#if CONFIG_USE_OBJ_QUERY
+    expect("m6_obj_stats", cgrtos_objects_stats_get(&ost) == 0 &&
+           ost.tasks_used >= 1 && ost.tasks_max == CONFIG_MAX_TASKS);
+#else
+    (void)ost;
+    expect("m6_obj_skip", 1);
+#endif
+
+#if CONFIG_USE_TRACE
+    cgrtos_trace_reset();
+    cgrtos_trace_event(CGRTOS_TRACE_USER, 0x11, 0x22);
+    tn = cgrtos_trace_export(tbuf, 16);
+    expect("m6_trace_n", tn >= 1);
+    expect("m6_trace_type", (tbuf[(tn - 1) * 4 + 1] & 0xFFFF) == CGRTOS_TRACE_USER);
+    expect("m6_trace_a0", tbuf[(tn - 1) * 4 + 2] == 0x11);
+#else
+    (void)tbuf;
+    (void)tn;
+    expect("m6_trace_skip", 1);
+#endif
 }
 
+/**
+ * @brief 测试用例 sched_m1 — 抢占阈值/DPCP/exit/sched-stats（module1）
+ * @return 无
+ * @retval 无
+ * @warning 大量 Kconfig 分支软跳过
+ * @attention ❌ ISR；✅ 多任务长时间运行
+ */
 static void case_sched_m1(void)
 {
 #if CONFIG_USE_PREEMPT_THRESH
@@ -1109,6 +1603,14 @@ static void case_sched_m1(void)
 #endif
 }
 
+/**
+ * @brief 测试用例 smp — 次核 online/affinity/load balance
+ * @return 无
+ * @retval 无
+ * @note 单核构建软跳过 aff/lb
+ * @warning 次核未 online 时断言放宽
+ * @attention ❌ ISR；✅ SMP 调度 API
+ */
 static void case_smp(void)
 {
 #if CONFIG_NUM_CORES < 2
@@ -1181,6 +1683,13 @@ static void case_smp(void)
 #endif
 }
 
+/**
+ * @brief 测试用例 hooks — idle/tick 钩子与静态 IPC/timer 回收
+ * @return 无
+ * @retval 无
+ * @warning CONFIG_USE_HOOKS 门控 tick/idle 段
+ * @attention ❌ ISR；✅ 钩子注册
+ */
 static void case_hooks(void)
 {
 #if CONFIG_USE_HOOKS
@@ -1226,6 +1735,13 @@ static void case_hooks(void)
     cgrtos_timer_delete(t3);
 }
 
+/**
+ * @brief 测试用例 critical — 临界区标志/yield/stats_dump
+ * @return 无
+ * @retval 无
+ * @warning 无
+ * @attention ❌ ISR；✅ enter/exit_critical
+ */
 static void case_critical(void)
 {
     cgrtos_enter_critical();
@@ -1238,13 +1754,17 @@ static void case_critical(void)
 }
 
 /**
- * @brief FromISR 全系列回归：任务上下文 API + 真实 tick 钩子路径
- *
+ * @brief 测试用例 isr — FromISR 全系列回归与真实 tick 钩子路径
  * @details
  * 1. 创建 sem/queue/event/stream/msgbuf/timer，校验 FromISR 收发与 clear/take。
  * 2. timer_start_from_isr 后等待回调触发。
  * 3. 安装 isr_pack_tick_hook，在真实 MTIP 上下文轮转 FromISR，断言 tick_ops≥16。
  * 4. 验证 portYIELD_FROM_ISR 宏；清理对象。
+ * @return 无
+ * @retval 无
+ * @note 覆盖 stream/message/timer FromISR，与 ipc.c 队列/事件互补
+ * @warning 依赖 CONFIG_USE_HOOKS 与 tick 驱动
+ * @attention ❌ 用例主体在任务上下文；✅ 子路径在 tick ISR
  */
 static void case_isr(void)
 {
@@ -1320,13 +1840,17 @@ static void case_isr(void)
 }
 
 /**
- * @brief 中断优先级分组 / PLIC 配置 / ISR 临界区 / 分发注册
- *
+ * @brief 测试用例 irq — 中断优先级分组 / PLIC / ISR 临界区 / 分发注册
  * @details
  * 1. 读写 syscall_max_priority；configure 低/高优先级源并校验分组关系。
  * 2. register → dispatch 模拟 claim 后路径；unregister 后 handler 为空。
  * 3. enter/exit_critical_from_isr 与 portSET/CLEAR_INTERRUPT_MASK_FROM_ISR 抬高/恢复 threshold。
  * 4. 非法 irq/priority 返回 pdFAIL；最后 disable 测试源。
+ * @return 无
+ * @retval 无
+ * @note 使用 irq_test_handler 验证 dispatch 计数
+ * @warning 不依赖真实外设触发，仅软件 dispatch
+ * @attention ❌ 任务上下文；✅ 测试 FromISR 临界区 API
  */
 static void case_irq(void)
 {
@@ -1374,8 +1898,7 @@ static void case_irq(void)
 }
 
 /**
- * @brief HAL 框架回归：注册表契约、错误码、兼容层、控制台原子写、配置校验
- *
+ * @brief 测试用例 hal — HAL 注册表、错误码、兼容层与控制台契约
  * @details
  * 覆盖易用性/鲁棒性/多核安全相关契约（不依赖真实多核竞态复现）：
  * 1. 设备表完整且冻结；
@@ -1383,6 +1906,11 @@ static void case_irq(void)
  * 3. 兼容层与 HAL 读路径一致；
  * 4. console write/puts；
  * 5. irqc/ipi 参数边界。
+ * @return 无
+ * @retval 无
+ * @note 冻结后 hal_device_register 须返回 HAL_ERR_STATE
+ * @warning bogus 设备仅用于负测，不挂入真实驱动
+ * @attention ❌ ISR；❌ 不阻塞
  */
 static void case_hal(void)
 {
@@ -1466,7 +1994,8 @@ static const test_case_t g_cases[] = {
     { "streambuf", "stream buffer send recv",                 case_streambuf },
     { "msgbuf",    "message buffer framed send recv",         case_msgbuf },
     { "qset",      "queue set select",                        case_qset },
-    { "fs",        "RAM filesystem open read write",          case_fs },
+    { "fs",        "RAM filesystem open read write rename format", case_fs },
+    { "vfs",       "VFS mount table open read write sync",      case_vfs },
     { "preempt",   "high prio preempts busy low",             case_preempt },
     { "notify",    "task notify wait",                        case_notify },
     { "timer",     "soft timer start stop change",            case_timer },
@@ -1477,7 +2006,7 @@ static const test_case_t g_cases[] = {
     { "m3_mem",    "mempool poison redzone (module3)",        case_m3_mem },
     { "m4_safe",   "hooks crit-monitor ISR-guard (module4)",  case_m4_safe },
     { "m5_perf",   "EDF-heap idle-sleep API (module5)",       case_m5_perf },
-    { "m6_dbg",    "klog task-export errcodes (module6)",     case_m6_dbg },
+    { "m6_dbg",    "klog objects trace export (module6)",     case_m6_dbg },
     { "smp",       "affinity and load balance",               case_smp },
     { "hooks",     "hooks and static IPC",                    case_hooks },
     { "critical",  "critical section yield stats",            case_critical },
@@ -1488,6 +2017,18 @@ static const test_case_t g_cases[] = {
 
 #define N_CASES ((int)(sizeof(g_cases) / sizeof(g_cases[0])))
 
+/**
+ * @brief 比较两个 C 字符串是否相等
+ * @param[in] a 字符串 a；NULL 视为不等
+ * @param[in] b 字符串 b；NULL 视为不等
+ * @return 1 相等；0 不等
+ * @retval 1 相等
+ * @retval 0 不等或任一为空
+ * @note 区分大小写
+ * @warning 无
+ * @attention ✅ 任意上下文；❌ 不阻塞
+ * @internal
+ */
 static int str_eq(const char *a, const char *b)
 {
     if (!a || !b) {
@@ -1500,6 +2041,16 @@ static int str_eq(const char *a, const char *b)
     return *a == '\0' && *b == '\0';
 }
 
+/**
+ * @brief 打印 pass/fail 汇总；可选输出套件通过/失败标记
+ * @param[in] suite_marker 非零时输出 TEST_SUITE_PASSED/FAILED 标记
+ * @return 无
+ * @retval 无
+ * @note 供 test_cases_run 调用
+ * @warning 无
+ * @attention ❌ ISR；❌ 不阻塞（printf）
+ * @internal
+ */
 static void print_results(int suite_marker)
 {
     cgrtos_printf("----------------------------------------\n");
@@ -1513,22 +2064,56 @@ static void print_results(int suite_marker)
     }
 }
 
+/**
+ * @brief 清零全局 pass/fail 计数器
+ * @return 无
+ * @retval 无
+ * @note 与 test_cases.h 声明一致
+ * @warning 多任务并发无原子保护
+ * @attention ❌ ISR 勿依赖；❌ 不阻塞
+ */
 void test_cases_reset(void)
 {
     g_pass = 0;
     g_fail = 0;
 }
 
+/**
+ * @brief 读取当前通过计数
+ * @return 累计 [PASS] 次数
+ * @retval >=0 通过数
+ * @note 只读 g_pass
+ * @warning 无
+ * @attention ✅ ISR 可读；❌ 不阻塞
+ */
 int test_cases_pass_count(void)
 {
     return g_pass;
 }
 
+/**
+ * @brief 读取当前失败计数
+ * @return 累计 [FAIL] 次数
+ * @retval >=0 失败数
+ * @note 只读 g_fail
+ * @warning 无
+ * @attention ✅ ISR 可读；❌ 不阻塞
+ */
 int test_cases_fail_count(void)
 {
     return g_fail;
 }
 
+/**
+ * @brief 获取静态用例表指针与条目数
+ * @details 返回 g_cases[] 首地址；count 非 NULL 时写入 N_CASES。表驻留只读段，不含 "all"/"stress" 合成名。
+ * @param[out] count 可选；非 NULL 时写入用例总数
+ * @return 用例表首指针
+ * @retval 非 NULL 表有效
+ * @note 与 test_cases.h 声明一致；调用方勿 free 或改写表项
+ * @warning 勿修改返回表内容
+ * @attention ✅ ISR 可读；❌ 不阻塞
+ */
 const test_case_t *test_cases_get(int *count)
 {
     if (count) {
@@ -1537,6 +2122,14 @@ const test_case_t *test_cases_get(int *count)
     return g_cases;
 }
 
+/**
+ * @brief 打印全部可用用例名与一行帮助
+ * @return 无
+ * @retval 无
+ * @note CLI `help` 可调用
+ * @warning 无
+ * @attention ❌ ISR（printf）；❌ 不阻塞
+ */
 void test_cases_list(void)
 {
     int i;
@@ -1548,6 +2141,17 @@ void test_cases_list(void)
     cgrtos_printf("  all - run every functional case (not stress)\n");
 }
 
+/**
+ * @brief 按名称运行单个用例、"all" 或 "stress"
+ * @details 匹配 g_cases[]；all 依次执行全部功能用例；stress 转调 stress_run()。
+ * @param[in] name 用例名、"all" 或 "stress"；NULL 非法
+ * @return 0 成功；-1 未知名
+ * @retval 0  已执行
+ * @retval -1 名称非法或未找到
+ * @note 单用例前 reset 计数；all 输出套件标记
+ * @warning stress 不经过 expect 汇总
+ * @attention ❌ ISR；✅ 用例内可长时间阻塞
+ */
 int test_cases_run(const char *name)
 {
     int i;

@@ -1,6 +1,10 @@
 /**
  * @file hal_printf.c
  * @brief 简易格式化输出（HAL 侧实现，持控制台锁）
+ * @author Cong Zhou / Juilletioi
+ * @version 5.0.0
+ * @date 2026-07-22
+ * @copyright CG-RTOS
  *
  * @details
  * ## 分层
@@ -23,8 +27,14 @@
 
 /**
  * @brief 已持锁时输出一字符
- * @param c 字符
- * @details 步骤：1. 转调 `hal_console_putc_unlocked(c)`。
+ * @details 转调 hal_console_putc_unlocked(c) 将字符写入控制台。
+ * @param[in] c 待输出字符
+ * @return 无
+ * @retval 无
+ * @note 调用方须已持有 hal_console_lock
+ * @warning 无
+ * @attention ❌ ISR；❌ block
+ * @internal
  */
 static void pchar(char c)
 {
@@ -32,9 +42,15 @@ static void pchar(char c)
 }
 
 /**
- * @brief 已持锁时输出 NUL 字符串
- * @param s 字符串；NULL 打印 "(null)"
- * @details 步骤：1. 空指针替换；2. 逐字符 pchar 直至 '\\0'。
+ * @brief 已持锁时输出 NUL 结尾字符串
+ * @details NULL 指针替换为 "(null)"；逐字符 pchar 直至 '\\0'。
+ * @param[in] s 字符串；NULL 打印 "(null)"
+ * @return 无
+ * @retval 无
+ * @note 调用方须已持有 hal_console_lock
+ * @warning 字符串须以 NUL 结尾
+ * @attention ❌ ISR；❌ block
+ * @internal
  */
 static void pstr(const char *s)
 {
@@ -48,12 +64,15 @@ static void pstr(const char *s)
 
 /**
  * @brief 已持锁时输出无符号数
- * @param v   数值
- * @param hex 非 0 为十六进制，否则十进制
- * @details 步骤：
- * 1. v==0 → 输出 '0' 返回。
- * 2. 循环取余/取半字节，数字逆序写入 buf。
- * 3. 逆序吐出 buf，得到正确位序。
+ * @details v==0 直接输出 '0'；否则循环取余/取半字节逆序写入 buf 再逆序输出。
+ * @param[in] v   数值
+ * @param[in] hex 非 0 为十六进制，否则十进制
+ * @return 无
+ * @retval 无
+ * @note 内部 buf 固定 20 字节
+ * @warning 无
+ * @attention ❌ ISR；❌ block
+ * @internal
  */
 static void pnum(unsigned long v, int hex)
 {
@@ -80,8 +99,14 @@ static void pnum(unsigned long v, int hex)
 
 /**
  * @brief 已持锁时输出有符号十进制
- * @param v 有符号值
- * @details 步骤：1. 负则先 '-' 再取反；2. pnum 十进制。
+ * @details 负值先输出 '-' 再对绝对值调用 pnum 十进制输出。
+ * @param[in] v 有符号值
+ * @return 无
+ * @retval 无
+ * @note 调用方须已持有 hal_console_lock
+ * @warning 无
+ * @attention ❌ ISR；❌ block
+ * @internal
  */
 static void psnum(long v)
 {
@@ -94,17 +119,14 @@ static void psnum(long v)
 
 /**
  * @brief 简易格式化打印
- * @param fmt 格式串
- * @param ... 可变参数
- *
- * @details 步骤：
- * 1. `hal_console_lock()` 取得整消息输出权。
- * 2. `va_start` 初始化参数列表。
- * 3. 逐字符扫描 fmt：
- *    a. 非 '%' → 直接 pchar；
- *    b. '%' 后解析格式符并从 ap 取参格式化。
- * 4. `va_end` 清理。
- * 5. `hal_console_unlock()` 释放锁。
+ * @details hal_console_lock 取得输出权；va_start 后逐字符扫描 fmt，解析 '%' 格式符并从 ap 取参格式化；va_end 后 hal_console_unlock。
+ * @param[in] fmt 格式串
+ * @param[in] ... 可变参数
+ * @return 无
+ * @retval 无
+ * @note 支持 %s %d %i %u %x %c %p %% 及 %lu %ld %lx %ls
+ * @warning fmt 为 NULL 时直接返回；持锁期间禁止 yield
+ * @attention ❌ ISR；❌ block
  */
 void cgrtos_printf(const char *fmt, ...)
 {

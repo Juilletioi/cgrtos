@@ -1,6 +1,10 @@
 /**
  * @file scheduler.c
- * @brief CG-RTOS 多策略抢占式 SMP 调度器核心。
+ * @brief CG-RTOS 多策略抢占式 SMP 调度器核心
+ * @author Cong Zhou / Juilletioi
+ * @version 5.0.0
+ * @date 2026-07-22
+ * @copyright CG-RTOS
  *
  * @details
  * 调度策略：
@@ -86,14 +90,15 @@ static volatile uint8_t g_edf_kick_pending;
 #endif
 
 /**
- * @brief 从就绪位图取最高优先级数值。
- *
- * @param bitmap 优先级位图（bit i 表示优先级 i 有就绪任务）。
- * @return 最高优先级 [0..31]；位图为 0 时返回 -1。
- *
- * @details
- * 1. 若 bitmap 为 0，无就绪任务，返回 -1。
- * 2. 使用 __builtin_clz 计算最高位位置，31 - clz 即为最高优先级数值。
+ * @brief 从就绪位图取最高优先级数值
+ * @details bitmap 为 0 返回 -1；否则用 __builtin_clz 计算最高置位，31-clz 即优先级。
+ * @param[in] bitmap 优先级位图（bit i 表示优先级 i 有就绪任务）
+ * @return 最高优先级 [0..31]；位图为 0 时 -1
+ * @retval >=0 最高优先级
+ * @retval -1 无就绪任务
+ * @note 内联热路径；调用方已持锁或 IRQ 关闭
+ * @warning 无
+ * @attention @internal ✅ ISR；❌ block/switch
  */
 static inline int sched_highest_ready_prio(uint32_t bitmap)
 {
@@ -104,16 +109,15 @@ static inline int sched_highest_ready_prio(uint32_t bitmap)
 }
 
 /**
- * @brief 判断任务是否走优先级/RR 就绪队列。
- *
- * @param task 任务指针。
- * @return 非零表示使用优先级队列；0 表示不使用。
- *
- * @details
- * 1. task 为 NULL 时返回 0。
- * 2. SCHED_PRIORITY 或 SCHED_RR 策略直接返回 1。
- * 3. SCHED_HYBRID 策略：prio >= CONFIG_RT_PRIO_THRESHOLD 时走 RT 优先级队列。
- * 4. 其余策略返回 0。
+ * @brief 判断任务是否走优先级/RR 就绪队列
+ * @details SCHED_PRIORITY/SCHED_RR 直接返回 1；HYBRID 且 prio>=RT_THRESHOLD 返回 1；否则 0。
+ * @param[in] task 任务 TCB；NULL 返回 0
+ * @return 非零表示使用优先级队列
+ * @retval 1 走优先级队列
+ * @retval 0 不使用
+ * @note 策略路由辅助
+ * @warning 无
+ * @attention @internal ✅ ISR；❌ block/switch
  */
 static inline int sched_uses_priority(cgrtos_task_t *task)
 {
@@ -130,16 +134,15 @@ static inline int sched_uses_priority(cgrtos_task_t *task)
 }
 
 /**
- * @brief 判断任务是否走 CFS 就绪队列。
- *
- * @param task 任务指针。
- * @return 非零表示使用 CFS 队列；0 表示不使用。
- *
- * @details
- * 1. task 为 NULL 时返回 0。
- * 2. SCHED_CFS 策略直接返回 1。
- * 3. SCHED_HYBRID 策略：prio < CONFIG_RT_PRIO_THRESHOLD 时走 CFS 公平队列。
- * 4. 其余策略返回 0。
+ * @brief 判断任务是否走 CFS 就绪队列
+ * @details SCHED_CFS 返回 1；HYBRID 且 prio<RT_THRESHOLD 返回 1；否则 0。
+ * @param[in] task 任务 TCB；NULL 返回 0
+ * @return 非零表示使用 CFS 队列
+ * @retval 1 走 CFS
+ * @retval 0 不使用
+ * @note 策略路由辅助
+ * @warning 无
+ * @attention @internal ✅ ISR；❌ block/switch
  */
 static inline int sched_uses_cfs(cgrtos_task_t *task)
 {
@@ -156,14 +159,15 @@ static inline int sched_uses_cfs(cgrtos_task_t *task)
 }
 
 /**
- * @brief 判断任务是否走 EDF 就绪队列。
- *
- * @param task 任务指针。
- * @return 非零表示 EDF 策略；0 表示非 EDF。
- *
- * @details
- * 1. task 非空且 policy == SCHED_EDF 时返回 1。
- * 2. 否则返回 0。
+ * @brief 判断任务是否走 EDF 就绪队列
+ * @details CONFIG_USE_EDF 且 policy==SCHED_EDF 时返回 1；否则 0。
+ * @param[in] task 任务 TCB
+ * @return 非零表示 EDF 策略
+ * @retval 1 EDF
+ * @retval 0 非 EDF
+ * @note 未启用 EDF 时编译为恒 0
+ * @warning 无
+ * @attention @internal ✅ ISR；❌ block/switch
  */
 static inline int sched_uses_edf(cgrtos_task_t *task)
 {
@@ -176,10 +180,16 @@ static inline int sched_uses_edf(cgrtos_task_t *task)
 }
 
 /**
- * @brief EDF 任务是否允许在 cpu 上运行（硬亲和）
- * @param task 任务；@param cpu 核号
- * @return 非 0 表示可在该核运行
- * @details 步骤：1. cpu_aff==0xFF 任意核；2. 否则必须 cpu_aff==cpu。
+ * @brief EDF 任务是否允许在指定核运行（硬亲和检查）
+ * @details cpu_aff==0xFF 任意核可运行；否则须 cpu_aff==cpu。
+ * @param[in] task 任务 TCB
+ * @param[in] cpu 目标 hart 编号
+ * @return 非零表示可在该核运行
+ * @retval 1 亲和允许
+ * @retval 0 不允许或 task 为空
+ * @note MC-EDF 分配与 ready_count 统计共用
+ * @warning 无
+ * @attention @internal ✅ ISR；❌ block/switch
  */
 static int sched_edf_affinity_ok(cgrtos_task_t *task, uint8_t cpu)
 {
@@ -191,12 +201,12 @@ static int sched_edf_affinity_ok(cgrtos_task_t *task, uint8_t cpu)
 
 /**
  * @brief MC-EDF：请求所有在线核重新评估调度
- *
- * @details 步骤：
- * 1. 对本核置 g_yield_pending。
- * 2. 对其余在线核置 yield_pending 并发送 MSIP IPI。
- * @note 在 EDF 释放/入队后调用，使更早 deadline 能立即抢占其它核。
- * @warning 调用方不得持有 g_ready_lock（IPI 路径可能间接争用）。
+ * @details 对本核置 g_yield_pending；对其余在线核置 pending 并发送 MSIP IPI。
+ * @return 无
+ * @retval 无
+ * @note EDF 入队/释放后调用；使更早 deadline 能抢占
+ * @warning 调用方不得持有 g_ready_lock（IPI 路径可能间接争用）
+ * @attention @internal ❌ ISR；❌ block/switch
  */
 static void sched_mcedf_kick_all(void)
 {
@@ -217,8 +227,13 @@ static void sched_mcedf_kick_all(void)
 }
 
 /**
- * @brief 请求 MC-EDF 重评估：临界区内仅置 pending，出临界区再 kick
- * @risk 持 g_klock 时同步 IPI 可能导致对端 enter_critical 自旋死锁。
+ * @brief 请求 MC-EDF 重评估：临界区/ISR 内仅置 pending
+ * @details 若在临界区或 ISR：置 g_edf_kick_pending 与本核 yield；否则立即 sched_mcedf_kick_all。
+ * @return 无
+ * @retval 无
+ * @note 持 g_klock 时同步 IPI 可能导致对端 enter_critical 自旋死锁
+ * @warning 持 g_klock 时禁止同步全员 IPI
+ * @attention @internal ✅ ISR；❌ block/switch
  */
 static void sched_edf_kick_request(void)
 {
@@ -237,7 +252,13 @@ static void sched_edf_kick_request(void)
 }
 
 /**
- * @brief 刷新推迟的 MC-EDF kick（由 exit_critical 最外层调用）
+ * @brief 刷新推迟的 MC-EDF kick
+ * @details exit_critical 最外层调用；若 pending 且仍在 ISR 则仅置各核 yield，任务态则 sched_mcedf_kick_all。
+ * @return 无
+ * @retval 无
+ * @note 与 sched_edf_kick_request 配对，避免临界区内 IPI 死锁
+ * @warning 无
+ * @attention ✅ ISR；❌ block/switch
  */
 void cgrtos_sched_edf_kick_flush(void)
 {
@@ -264,9 +285,14 @@ void cgrtos_sched_edf_kick_flush(void)
 }
 
 /**
- * @brief 从全局 MC-EDF 就绪链移除任务（调用方已持锁）
- * @param task EDF 任务
- * @details 步骤：1. 若节点在链上则 list_remove；2. 否则无操作。
+ * @brief 从全局 MC-EDF 就绪结构移除任务
+ * @details 堆模式：线性查找后 sift；链表模式：list_remove g_edf_global。调用方已持 g_ready_lock。
+ * @param[in] task EDF 任务 TCB
+ * @return 无
+ * @retval 无
+ * @note remove_ready_locked 内部路径
+ * @warning task 为空直接返回
+ * @attention @internal ✅ ISR；❌ block/switch
  */
 static void sched_edf_global_remove(cgrtos_task_t *task)
 {
@@ -327,6 +353,16 @@ static void sched_edf_global_remove(cgrtos_task_t *task)
 #endif
 }
 
+/**
+ * @brief 将 EDF 任务按 deadline 插入全局 MC-EDF 就绪结构
+ * @details 先 sched_edf_global_remove 防重复；堆模式 sift-up 插入，链表模式 list_insert_sorted_asc。
+ * @param[in] task EDF 任务 TCB
+ * @return 无
+ * @retval 无
+ * @note 调用方已持 g_ready_lock
+ * @warning 堆满时静默丢弃入队
+ * @attention @internal ✅ ISR；❌ block/switch
+ */
 static void sched_add_edf_ready(cgrtos_task_t *task)
 {
     sched_edf_global_remove(task);
@@ -356,17 +392,14 @@ static void sched_add_edf_ready(cgrtos_task_t *task)
 }
 
 /**
- * @brief 从 EDF 释放时间轮移除任务。
- *
- * @param task 任务指针。
- *
- * @details
- * 1. task 为空或未在轮上（edf_on_wheel==0）则直接返回。
- * 2. 从 edf_rel_item.value 低 32 位计算所在槽位 slot。
- * 3. 若节点确实在链表中，调用 list_remove 移除。
- * 4. 清除 task->edf_on_wheel 标志。
- *
- * @note 调用方应已持有 g_ready_lock。
+ * @brief 从 EDF 释放时间轮移除任务
+ * @details 由 edf_rel_item.value 低 32 位算槽位；在链上则 list_remove；清除 edf_on_wheel。
+ * @param[in] task 任务 TCB
+ * @return 无
+ * @retval 无
+ * @note 调用方应已持有 g_ready_lock
+ * @warning 未在轮上则 no-op
+ * @attention @internal ✅ ISR；❌ block/switch
  */
 static void edf_wheel_remove(cgrtos_task_t *task)
 {
@@ -387,20 +420,14 @@ static void edf_wheel_remove(cgrtos_task_t *task)
 }
 
 /**
- * @brief 将 EDF 任务挂入释放时间轮（按 deadline 触发释放）。
- *
- * @param task 任务指针。
- *
- * @details
- * 1. 关 IRQ 并获取 g_ready_lock。
- * 2. 先从时间轮移除 task 的旧条目（若有）。
- * 3. 若非 EDF 或 period==0，解锁返回（无需挂轮）。
- * 4. 计算释放时刻 when = max(deadline, g_ticks)。
- * 5. 计算 delta = when - g_ticks，slot = (cursor + delta) & mask，rounds = delta / slots。
- * 6. 将 rounds 存入 value 高 32 位、slot 存入低 32 位，插入对应槽位链表。
- * 7. 置 edf_on_wheel=1，解锁并恢复 IRQ。
- *
- * @note 非 EDF 或 period==0 时仅移除轮上条目；内部获取 ready_lock。
+ * @brief 将 EDF 任务挂入释放时间轮
+ * @details 关 IRQ 持 ready_lock；移除旧轮条目；非 EDF 或 period==0 则返回；否则按 deadline 算 slot/rounds 插入并置 edf_on_wheel。
+ * @param[in] task 任务 TCB
+ * @return 无
+ * @retval 无
+ * @note 内部获取 ready_lock；释放时刻 when=max(deadline,g_ticks)
+ * @warning task 为空直接返回
+ * @attention ❌ ISR；❌ block/switch
  */
 void cgrtos_sched_edf_arm(cgrtos_task_t *task)
 {
@@ -441,19 +468,14 @@ void cgrtos_sched_edf_arm(cgrtos_task_t *task)
 }
 
 /**
- * @brief EDF 周期释放：推进 deadline 并唤醒/入就绪队列。
- *
- * @param task 任务指针。
- *
- * @details
- * 1. 校验 task 为 EDF 且 period != 0，否则返回。
- * 2. 将 deadline 推进到 g_ticks + period（新周期）。
- * 3. 按当前 state 分支处理：
- *    a. BLOCKED + BLOCK_DELAY：调用 unblock 唤醒；
- *    b. READY：先从就绪队列移除再重新插入（按新 deadline 排序）；
- *    c. 非 RUNNING/SUSPENDED/DELETED：直接 add_ready；
- *    d. RUNNING 等状态不做额外操作。
- * 4. 调用 cgrtos_sched_edf_arm 重新挂入释放轮。
+ * @brief EDF 周期释放：推进 deadline 并唤醒/入就绪队列
+ * @details deadline+=period；BLOCKED+DELAY 则 unblock；READY 则 remove+add；其它非 RUNNING/SUSPENDED/DELETED 则 add_ready；最后 edf_arm。
+ * @param[in] task EDF 任务 TCB
+ * @return 无
+ * @retval 无
+ * @note 由 sched_process_edf_releases 在锁外调用
+ * @warning 非 EDF 或 period==0 直接返回
+ * @attention @internal ✅ ISR；❌ block/switch
  */
 static void sched_edf_release(cgrtos_task_t *task)
 {
@@ -481,18 +503,13 @@ static void sched_edf_release(cgrtos_task_t *task)
 }
 
 /**
- * @brief 处理当前 EDF 释放轮槽位到期任务。
- *
- * @details
- * 1. 关 IRQ 并获取 g_ready_lock。
- * 2. 游标 g_edf_rel_cursor 前进一步（模 slots）。
- * 3. 遍历当前槽位链表：
- *    a. 若 value 高 32 位 rounds > 0，递减 rounds 并跳过（尚未到期）；
- *    b. 若 rounds == 0，从链表移除，清除 edf_on_wheel，收集到 to_release[]。
- * 4. 解锁并恢复 IRQ。
- * 5. 在锁外逐个调用 sched_edf_release 执行实际释放（避免持锁过久）。
- *
- * @note 由 hart0 tick 调用；多轮 delta 通过 value 高 32 位 rounds 递减。
+ * @brief 处理当前 EDF 释放轮槽位到期任务
+ * @details 持锁推进 cursor；遍历槽位递减 rounds；rounds==0 则收集；锁外 sched_edf_release；有释放则 kick_request。
+ * @return 无
+ * @retval 无
+ * @note hart0 tick 调用；多轮 delta 由高 32 位 rounds 表示
+ * @warning 单次最多收集 16 个任务
+ * @attention @internal ✅ ISR；❌ block/switch
  */
 static void sched_process_edf_releases(void)
 {
@@ -545,20 +562,15 @@ static void sched_process_edf_releases(void)
 }
 
 /**
- * @brief 计算任务应运行的目标 CPU。
- *
- * @param task 任务指针。
- * @return 目标 hart 编号；task 为 NULL 时返回 0。
- *
- * @details
- * 1. task 为 NULL 时返回 0。
- * 2. 若 cpu_aff != 0xFF（硬亲和）：
- *    a. 越界或次核未上线时回退到 0；
- *    b. 否则返回 cpu_aff。
- * 3. 若 run_cpu < CONFIG_NUM_CORES：
- *    a. run_cpu != 0 且次核未上线时回退到 0；
- *    b. 否则返回 run_cpu。
- * 4. 默认返回 0。
+ * @brief 计算任务应运行的目标 CPU
+ * @details 硬亲和 cpu_aff!=0xFF 时校验在线后返回；否则 run_cpu 有效且在线则返回；默认 0。
+ * @param[in] task 任务 TCB
+ * @return 目标 hart 编号
+ * @retval 0..N-1 目标核
+ * @retval 0 task 为空
+ * @note 就绪入队、unblock IPI、负载统计共用
+ * @warning 次核未上线时回退 hart0
+ * @attention ✅ ISR；❌ block/switch
  */
 uint8_t cgrtos_sched_target_core(cgrtos_task_t *task)
 {
@@ -582,16 +594,14 @@ uint8_t cgrtos_sched_target_core(cgrtos_task_t *task)
 }
 
 /**
- * @brief 将任务加入指定核的优先级就绪队列。
- *
- * @param task 任务指针。
- *
- * @details
- * 1. 根据 task 计算目标核 core 与优先级 prio。
- * 2. 将 task 追加到 g_ready[core][prio] 双向链表尾部。
- * 3. 置 g_ready_bitmap[core] 对应 prio 位。
- *
- * @note 调用方应已持有 g_ready_lock。
+ * @brief 将任务加入指定核的优先级就绪队列
+ * @details 按 target_core 与 prio 追加到 g_ready[core][prio] 尾部；置 bitmap 对应位。
+ * @param[in] task 任务 TCB
+ * @return 无
+ * @retval 无
+ * @note 调用方应已持有 g_ready_lock
+ * @warning 无
+ * @attention @internal ✅ ISR；❌ block/switch
  */
 static void sched_add_priority_ready(cgrtos_task_t *task)
 {
@@ -615,13 +625,14 @@ static void sched_add_priority_ready(cgrtos_task_t *task)
 }
 
 /**
- * @brief 将任务按 vruntime 插入 CFS 就绪队列。
- *
- * @param task 任务指针。
- *
- * @details
- * 1. 计算任务目标核 core。
- * 2. 调用 list_insert_sorted_asc 按 vruntime 升序插入 g_cfs_ready[core]。
+ * @brief 将任务按 vruntime 插入 CFS 就绪队列
+ * @details 计算 target_core；list_insert_sorted_asc 到 g_cfs_ready[core]。
+ * @param[in] task 任务 TCB
+ * @return 无
+ * @retval 无
+ * @note 调用方应已持有 g_ready_lock
+ * @warning 无
+ * @attention @internal ✅ ISR；❌ block/switch
  */
 static void sched_add_cfs_ready(cgrtos_task_t *task)
 {
@@ -632,20 +643,26 @@ static void sched_add_cfs_ready(cgrtos_task_t *task)
 }
 
 /**
- * @brief 将任务按 deadline 插入全局 MC-EDF 就绪队列（见上方 sched_add_edf_ready）。
+ * @brief 从优先级就绪队列移除任务（前向声明）
+ * @details 实现见本文件 sched_remove_priority_ready 定义；供 sched_add_ready_locked 前向引用。
+ * @param[in] task 任务 TCB
+ * @return 无
+ * @retval 无
+ * @note 前向声明
+ * @warning 无
+ * @attention @internal ✅ ISR；❌ block/switch
  */
 static void sched_remove_priority_ready(cgrtos_task_t *task);
 
 /**
- * @brief 将任务加入对应策略的就绪队列（调用方已持 g_ready_lock）。
- *
- * @param task 任务指针。
- *
- * @details
- * 1. task 为空或已 DELETED 则返回。
- * 2. 按策略分支：EDF → sched_add_edf_ready；CFS → sched_add_cfs_ready；否则 → sched_add_priority_ready。
- * 3. 若 slice_remain 为 0，按策略初始化时间片（CFS 用 CONFIG_CFS_SLICE_TICKS，其余用 CONFIG_TIME_SLICE_TICKS）。
- * 4. 将 task->state 置为 TASK_READY。
+ * @brief 将任务加入对应策略就绪队列（调用方已持 g_ready_lock）
+ * @details 按 EDF/CFS/优先级分支入队；初始化 slice_remain；state=TASK_READY；可选记录 ready_since。
+ * @param[in] task 任务 TCB
+ * @return 无
+ * @retval 无
+ * @note 不获取锁；与 remove_ready_locked 配对
+ * @warning DELETED 或 NULL 直接返回
+ * @attention @internal ✅ ISR；❌ block/switch
  */
 static void sched_add_ready_locked(cgrtos_task_t *task)
 {
@@ -679,13 +696,14 @@ static void sched_add_ready_locked(cgrtos_task_t *task)
 }
 
 /**
- * @brief 从就绪队列移除任务（调用方已持 g_ready_lock）。
- *
- * @param task 任务指针。
- *
- * @details
- * 1. task 为空或 state != TASK_READY 则返回。
- * 2. 按策略从对应队列移除：EDF/CFS 链表或优先级双向链表。
+ * @brief 从就绪队列移除任务（调用方已持 g_ready_lock）
+ * @details 非 TASK_READY 返回；按策略从 EDF 全局/CFS 链/优先级链移除。
+ * @param[in] task 任务 TCB
+ * @return 无
+ * @retval 无
+ * @note 不获取锁
+ * @warning 无
+ * @attention @internal ✅ ISR；❌ block/switch
  */
 static void sched_remove_ready_locked(cgrtos_task_t *task)
 {
@@ -708,15 +726,14 @@ static void sched_remove_ready_locked(cgrtos_task_t *task)
 }
 
 /**
- * @brief 将任务加入对应策略的就绪队列。
- *
- * @param task 任务指针。
- *
- * @details
- * 1. task 为空或已 DELETED 则返回。
- * 2. 关 IRQ 并获取 g_ready_lock（防止 timer/IPI 重入死锁）。
- * 3. 调用 sched_add_ready_locked 执行实际入队。
- * 4. 解锁并恢复 IRQ。
+ * @brief 将任务加入对应策略的就绪队列
+ * @details 关 IRQ 持 ready_lock；sched_add_ready_locked；解锁；EDF 任务则 sched_edf_kick_request。
+ * @param[in] task 任务 TCB
+ * @return 无
+ * @retval 无
+ * @note 防止 timer/IPI 重入死锁
+ * @warning DELETED 或 NULL 直接返回
+ * @attention ❌ ISR；❌ block/switch
  */
 void cgrtos_sched_add_ready(cgrtos_task_t *task)
 {
@@ -741,15 +758,14 @@ void cgrtos_sched_add_ready(cgrtos_task_t *task)
 }
 
 /**
- * @brief 从优先级就绪队列移除任务。
- *
- * @param task 任务指针。
- *
- * @details
- * 1. 定位 task 所在核 core 与优先级 prio 的 ready_list。
- * 2. 更新双向链表 prev/next 指针，维护 head/tail。
- * 3. 清空 task 的 next/prev，count 递减。
- * 4. 若该优先级队列变空，清除 g_ready_bitmap 对应位。
+ * @brief 从优先级就绪队列移除任务
+ * @details 更新双向链表 head/tail；count--；队列空则清 bitmap 位。
+ * @param[in] task 任务 TCB
+ * @return 无
+ * @retval 无
+ * @note remove_ready_locked 内部路径
+ * @warning 无
+ * @attention @internal ✅ ISR；❌ block/switch
  */
 static void sched_remove_priority_ready(cgrtos_task_t *task)
 {
@@ -783,17 +799,14 @@ static void sched_remove_priority_ready(cgrtos_task_t *task)
 }
 
 /**
- * @brief 从就绪队列移除任务（按策略选择队列）。
- *
- * @param task 任务指针。
- *
- * @details
- * 1. task 为空或 state != TASK_READY 则返回。
- * 2. 关 IRQ 并获取 g_ready_lock。
- * 3. 调用 sched_remove_ready_locked 执行实际出队。
- * 4. 解锁并恢复 IRQ。
- *
- * @note 仅 TASK_READY 状态有效。
+ * @brief 从就绪队列移除任务
+ * @details 非 TASK_READY 返回；关 IRQ 持 ready_lock；sched_remove_ready_locked；解锁恢复 IRQ。
+ * @param[in] task 任务 TCB
+ * @return 无
+ * @retval 无
+ * @note 仅 TASK_READY 有效
+ * @warning 无
+ * @attention ❌ ISR；❌ block/switch
  */
 void cgrtos_sched_remove_ready(cgrtos_task_t *task)
 {
@@ -813,15 +826,15 @@ void cgrtos_sched_remove_ready(cgrtos_task_t *task)
 }
 
 /**
- * @brief 在指定核上选取最高优先级且亲和匹配的就绪任务。
- *
- * @param cpu 核编号。
- * @return 任务指针；无可用任务时返回 NULL。
- *
- * @details
- * 1. 从 g_ready_bitmap[cpu] 取最高优先级 prio。
- * 2. 遍历 g_ready[cpu][prio] 链表，跳过 cpu_aff 不匹配的任务。
- * 3. 返回第一个亲和匹配的任务；无匹配则返回 NULL。
+ * @brief 在指定核上选取最高优先级且亲和匹配的就绪任务
+ * @details 从 bitmap 取最高 prio；遍历该链跳过 cpu_aff 不匹配；返回首个匹配或 NULL。
+ * @param[in] cpu 核编号
+ * @return 任务指针；无可用时 NULL
+ * @retval 非 NULL 选中任务
+ * @retval NULL 无匹配
+ * @note switch_from_trap 内部；持 g_ready_lock
+ * @warning 无
+ * @attention @internal ✅ ISR；❌ block/switch
  */
 static cgrtos_task_t *sched_pick_priority(uint8_t cpu)
 {
@@ -842,14 +855,15 @@ static cgrtos_task_t *sched_pick_priority(uint8_t cpu)
 }
 
 /**
- * @brief 在指定核上选取 vruntime 最小的 CFS 任务。
- *
- * @param cpu 核编号。
- * @return 任务指针；队列为空时返回 NULL。
- *
- * @details
- * 1. 查看 g_cfs_ready[cpu] 链表头（vruntime 最小）。
- * 2. 通过 offsetof 从 cfs_item 反算 task 指针并返回。
+ * @brief 在指定核上选取 vruntime 最小的 CFS 任务
+ * @details peek g_cfs_ready[cpu] 队头；offsetof 反算 task 指针。
+ * @param[in] cpu 核编号
+ * @return 任务指针；队空 NULL
+ * @retval 非 NULL CFS 队头
+ * @retval NULL 队空
+ * @note switch_from_trap 内部
+ * @warning 无
+ * @attention @internal ✅ ISR；❌ block/switch
  */
 static cgrtos_task_t *sched_pick_cfs(uint8_t cpu)
 {
@@ -861,24 +875,15 @@ static cgrtos_task_t *sched_pick_cfs(uint8_t cpu)
 }
 
 /**
- * @brief MC-EDF（Global EDF）：为本核分配应运行的 EDF 任务
- *
- * @param cpu 核编号
+ * @brief MC-EDF：为本核分配应运行的 EDF 任务
+ * @details 枚举在线核；按 deadline 升序填充至多 m 席；硬亲和占固定位，软亲和优先 run_cpu；返回 assigned[cpu]。
+ * @param[in] cpu 核编号
  * @return 分配给本核的 EDF 任务；无则 NULL
- *
- * @details
- * 全局规则：在线核数为 m 时，系统中 deadline 最早的至多 m 个就绪 EDF
- * 任务应占用 m 个核（经典 Global / MC-EDF）。
- *
- * 分配步骤（在 g_ready_lock 下，确定性、无额外迁移表）：
- * 1. 枚举在线核列表 cores[0..n)。
- * 2. 按 deadline 升序遍历 g_edf_global。
- * 3. 硬亲和（cpu_aff!=0xFF）：若目标核空闲且在线，则占该核一席。
- * 4. 软亲和：优先占 run_cpu（若空闲在线），否则占第一个空闲在线核。
- * 5. 已填满 n 席则停止。
- * 6. 返回 assigned[cpu]。
- *
- * @note RUNNING 任务不在就绪链中；换出时先 pick 再 requeue，由锁串行化多核。
+ * @retval 非 NULL 分配任务
+ * @retval NULL 无 EDF 或无席
+ * @note RUNNING 不在就绪链；Global EDF 规则
+ * @warning cpu 越界返回 NULL
+ * @attention @internal ✅ ISR；❌ block/switch
  */
 static cgrtos_task_t *sched_pick_edf(uint8_t cpu)
 {
@@ -1011,18 +1016,15 @@ static cgrtos_task_t *sched_pick_edf(uint8_t cpu)
 }
 
 /**
- * @brief 综合 MC-EDF / 优先级 / CFS 选取下一运行任务
- *
- * @param cpu 核编号
- * @return 下一任务；均无则返回该核 idle
- *
- * @details 步骤：
- * 1. 取 MC-EDF 分配、优先级队头、CFS 队头。
- * 2. 若有 EDF：无 RT 优先级候选，或 deadline 在
- *    CONFIG_MCEDF_PRIO_SLACK_TICKS 窗口内 → 选 EDF（硬实时带）。
- * 3. 否则选优先级任务。
- * 4. 否则选 CFS。
- * 5. 否则 idle。
+ * @brief 综合 MC-EDF/优先级/CFS 选取下一运行任务
+ * @details 取 edf/pri/cfs；EDF 在 slack 窗口内或无 RT 候选则选 EDF；否则 pri；否则 cfs；否则 idle。
+ * @param[in] cpu 核编号
+ * @return 下一任务 TCB
+ * @retval 非 idle 任务
+ * @retval idle 无其它就绪
+ * @note switch_from_trap 核心选择
+ * @warning 无
+ * @attention @internal ✅ ISR；❌ block/switch
  */
 static cgrtos_task_t *sched_pick_next(uint8_t cpu)
 {
@@ -1045,16 +1047,14 @@ static cgrtos_task_t *sched_pick_next(uint8_t cpu)
 }
 
 /**
- * @brief 时间片耗尽时刷新 slice_remain（不重入就绪队列）。
- *
- * @param task 当前运行任务。
- *
- * @details
- * 1. task 为空或 idle（id==0）则返回。
- * 2. 按策略重置 slice_remain：CFS 用 CONFIG_CFS_SLICE_TICKS，其余用 CONFIG_TIME_SLICE_TICKS。
- * 3. 不修改就绪队列——当前任务仍为 RUNNING，实际 requeue 在 switch_from_trap 完成。
- *
- * @note 当前任务仍为 RUNNING；实际 requeue 在 switch_from_trap 完成。
+ * @brief 时间片耗尽时刷新 slice_remain
+ * @details CFS 用 CFS_SLICE；其余 TIME_SLICE；不重入就绪队列（RUNNING 仍运行）。
+ * @param[in] task 当前运行任务
+ * @return 无
+ * @retval 无
+ * @note 实际 requeue 在 switch_from_trap
+ * @warning idle(id==0) 跳过
+ * @attention @internal ✅ ISR；❌ block/switch
  */
 static void sched_rotate_time_slice(cgrtos_task_t *task)
 {
@@ -1070,13 +1070,15 @@ static void sched_rotate_time_slice(cgrtos_task_t *task)
 }
 
 /**
- * @brief 将任务按优先级插入 IPC 等待队列（兼容封装）。
- *
- * @param head 等待队列头指针。
- * @param task 待插入任务。
- *
- * @details
- * 1. 委托 cgrtos_wait_list_add_priority 按优先级降序插入。
+ * @brief 将任务按优先级插入 IPC 等待队列（兼容封装）
+ * @details 委托 cgrtos_wait_list_add_priority 按优先级降序插入。
+ * @param[inout] head 等待队列头指针
+ * @param[in] task 待插入任务
+ * @return 无
+ * @retval 无
+ * @note IPC 阻塞路径使用
+ * @warning head 或 task 须有效
+ * @attention ❌ ISR；❌ block/switch
  */
 void cgrtos_wait_list_add(cgrtos_task_t *volatile *head, cgrtos_task_t *task)
 {
@@ -1084,15 +1086,15 @@ void cgrtos_wait_list_add(cgrtos_task_t *volatile *head, cgrtos_task_t *task)
 }
 
 /**
- * @brief 将任务按优先级降序插入等待队列。
- *
- * @param head 等待队列头指针。
- * @param task 待插入任务。
- *
- * @details
- * 1. 从头遍历等待队列，跳过 prio >= task->prio 的节点。
- * 2. 在 cur 前插入 task，维护双向链表 prev/next。
- * 3. 若插入队头，更新 *head。
+ * @brief 将任务按优先级降序插入等待队列
+ * @details 从头遍历跳过 prio>=task->prio；在 cur 前插入并维护双向链；队头则更新 *head。
+ * @param[inout] head 等待队列头指针
+ * @param[in] task 待插入任务
+ * @return 无
+ * @retval 无
+ * @note 高优先级在队头
+ * @warning 须持 IPC 锁或临界区
+ * @attention ❌ ISR；❌ block/switch
  */
 void cgrtos_wait_list_add_priority(cgrtos_task_t *volatile *head, cgrtos_task_t *task)
 {
@@ -1120,15 +1122,15 @@ void cgrtos_wait_list_add_priority(cgrtos_task_t *volatile *head, cgrtos_task_t 
 }
 
 /**
- * @brief 从等待队列移除指定任务。
- *
- * @param head 等待队列头指针。
- * @param task 待移除任务。
- *
- * @details
- * 1. head 或 task 为空则返回。
- * 2. 更新 prev/next 指针；若 task 是队头则更新 *head。
- * 3. 清空 task 的 next/prev。
+ * @brief 从等待队列移除指定任务
+ * @details 更新 prev/next；队头则更新 *head；清空 task next/prev。
+ * @param[inout] head 等待队列头指针
+ * @param[in] task 待移除任务
+ * @return 无
+ * @retval 无
+ * @note purge/unblock 共用
+ * @warning head 或 task 为空则返回
+ * @attention ❌ ISR；❌ block/switch
  */
 void cgrtos_wait_list_remove(cgrtos_task_t *volatile *head, cgrtos_task_t *task)
 {
@@ -1152,15 +1154,15 @@ void cgrtos_wait_list_remove(cgrtos_task_t *volatile *head, cgrtos_task_t *task)
 }
 
 /**
- * @brief 弹出等待队列中优先级最高的任务。
- *
- * @param head 等待队列头指针。
- * @return 队头任务；队列为空时返回 NULL。
- *
- * @details
- * 1. 取 *head 作为最高优先级任务（队列按 prio 降序维护）。
- * 2. 调用 cgrtos_wait_list_remove 将其从队列移除。
- * 3. 返回该任务指针。
+ * @brief 弹出等待队列中优先级最高的任务
+ * @details 取 *head（降序维护）；cgrtos_wait_list_remove 移除并返回。
+ * @param[inout] head 等待队列头指针
+ * @return 队头任务；队空 NULL
+ * @retval 非 NULL 最高优先级任务
+ * @retval NULL 队空
+ * @note IPC 唤醒路径
+ * @warning 无
+ * @attention ❌ ISR；❌ block/switch
  */
 cgrtos_task_t *cgrtos_wait_list_pop_highest(cgrtos_task_t *volatile *head)
 {
@@ -1177,12 +1179,14 @@ cgrtos_task_t *cgrtos_wait_list_pop_highest(cgrtos_task_t *volatile *head)
 }
 
 /**
- * @brief 从延迟链表中移除任务。
- *
- * @param task 任务指针。
- *
- * @details
- * 1. 若 task 的 delayed_item 在 g_delayed_list 中，调用 list_remove 移除。
+ * @brief 从全局延迟链表移除任务
+ * @details 若 delayed_item 在 g_delayed_list 则 list_remove。
+ * @param[in] task 任务 TCB
+ * @return 无
+ * @retval 无
+ * @note block/unblock/purge 共用
+ * @warning 无
+ * @attention @internal ✅ ISR；❌ block/switch
  */
 static void sched_delayed_remove(cgrtos_task_t *task)
 {
@@ -1194,17 +1198,14 @@ static void sched_delayed_remove(cgrtos_task_t *task)
 }
 
 /**
- * @brief 阻塞任务从 IPC/事件等待队列及延迟链表中清除。
- *
- * @param task 任务指针。
- *
- * @details
- * 1. task 为空或 state != TASK_BLOCKED 则返回。
- * 2. 根据 block_reason 定位对应 IPC 对象的 wait_q 头指针。
- * 3. 若找到 wait_q，调用 cgrtos_wait_list_remove 从等待队列移除。
- * 4. 调用 sched_delayed_remove 从延迟链表移除。
- *
- * @note 仅 TASK_BLOCKED 状态处理。
+ * @brief 阻塞任务从 IPC/事件等待队列及延迟链清除
+ * @details 非 BLOCKED 返回；按 block_reason 定位 wait_q 并 remove；sched_delayed_remove。
+ * @param[in] task 任务 TCB
+ * @return 无
+ * @retval 无
+ * @note 超时/删除/强制唤醒前调用
+ * @warning 仅 TASK_BLOCKED 处理
+ * @attention ❌ ISR；❌ block/switch
  */
 void cgrtos_task_purge_waits(cgrtos_task_t *task)
 {
@@ -1237,14 +1238,15 @@ void cgrtos_task_purge_waits(cgrtos_task_t *task)
 }
 
 /**
- * @brief 按 wake_tick 插入全局延迟唤醒链表。
- *
- * @param task      任务指针。
- * @param wake_tick 唤醒时刻（g_ticks 基准）。
- *
- * @details
- * 1. 设置 task->wake_tick = wake_tick。
- * 2. 调用 list_insert_sorted 按 wake_tick 升序插入 g_delayed_list。
+ * @brief 按 wake_tick 插入全局延迟唤醒链表
+ * @details 设置 wake_tick；先 sched_delayed_remove 防双链；list_insert_sorted 升序插入。
+ * @param[in] task 任务 TCB
+ * @param[in] wake_tick 唤醒时刻（g_ticks 基准）
+ * @return 无
+ * @retval 无
+ * @note block/block_until 内部
+ * @warning 无
+ * @attention @internal ❌ ISR；❌ block/switch
  */
 static void sched_delayed_insert(cgrtos_task_t *task, tick_t wake_tick)
 {
@@ -1256,21 +1258,17 @@ static void sched_delayed_insert(cgrtos_task_t *task, tick_t wake_tick)
 }
 
 /**
- * @brief 阻塞当前任务并可选加入延迟唤醒。
- *
- * @param task    任务指针。
- * @param reason  阻塞原因。
- * @param obj     关联对象（IPC 等）。
- * @param timeout 超时 tick；portMAX_DELAY 无超时；0 立即超时点。
- *
- * @details
- * 1. task 为空或 idle（id==0）则返回。
- * 2. 若 task 当前 READY，先从就绪队列移除。
- * 3. 设置 state=BLOCKED、block_reason、block_obj。
- * 4. 按 timeout 分支：
- *    a. portMAX_DELAY：wake_tick=0，从延迟链移除；
- *    b. timeout==0：wake_tick=g_ticks，立即插入延迟链；
- *    c. 否则：插入 g_ticks+timeout 时刻的延迟链。
+ * @brief 阻塞当前任务并可选加入延迟唤醒
+ * @details READY 则 remove_ready；state=BLOCKED；按 timeout 插入延迟链或 portMAX_DELAY 移除延迟。
+ * @param[in] task 任务 TCB
+ * @param[in] reason 阻塞原因
+ * @param[in] obj 关联 IPC 对象
+ * @param[in] timeout 超时 tick；portMAX_DELAY 无超时；0 立即
+ * @return 无
+ * @retval 无
+ * @note idle(id==0) 忽略
+ * @warning 调用方通常已持 IPC 锁
+ * @attention ❌ ISR；✅ block/switch
  */
 void cgrtos_sched_block(cgrtos_task_t *task, block_reason_t reason,
                         void *obj, tick_t timeout)
@@ -1289,6 +1287,7 @@ void cgrtos_sched_block(cgrtos_task_t *task, block_reason_t reason,
     task->state = TASK_BLOCKED;
     task->block_reason = reason;
     task->block_obj = obj;
+    CGRTOS_TRACE(CGRTOS_TRACE_BLOCK, task->id, (uint32_t)reason);
 
     /* 4. 按 timeout 分支处理延迟链 */
     if (timeout == portMAX_DELAY) {
@@ -1306,18 +1305,17 @@ void cgrtos_sched_block(cgrtos_task_t *task, block_reason_t reason,
 }
 
 /**
- * @brief 阻塞任务直到绝对 wake_tick（g_ticks 基准）。
- *
- * @param task      任务指针。
- * @param reason    阻塞原因。
- * @param obj       关联对象。
- * @param wake_tick 绝对唤醒时刻；若已到期则不阻塞（调用方应先判断）。
- *
- * @details
- * 1. task 为空或 idle 则返回。
- * 2. 若 READY 则先从就绪队列移除。
- * 3. 设置 BLOCKED 状态及 block_reason、block_obj。
- * 4. 调用 sched_delayed_insert 按绝对 wake_tick 插入延迟链。
+ * @brief 阻塞任务直到绝对 wake_tick
+ * @details READY 则 remove_ready；BLOCKED；sched_delayed_insert 绝对时刻。
+ * @param[in] task 任务 TCB
+ * @param[in] reason 阻塞原因
+ * @param[in] obj 关联对象
+ * @param[in] wake_tick 绝对唤醒 tick
+ * @return 无
+ * @retval 无
+ * @note 调用方应先判断是否已到期
+ * @warning idle 忽略
+ * @attention ❌ ISR；✅ block/switch
  */
 void cgrtos_sched_block_until(cgrtos_task_t *task, block_reason_t reason,
                               void *obj, tick_t wake_tick)
@@ -1341,18 +1339,15 @@ void cgrtos_sched_block_until(cgrtos_task_t *task, block_reason_t reason,
 }
 
 /**
- * @brief 唤醒阻塞任务并加入就绪队列。
- *
- * @param task 任务指针。
- * @return pdPASS 成功；pdFAIL 非 BLOCKED 状态。
- *
- * @details
- * 1. task 为空或 state != TASK_BLOCKED 则返回 pdFAIL。
- * 2. 从延迟链移除，清除 block_reason、block_obj、wake_tick。
- * 3. 调用 cgrtos_sched_add_ready 加入就绪队列。
- * 4. SMP：若目标核 != 本核且次核已上线，向目标 hart 发 IPI 唤醒调度。
- *
- * @note 跨核目标时向 dst hart 发送 IPI。
+ * @brief 唤醒阻塞任务并加入就绪队列
+ * @details 非 BLOCKED 返回 pdFAIL；清延迟与 block 字段；add_ready；SMP 跨核则 IPI 目标 hart。
+ * @param[in] task 任务 TCB
+ * @return pdPASS 成功；pdFAIL 非 BLOCKED
+ * @retval pdPASS 已唤醒
+ * @retval pdFAIL 状态不对
+ * @note 可从中断或任务上下文调用
+ * @warning 无
+ * @attention ✅ ISR；❌ block/switch
  */
 int cgrtos_sched_unblock(cgrtos_task_t *task)
 {
@@ -1368,6 +1363,7 @@ int cgrtos_sched_unblock(cgrtos_task_t *task)
     task->wake_tick = 0;
     /* 3. 调用 cgrtos_sched_add_ready 加入就绪队列 */
     cgrtos_sched_add_ready(task);
+    CGRTOS_TRACE(CGRTOS_TRACE_UNBLOCK, task->id, task->wake_ok);
 
 #if CONFIG_NUM_CORES > 1
     {
@@ -1383,14 +1379,13 @@ int cgrtos_sched_unblock(cgrtos_task_t *task)
 }
 
 /**
- * @brief 挂起调度器（嵌套计数 +1）。
- *
- * @details
- * 1. 进入临界区。
- * 2. g_sched_suspend_count 递增。
- * 3. 退出临界区。
- *
- * @note 挂起期间不进行上下文切换。
+ * @brief 挂起调度器（嵌套计数 +1）
+ * @details enter_critical；g_sched_suspend_count++；exit_critical。
+ * @return 无
+ * @retval 无
+ * @note 挂起期间 switch_from_trap 不切换
+ * @warning 须与 resume 配对
+ * @attention ❌ ISR；❌ block/switch
  */
 void cgrtos_sched_suspend(void)
 {
@@ -1400,12 +1395,13 @@ void cgrtos_sched_suspend(void)
 }
 
 /**
- * @brief 恢复调度器；嵌套归零时触发 yield。
- *
- * @details
- * 1. 进入临界区，若 suspend_count > 0 则递减。
- * 2. 退出临界区。
- * 3. 若 suspend_count 归零，调用 cgrtos_sched_yield 触发 pending 切换。
+ * @brief 恢复调度器；嵌套归零时触发 yield
+ * @details enter_critical 递减 suspend_count；exit_critical；归零则 cgrtos_sched_yield。
+ * @return 无
+ * @retval 无
+ * @note 与 suspend 配对
+ * @warning resume 后可能立即切换
+ * @attention ❌ ISR；✅ block/switch
  */
 void cgrtos_sched_resume(void)
 {
@@ -1421,13 +1417,13 @@ void cgrtos_sched_resume(void)
 }
 
 /**
- * @brief 主动让出 CPU（任务上下文 ecall 进入 trap 切换）。
- *
- * @details
- * 1. 若调度挂起或未运行，直接返回。
- * 2. 置本核 g_yield_pending 与 g_force_yield 标志。
- * 3. 若在 ISR 内，仅置标志，trap 返回路径完成切换。
- * 4. 否则执行 ecall 进入 trap_vector，在返回前完成 switch_from_trap。
+ * @brief 主动让出 CPU（任务上下文 ecall 进入 trap 切换）
+ * @details 调度挂起或未运行则返回；置 yield_pending 与 force_yield；ISR 内仅置标志；否则 ecall。
+ * @return 无
+ * @retval 无
+ * @note noinline 保证 ecall 返回路径正确
+ * @warning ISR 请用 yield_from_isr
+ * @attention ❌ ISR；✅ block/switch
  */
 void __attribute__((noinline)) cgrtos_sched_yield(void)
 {
@@ -1447,11 +1443,13 @@ void __attribute__((noinline)) cgrtos_sched_yield(void)
 }
 
 /**
- * @brief 从中断上下文请求调度切换。
- *
- * @details
- * 1. 读取本核编号 cpu。
- * 2. 置 g_yield_pending[cpu]=1，在 trap 返回路径完成切换。
+ * @brief 从中断上下文请求调度切换
+ * @details 置本核 g_yield_pending=1；trap 返回路径完成 switch_from_trap。
+ * @return 无
+ * @retval 无
+ * @note 不在 ISR 内直接 ecall
+ * @warning 无
+ * @attention ✅ ISR；✅ block/switch
  */
 void cgrtos_sched_yield_from_isr(void)
 {
@@ -1460,25 +1458,15 @@ void cgrtos_sched_yield_from_isr(void)
 }
 
 /**
- * @brief 陷阱返回路径上的上下文切换核心逻辑。
- *
- * @param sp 当前任务陷阱栈指针。
- * @return 下一任务应恢复的 sp；未切换时返回原 sp。
- *
- * @details
- * 1. 若调度挂起或未运行，返回原 sp。
- * 2. 保存当前任务 sp 到 cur->sp。
- * 3. 关 IRQ 并持 g_ready_lock，调用 sched_pick_next 选取 next。
- * 4. 粘性调度判断（PRIORITY/Hybrid RT）：
- *    a. 非 forced yield 且策略为 PRIORITY/Hybrid RT；
- *    b. 若无更好任务、或 next 为 CFS、或 next 优先级不高于 cur、或 EDF 未临近 deadline；
- *    c. 则 stick=1，解锁返回原 sp（不换出）。
- * 5. 若不 stick：cur 置 READY 并 requeue（CFS 在此累计 vruntime 记账已在 tick_local 完成）。
- * 6. next 无 sp 则回退 idle；否则从就绪队列 dequeue。
- * 7. 若 cur != next：更新 g_current、next 状态/statistics，解锁，返回 next->sp。
- * 8. 若相同任务：恢复 cur 为 RUNNING，解锁，返回原 sp。
- *
- * @note 处理 PRIORITY 粘性、CFS vruntime、强制 yield 及 idle 回退。
+ * @brief 陷阱返回路径上的上下文切换核心逻辑
+ * @details 挂起/未运行返回原 sp；pick_next；PRIORITY 粘性判断；换出 requeue；换入更新 g_current 与统计；返回 next->sp。
+ * @param[in] sp 当前任务陷阱栈指针
+ * @return 下一任务应恢复的 sp；未切换时原 sp
+ * @retval next->sp 已切换
+ * @retval sp 粘性或未切换
+ * @note trap_vector 调用；持 ready_lock
+ * @warning DELETED 任务在切换后 reclaim
+ * @attention ✅ ISR；✅ block/switch
  */
 uint64_t *cgrtos_sched_switch_from_trap(uint64_t *sp)
 {
@@ -1555,6 +1543,10 @@ uint64_t *cgrtos_sched_switch_from_trap(uint64_t *sp)
 
     /* 7. 执行或跳过切换 */
     if (cur != next) {
+        uint64_t *next_sp;
+        task_id_t from_id = cur ? cur->id : 0;
+        task_id_t to_id = next->id;
+
         g_current[cpu] = next;
         next->state = TASK_RUNNING;
         next->run_cpu = cpu;
@@ -1576,22 +1568,26 @@ uint64_t *cgrtos_sched_switch_from_trap(uint64_t *sp)
 #endif
         g_cs_count++;
         g_cs_count_core[cpu]++;
+        next_sp = next->sp;
 
         /* 已离开 DELETED 任务：现在可安全清 id */
         if (cur && cur->state == TASK_DELETED) {
             cgrtos_task_reclaim_deleted(cur);
         }
 
+        /* 缩短 ready_lock：先解锁再做栈检查 / Trace（减切换路径持锁时间） */
         cgrtos_spin_unlock(&g_ready_lock);
         cgrtos_irq_restore(flags);
 
+        CGRTOS_TRACE(CGRTOS_TRACE_SWITCH, from_id, to_id);
+
 #if CONFIG_CHECK_STACK_OVERFLOW
-        /* 切换切入前检查下一任务金丝雀 */
+        /* 切换切入前检查下一任务金丝雀（不持 ready_lock） */
         if (next->id > 0 && next->stack[0] != STACK_CANARY_VALUE) {
             cgrtos_task_handle_stack_overflow(next);
         }
 #endif
-        return next->sp;
+        return next_sp;
     }
 
     /* 8. 相同任务：恢复 cur 为 RUNNING，解锁，返回原 sp */
@@ -1604,18 +1600,13 @@ uint64_t *cgrtos_sched_switch_from_trap(uint64_t *sp)
 }
 
 /**
- * @brief 处理到期延迟唤醒（超时 unblock）。
- *
- * @details
- * 1. 进入临界区（与 IPC block/unblock 串行化，持 g_klock）。
- * 2. 循环检查 g_delayed_list 队头：
- *    a. 队空或 wake_tick > g_ticks 则退出；
- *    b. 移除队头 delayed_item，反算 task 指针；
- *    c. 若 task 非 BLOCKED 则跳过；
- *    d. 置 wake_ok=0（超时），purge 等待队列，unblock 唤醒。
- * 3. 退出临界区。
- *
- * @note 由 hart0 tick 调用；wake_ok=0 表示超时。
+ * @brief 处理到期延迟唤醒（超时 unblock）
+ * @details enter_critical；循环 peek 延迟链队头，wake_tick<=g_ticks 则 purge+unblock(wake_ok=0)；exit_critical。
+ * @return 无
+ * @retval 无
+ * @note hart0 tick 调用；与 IPC 串行化
+ * @warning 持 g_klock
+ * @attention @internal ✅ ISR；❌ block/switch
  */
 static void sched_process_delayed_tasks(void)
 {
@@ -1648,16 +1639,13 @@ static void sched_process_delayed_tasks(void)
 }
 
 /**
- * @brief 本核时间片记账与抢占请求（不含全局 g_ticks）。
- *
- * @details
- * 1. 读取本核当前任务 cur。
- * 2. 若 cur 非 idle：exec 计数递增；CFS 累加 vruntime；slice_remain 递减。
- * 3. 时间片耗尽判断：RR/CFS/EDF 且 RUNNING 时刷新 slice 并 need_yield=1；PRIORITY 仅重置 slice。
- * 4. 调度未挂起时 always need_yield=1（新唤醒高优先级可抢占）。
- * 5. ISR 内置 yield_pending；任务上下文直接 cgrtos_sched_yield。
- *
- * @note hart0 由硬定时器调用；次核由 g_remote_tick + IPI 调用。
+ * @brief 本核时间片记账与抢占请求（不含全局 g_ticks）
+ * @details exec++/CFS vruntime/slice--；片尽则 rotate 并 need_yield；每次 tick 评估就绪集；ISR 置 pending 否则 yield。
+ * @return 无
+ * @retval 无
+ * @note hart0 定时器或次核 g_remote_tick+IPI 调用
+ * @warning 无
+ * @attention ✅ ISR；✅ block/switch
  */
 void cgrtos_tick_local(void)
 {
@@ -1707,19 +1695,13 @@ void cgrtos_tick_local(void)
 }
 
 /**
- * @brief 系统 tick 中断处理（每核部分 + hart0 全局工作）。
- *
- * @details
- * 1. 读取本核 cpu 编号。
- * 2. hart0 专属全局工作：
- *    a. 原子递增 g_ticks；
- *    b. sched_process_delayed_tasks 处理延迟超时；
- *    c. sched_process_edf_releases 处理 EDF 释放轮；
- *    d. cgrtos_timer_process_tick 软件定时器；
- *    e. 可选 tick hook；
- *    f. 周期性负载均衡 cgrtos_sched_load_balance；
- *    g. SMP：向次核置 g_remote_tick 并发 IPI。
- * 3. 所有核调用 cgrtos_tick_local 做本地时间片记账。
+ * @brief 系统 tick 中断处理（每核部分 + hart0 全局工作）
+ * @details hart0：g_ticks++、延迟/EDF/软定时器/hook/LB/remote_tick IPI；全核 cgrtos_tick_local。
+ * @return 无
+ * @retval 无
+ * @note CLINT 定时器 ISR 入口
+ * @warning 无
+ * @attention ✅ ISR；✅ block/switch
  */
 void cgrtos_tick_handler(void)
 {
@@ -1766,15 +1748,15 @@ void cgrtos_tick_handler(void)
 }
 
 /**
- * @brief 统计指定核上就绪任务总数。
- *
- * @param cpu 核编号。
- * @return 就绪任务数；cpu 越界时返回 0。
- *
- * @details
- * 1. cpu 越界返回 0。
- * 2. 累加所有优先级 ready_list 的 count。
- * 3. 加上 CFS 与 EDF 链表节点数。
+ * @brief 统计指定核上就绪任务总数
+ * @details 累加各优先级 count + CFS count + MC-EDF 全局上可运行于本核的近似计数。
+ * @param[in] cpu 核编号
+ * @return 就绪任务数
+ * @retval >=0 计数
+ * @retval 0 cpu 越界
+ * @note EDF 全局计数为无锁近似
+ * @warning 无
+ * @attention ✅ ISR；❌ block/switch
  */
 uint32_t cgrtos_sched_ready_count(uint8_t cpu)
 {
@@ -1813,18 +1795,15 @@ uint32_t cgrtos_sched_ready_count(uint8_t cpu)
 }
 
 /**
- * @brief 计算任务在负载均衡中的权重。
- *
- * @param task 任务指针。
- * @return 权重值；EDF/idle 返回 0（不可迁移或不计入）。
- *
- * @details
- * 1. task 为空或 idle 返回 0。
- * 2. EDF 任务返回 0（MC-EDF 自行占核，不参与加权 LB）。
- * 3. CFS 任务返回 CONFIG_LB_CFS_WEIGHT。
- * 4. RT 任务返回 (prio+1) * CONFIG_LB_PRIO_SCALE。
- *
- * @note 权重越高表示迁移成本越大或越应保留本地。
+ * @brief 计算任务在负载均衡中的权重
+ * @details idle/EDF 返回 0；CFS 返回 LB_CFS_WEIGHT；RT 返回 (prio+1)*LB_PRIO_SCALE。
+ * @param[in] task 任务 TCB
+ * @return 权重值
+ * @retval >0 可计负载
+ * @retval 0 不计入
+ * @note 权重越高越不宜迁出
+ * @warning 无
+ * @attention @internal ✅ ISR；❌ block/switch
  */
 static uint32_t sched_task_weight(cgrtos_task_t *task)
 {
@@ -1841,17 +1820,15 @@ static uint32_t sched_task_weight(cgrtos_task_t *task)
 }
 
 /**
- * @brief 判断 READY 任务是否可被迁移到其它核。
- *
- * @param task 任务指针。
- * @return 非零表示可迁移；0 表示不可迁移。
- *
- * @details
- * 1. task 为空、idle 或非 READY 返回 0。
- * 2. cpu_aff 硬亲和（!= 0xFF）返回 0。
- * 3. EDF 任务返回 0（由 MC-EDF 全局分配，禁止 LB 乱迁）。
- * 4. 优先级 >= TIMER_TASK_PRIO-1（定时器守护/近顶 RT）返回 0。
- * 5. 其余返回 1。
+ * @brief 判断 READY 任务是否可迁移到其它核
+ * @details 非 READY/idle/硬亲和/EDF/高 prio 定时器守护返回 0；否则 1。
+ * @param[in] task 任务 TCB
+ * @return 非零可迁移
+ * @retval 1 可迁移
+ * @retval 0 不可
+ * @note LB 与 idle steal 筛选
+ * @warning 无
+ * @attention @internal ✅ ISR；❌ block/switch
  */
 static int sched_task_migratable(cgrtos_task_t *task)
 {
@@ -1871,15 +1848,15 @@ static int sched_task_migratable(cgrtos_task_t *task)
 }
 
 /**
- * @brief 计算指定核的加权负载。
- *
- * @param cpu 核编号。
- * @return 加权负载和；含 READY（目标核为本核）与当前 RUNNING 非 idle 任务。
- *
- * @details
- * 1. cpu 越界返回 0。
- * 2. 遍历 g_tasks[]：state==READY 且 target_core==cpu 的任务累加 weight。
- * 3. 当前 RUNNING 非 idle 任务也累加 weight。
+ * @brief 计算指定核的加权负载
+ * @details 遍历 g_tasks：READY 且 target_core==cpu 累加 weight；当前 RUNNING 非 idle 也累加。
+ * @param[in] cpu 核编号
+ * @return 加权负载和
+ * @retval >=0 负载值
+ * @retval 0 cpu 越界
+ * @note LB 决策依据
+ * @warning 无
+ * @attention ✅ ISR；❌ block/switch
  */
 uint32_t cgrtos_sched_core_load(uint8_t cpu)
 {
@@ -1904,14 +1881,14 @@ uint32_t cgrtos_sched_core_load(uint8_t cpu)
 }
 
 /**
- * @brief 返回负载最低的可运行核（SMP）。
- *
- * @return 核编号；单核或未上线 secondary 时返回 0。
- *
- * @details
- * 1. 单核配置直接返回 0。
- * 2. 次核未上线返回 0。
- * 3. 比较 l0 与 l1，返回负载较低者。
+ * @brief 返回负载最低的可运行核（SMP）
+ * @details 单核或未上线 secondary 返回 0；比较 l0/l1 返回较低者。
+ * @return 核编号
+ * @retval 0 或 1 较低负载核
+ * @retval 0 单核或未就绪
+ * @note 任务创建默认亲和参考
+ * @warning 无
+ * @attention ✅ ISR；❌ block/switch
  */
 uint8_t cgrtos_sched_least_loaded_core(void)
 {
@@ -1928,16 +1905,15 @@ uint8_t cgrtos_sched_least_loaded_core(void)
 }
 
 /**
- * @brief 将 READY 任务从当前分配迁移到 dst 并发送 IPI。
- *
- * @param task 任务指针。
- * @param dst  目标核编号。
- *
- * @details
- * 1. 从就绪队列 remove_ready。
- * 2. 更新 task->run_cpu = dst。
- * 3. add_ready 到目标核队列。
- * 4. 向 dst 发 IPI，递增 g_lb_migrate_count。
+ * @brief 将 READY 任务迁移到 dst 并发送 IPI
+ * @details remove_ready；run_cpu=dst；add_ready；IPI dst；g_lb_migrate_count++。
+ * @param[in] task 任务 TCB
+ * @param[in] dst 目标核
+ * @return 无
+ * @retval 无
+ * @note LB push 与 idle steal 共用
+ * @warning 须 migratable
+ * @attention @internal ✅ ISR；❌ block/switch
  */
 static void sched_migrate_task(cgrtos_task_t *task, uint8_t dst)
 {
@@ -1953,15 +1929,15 @@ static void sched_migrate_task(cgrtos_task_t *task, uint8_t dst)
 }
 
 /**
- * @brief 在 busy 核上选取最佳迁移牺牲者（低权重、高 vruntime 优先）。
- *
- * @param src 源核编号。
- * @return 任务指针；无可迁移任务时返回 NULL。
- *
- * @details
- * 1. 遍历 g_tasks[]，筛选 migratable 且 target_core==src 的任务。
- * 2. 在候选中选 weight 最小者；weight 相同时选 vruntime 较大者。
- * 3. 返回最佳 victim 或 NULL。
+ * @brief 在 busy 核上选取最佳迁移牺牲者
+ * @details 遍历 migratable 且 target_core==src；选 weight 最小，同 weight 选 vruntime 大。
+ * @param[in] src 源核编号
+ * @return 任务指针；无可迁移 NULL
+ * @retval 非 NULL victim
+ * @retval NULL 无候选
+ * @note push LB 与 pull steal 共用
+ * @warning 无
+ * @attention @internal ✅ ISR；❌ block/switch
  */
 static cgrtos_task_t *sched_pick_victim(uint8_t src)
 {
@@ -1991,18 +1967,13 @@ static cgrtos_task_t *sched_pick_victim(uint8_t src)
 }
 
 /**
- * @brief 加权 push 负载均衡（hart0 周期性调用）。
- *
- * @details
- * 1. 调度未运行或挂起则返回；单核或次核未上线则返回。
- * 2. 计算 l0、l1，确定 busy 核与 idle 核，计算负载差 diff。
- * 3. 当 diff > HYST 且 moved < 4：
- *    a. 在 busy 核选 victim（sched_pick_victim）；
- *    b. 无 victim 则退出；
- *    c. sched_migrate_task 迁移到 idle 核；
- *    d. 重新计算 diff，继续循环。
- *
- * @note 比较两核加权负载，将 busy 核上最低紧急度 READY 任务 push 到 idle 核。
+ * @brief 加权 push 负载均衡（hart0 周期性调用）
+ * @details 未运行/挂起/单核/次核离线则返回；算 diff>HYST 时在 busy 核 pick_victim 迁移到 idle 核，最多 4 次。
+ * @return 无
+ * @retval 无
+ * @note tick 周期 CONFIG_LOAD_BALANCE_PERIOD
+ * @warning 仅 hart0 调用
+ * @attention ✅ ISR；❌ block/switch
  */
 void cgrtos_sched_load_balance(void)
 {
@@ -2046,16 +2017,13 @@ void cgrtos_sched_load_balance(void)
 }
 
 /**
- * @brief Idle 任务中的工作窃取（从 peer 核 pull 任务）。
- *
- * @details
- * 1. CONFIG_SMP_IDLE_STEAL 未启用或单核则返回。
- * 2. 调度未运行、次核未上线或挂起则返回。
- * 3. 本核已有就绪任务则返回（不窃取）。
- * 4. 对端就绪数 < CONFIG_LB_STEAL_MIN 则返回。
- * 5. 从对端选 victim，迁移到本核，递增 steal 计数，置 yield_pending。
- *
- * @note 受 CONFIG_SMP_IDLE_STEAL 控制；本地已有工作或 peer 就绪数不足时不窃取。
+ * @brief Idle 任务中的工作窃取（从 peer 核 pull 任务）
+ * @details 未启用 STEAL/单核/未运行/挂起/本核有就绪/对端不足则返回；pick_victim 迁移并 steal++。
+ * @return 无
+ * @retval 无
+ * @note CONFIG_SMP_IDLE_STEAL 控制
+ * @warning 本地有工作时不窃取
+ * @attention ❌ ISR；✅ block/switch
  */
 void cgrtos_sched_idle_steal(void)
 {
@@ -2094,14 +2062,13 @@ void cgrtos_sched_idle_steal(void)
 }
 
 /**
- * @brief 初始化调度器内部数据结构。
- *
- * @details
- * 1. 清零 g_ready 与 g_ready_bitmap。
- * 2. 初始化每核 CFS 就绪链表与全局 MC-EDF 就绪链。
- * 3. 初始化 EDF 释放轮各槽位链表。
- * 4. 初始化 g_delayed_list，edf_rel_cursor=0。
- * 5. suspend_count=0，ready_lock=0，lb_tick=0，force_yield 清零。
+ * @brief 初始化调度器内部数据结构
+ * @details 清零 ready/bitmap；init CFS/EDF/释放轮/延迟链；suspend=0；ready_lock=0；force_yield 清零。
+ * @return 无
+ * @retval 无
+ * @note cgrtos_init 早期调用
+ * @warning 调度未启动前调用
+ * @attention ❌ ISR；❌ block/switch
  */
 void cgrtos_sched_init(void)
 {
@@ -2127,6 +2094,17 @@ void cgrtos_sched_init(void)
 }
 
 #if CONFIG_SCHED_STATS
+/**
+ * @brief 读取调度延迟统计快照
+ * @details 关 IRQ 持 ready_lock；复制 g_sched_max_latency 与 g_sched_latency_samples 到输出指针。
+ * @param[out] max_latency_global 最大调度延迟；可 NULL
+ * @param[out] samples 采样计数；可 NULL
+ * @return 无
+ * @retval 无
+ * @note CONFIG_SCHED_STATS 编译
+ * @warning 指针可为 NULL 跳过对应字段
+ * @attention ❌ ISR；❌ block/switch
+ */
 void cgrtos_sched_stats_get(tick_t *max_latency_global, uint32_t *samples)
 {
     uint64_t flags = cgrtos_irq_save();
@@ -2141,6 +2119,15 @@ void cgrtos_sched_stats_get(tick_t *max_latency_global, uint32_t *samples)
     cgrtos_irq_restore(flags);
 }
 
+/**
+ * @brief 重置调度延迟统计
+ * @details 关 IRQ 持 ready_lock；清零全局与各任务 per-task 延迟统计字段。
+ * @return 无
+ * @retval 无
+ * @note CONFIG_SCHED_STATS 编译
+ * @warning 无
+ * @attention ❌ ISR；❌ block/switch
+ */
 void cgrtos_sched_stats_reset(void)
 {
     uint64_t flags = cgrtos_irq_save();

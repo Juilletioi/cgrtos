@@ -11,7 +11,7 @@ docs/doxygen/
 
 # Tooling / local
 .cache/
-.clangd
+# .clangd is tracked (project clangd defaults); DB is machine-local:
 compile_commands.json
 .gdb_history
 

@@ -1,9 +1,12 @@
 /**
  * @file stream_buffer.c
  * @brief StreamBuffer（字节流）与 MessageBuffer（长度前缀整消息）模块
+ * @author Cong Zhou / Juilletioi
+ * @version 5.0.0
+ * @date 2026-07-22
+ * @copyright CG-RTOS
  *
- * ## 模块设计
- *
+ * @details
  * 本模块提供两类 IPC 缓冲：
  *
  * - **StreamBuffer**：环形字节缓冲，支持部分读写；接收端通过 `trigger` 控制
@@ -11,13 +14,8 @@
  * - **MessageBuffer**：在 StreamBuffer 之上封装，每条消息格式为
  *   `[u32 LE len][payload...]`，send/recv 必须整包操作。
  *
- * ## 同步与阻塞
- *
- * - 全局静态池 `g_sbs[]` 管理实例；创建时从 TLSF 堆分配环形缓冲。
- * - 发送/接收各自维护优先级等待队列（`send_wait_q` / `recv_wait_q`），
- *   阻塞时调用 `cgrtos_sched_block` 并挂入对应队列。
- * - 写入后若满足接收唤醒条件则 `sb_wake_recv`；读出后若腾出空间则 `sb_wake_send`。
- * - 若实例挂入 QueueSet，发送成功后调用 `cgrtos_queue_set_poke` 通知 select 等待者。
+ * 全局静态池 `g_sbs[]` 管理实例；阻塞时挂 send_wait_q/recv_wait_q；
+ * 挂入 QueueSet 时发送成功后调用 cgrtos_queue_set_poke。
  *
  * @see cgrtos_stream
  */
@@ -28,20 +26,18 @@ static cgrtos_stream_buffer_t g_sbs[CGRTOS_MAX_STREAM_BUFFER];
 
 /**
  * @brief 将当前任务挂到指定等待队列并标记阻塞原因
- *
- * @param sb      关联的 StreamBuffer 实例
- * @param wq      目标等待队列指针（send 或 recv）
- * @param reason  阻塞原因枚举（BLOCK_STREAM_SEND / BLOCK_STREAM_RECV）
- * @param timeout 阻塞超时 tick 数
- *
+ * @details 读取 running 任务；idle 不可阻塞；调用 sched_block 并 wait_list_add；须在 exit_critical 后 yield。
+ * @param[in]     sb      关联的 StreamBuffer 实例
+ * @param[in,out] wq      目标等待队列指针（send 或 recv）
+ * @param[in]     reason  阻塞原因枚举（BLOCK_STREAM_SEND / BLOCK_STREAM_RECV）
+ * @param[in]     timeout 阻塞超时 tick 数
  * @return pdPASS 成功挂起；pdFAIL 当前无有效任务（如 idle）
- *
- * @details
- * 1. 读取当前 hart 的 running 任务指针。
- * 2. 若任务为空或为 idle（id==0），无法阻塞，返回 pdFAIL。
- * 3. 调用调度器将该任务置为 BLOCKED 并记录 reason、关联对象与 timeout。
- * 4. 将任务按优先级插入 wq 等待链表。
- * 5. 返回 pdPASS，调用方需在 exit_critical 后 yield。
+ * @retval pdPASS 已挂入等待队列
+ * @retval pdFAIL 当前为 idle 或无 running 任务
+ * @note 调用方须在 exit_critical 后 cgrtos_sched_yield
+ * @warning 须在临界区内调用
+ * @attention ❌ ISR；✅ block
+ * @internal
  */
 static int sb_block(cgrtos_stream_buffer_t *sb, cgrtos_task_t *volatile *wq,
                     block_reason_t reason, tick_t timeout)
@@ -60,12 +56,14 @@ static int sb_block(cgrtos_stream_buffer_t *sb, cgrtos_task_t *volatile *wq,
 
 /**
  * @brief 计算环形缓冲剩余可写字节数
- *
- * @param sb StreamBuffer 指针
+ * @details 用总容量 size 减去已占用字节数 avail 得到空闲空间。
+ * @param[in] sb StreamBuffer 指针
  * @return 剩余空间（size - avail）
- *
- * @details
- * 1. 用总容量减去已占用字节数得到空闲空间。
+ * @retval >=0 可写字节数
+ * @note 纯计算，不修改状态
+ * @warning 无
+ * @attention ❌ ISR；❌ block
+ * @internal
  */
 static uint32_t sb_spaces(const cgrtos_stream_buffer_t *sb)
 {
@@ -74,14 +72,16 @@ static uint32_t sb_spaces(const cgrtos_stream_buffer_t *sb)
 
 /**
  * @brief 向环形缓冲写入 n 字节并更新 head/avail
- *
- * @param sb  StreamBuffer 指针
- * @param src 源数据
- * @param n   写入字节数
- *
- * @details
- * 1. 逐字节拷贝到 buf[head]，head 取模回绕。
- * 2. 累加 avail 反映新增占用。
+ * @details 逐字节拷贝到 buf[head]，head 取模回绕；累加 avail 反映新增占用。
+ * @param[in,out] sb  StreamBuffer 指针
+ * @param[in]     src 源数据
+ * @param[in]     n   写入字节数
+ * @return 无
+ * @retval 无
+ * @note 调用方须确保 n <= sb_spaces(sb)
+ * @warning 须在临界区内调用
+ * @attention ❌ ISR；❌ block
+ * @internal
  */
 static void sb_write_bytes(cgrtos_stream_buffer_t *sb, const uint8_t *src, uint32_t n)
 {
@@ -94,14 +94,16 @@ static void sb_write_bytes(cgrtos_stream_buffer_t *sb, const uint8_t *src, uint3
 
 /**
  * @brief 从环形缓冲读出 n 字节并更新 tail/avail
- *
- * @param sb  StreamBuffer 指针
- * @param dst 目标缓冲
- * @param n   读出字节数
- *
- * @details
- * 1. 逐字节从 buf[tail] 拷贝到 dst，tail 取模回绕。
- * 2. 递减 avail 反映释放占用。
+ * @details 逐字节从 buf[tail] 拷贝到 dst，tail 取模回绕；递减 avail 反映释放占用。
+ * @param[in,out] sb  StreamBuffer 指针
+ * @param[out]    dst 目标缓冲
+ * @param[in]     n   读出字节数
+ * @return 无
+ * @retval 无
+ * @note 调用方须确保 n <= sb->avail
+ * @warning 须在临界区内调用
+ * @attention ❌ ISR；❌ block
+ * @internal
  */
 static void sb_read_bytes(cgrtos_stream_buffer_t *sb, uint8_t *dst, uint32_t n)
 {
@@ -114,15 +116,15 @@ static void sb_read_bytes(cgrtos_stream_buffer_t *sb, uint8_t *dst, uint32_t n)
 
 /**
  * @brief 按 trigger 水位唤醒等待接收的任务
- *
- * @param sb         StreamBuffer 指针
- * @param need_yield 若非 NULL，唤醒时置 1 提示调用方 yield
- *
- * @details
- * 1. 确定唤醒阈值：MessageBuffer 为 1 字节；StreamBuffer 为 trigger（0 则视为 1）。
- * 2. 循环检查 recv_wait_q，若 avail 未达阈值则停止。
- * 3. 弹出最高优先级等待者，置 wake_ok=1 并 unblock。
- * 4. 重复直到队列空或数据不足。
+ * @details 确定唤醒阈值（MessageBuffer 为 1；StreamBuffer 为 trigger，0 则视为 1）；循环检查 recv_wait_q，avail 达阈值则弹出最高优先级等待者并 unblock。
+ * @param[in]     sb         StreamBuffer 指针
+ * @param[in,out] need_yield 若非 NULL，唤醒时置 1 提示调用方 yield
+ * @return 无
+ * @retval 无
+ * @note 可在任务或 ISR 临界区内调用
+ * @warning 无
+ * @attention ✅ ISR；❌ block
+ * @internal
  */
 static void sb_wake_recv(cgrtos_stream_buffer_t *sb, int *need_yield)
 {
@@ -150,14 +152,15 @@ static void sb_wake_recv(cgrtos_stream_buffer_t *sb, int *need_yield)
 
 /**
  * @brief 在有剩余空间时唤醒等待发送的任务
- *
- * @param sb         StreamBuffer 指针
- * @param need_yield 若非 NULL，唤醒时置 1 提示调用方 yield
- *
- * @details
- * 1. 当 send_wait_q 非空且 sb_spaces > 0 时循环。
- * 2. 弹出最高优先级发送等待者，置 wake_ok=1 并 unblock。
- * 3. 重复直到队列空或无空间。
+ * @details 当 send_wait_q 非空且 sb_spaces > 0 时循环；弹出最高优先级发送等待者，置 wake_ok=1 并 unblock。
+ * @param[in]     sb         StreamBuffer 指针
+ * @param[in,out] need_yield 若非 NULL，唤醒时置 1 提示调用方 yield
+ * @return 无
+ * @retval 无
+ * @note 可在任务或 ISR 临界区内调用
+ * @warning 无
+ * @attention ✅ ISR；❌ block
+ * @internal
  */
 static void sb_wake_send(cgrtos_stream_buffer_t *sb, int *need_yield)
 {
@@ -176,17 +179,15 @@ static void sb_wake_send(cgrtos_stream_buffer_t *sb, int *need_yield)
 
 /**
  * @brief 创建 StreamBuffer 实例
- *
- * @param size    环形缓冲容量（至少 2 字节）
- * @param trigger 接收唤醒水位；0 则默认为 1
+ * @details 校验 size >= 2；临界区内在静态池 g_sbs 中找空闲槽；从堆分配环形缓冲并初始化 head/tail/avail/trigger/in_use。
+ * @param[in] size    环形缓冲容量（至少 2 字节）
+ * @param[in] trigger 接收唤醒水位；0 则默认为 1
  * @return 成功返回实例指针；失败返回 NULL
- *
- * @details
- * 1. 校验 size >= 2。
- * 2. 进入临界区，在静态池 g_sbs 中找空闲槽。
- * 3. 从堆分配 size 字节环形缓冲；失败则返回 NULL。
- * 4. 初始化 head/tail/avail/trigger/in_use 等字段。
- * 5. 退出临界区并返回指针；池满则返回 NULL。
+ * @retval 非 NULL 新创建的 StreamBuffer
+ * @retval NULL     参数非法、池满或 malloc 失败
+ * @note trigger 决定 recv 阻塞唤醒的最小 avail
+ * @warning 无
+ * @attention ❌ ISR；❌ block
  */
 cgrtos_stream_buffer_t *cgrtos_stream_buffer_create(uint32_t size, uint32_t trigger)
 {
@@ -218,12 +219,13 @@ cgrtos_stream_buffer_t *cgrtos_stream_buffer_create(uint32_t size, uint32_t trig
 
 /**
  * @brief 查询缓冲内已有字节数
- *
- * @param sb StreamBuffer 指针
+ * @details 若 sb 有效则返回 avail，否则返回 0。
+ * @param[in] sb StreamBuffer 指针
  * @return avail 字节数；sb 为 NULL 时返回 0
- *
- * @details
- * 1. 若 sb 有效则返回 avail，否则返回 0。
+ * @retval >=0 当前可用字节数
+ * @note 只读查询，无锁（调用方须自行同步或接受竞态）
+ * @warning 并发读写时返回值可能瞬时变化
+ * @attention ❌ ISR；❌ block
  */
 uint32_t cgrtos_stream_buffer_bytes_available(cgrtos_stream_buffer_t *sb)
 {
@@ -232,12 +234,13 @@ uint32_t cgrtos_stream_buffer_bytes_available(cgrtos_stream_buffer_t *sb)
 
 /**
  * @brief 查询缓冲剩余可写字节数
- *
- * @param sb StreamBuffer 指针
+ * @details 若 sb 有效则调用 sb_spaces，否则返回 0。
+ * @param[in] sb StreamBuffer 指针
  * @return 剩余空间；sb 为 NULL 时返回 0
- *
- * @details
- * 1. 若 sb 有效则调用 sb_spaces，否则返回 0。
+ * @retval >=0 可写字节数
+ * @note 只读查询
+ * @warning 并发读写时返回值可能瞬时变化
+ * @attention ❌ ISR；❌ block
  */
 uint32_t cgrtos_stream_buffer_spaces_available(cgrtos_stream_buffer_t *sb)
 {
@@ -246,21 +249,16 @@ uint32_t cgrtos_stream_buffer_spaces_available(cgrtos_stream_buffer_t *sb)
 
 /**
  * @brief 任务上下文向 StreamBuffer 发送数据（可部分写入）
- *
- * @param sb      StreamBuffer 指针
- * @param data    源数据
- * @param len     期望发送字节数
- * @param timeout 空间不足时的阻塞超时；0 表示不阻塞
+ * @details 循环：临界区计算可写 n 并写入；全部写完或 timeout==0 则返回；否则阻塞到 send_wait_q 并 yield。
+ * @param[in]     sb      StreamBuffer 指针
+ * @param[in]     data    源数据
+ * @param[in]     len     期望发送字节数
+ * @param[in]     timeout 空间不足时的阻塞超时；0 表示不阻塞
  * @return 实际写入字节数
- *
- * @details
- * 1. 校验 sb/data/len/in_use。
- * 2. 循环：进入临界区，计算本次可写 n = min(剩余需求, 空闲空间)。
- * 3. 若 n>0：写入、唤醒接收者、若挂入 QueueSet 则 poke。
- * 4. 若已全部写完，退出并 yield（若需要），返回 written。
- * 5. 若 timeout==0 且未写完，立即返回已写部分。
- * 6. 否则阻塞到 send_wait_q，yield 后检查 wake_ok；超时则返回已写部分。
- * 7. 被唤醒后将 timeout 置 0，仅再尝试一次非阻塞写入。
+ * @retval >=0 实际写入字节数（可能小于 len）
+ * @note 唤醒后 timeout 置 0，仅再尝试一次非阻塞写入
+ * @warning 挂入 QueueSet 时写入成功会 poke
+ * @attention ❌ ISR；✅ block
  */
 size_t cgrtos_stream_buffer_send(cgrtos_stream_buffer_t *sb, const void *data,
                                  size_t len, tick_t timeout)
@@ -322,20 +320,16 @@ size_t cgrtos_stream_buffer_send(cgrtos_stream_buffer_t *sb, const void *data,
 
 /**
  * @brief ISR 上下文向 StreamBuffer 发送数据（非阻塞，可部分写入）
- *
- * @param sb    StreamBuffer 指针
- * @param data  源数据
- * @param len   期望发送字节数
- * @param woken 可选 woken 标志（同 sem_give_from_isr）
- *
+ * @details 校验参数；临界区 n = min(len, 空闲空间)；写入并 sb_wake_recv；若挂接 QueueSet 则 poke；notify_woken。
+ * @param[in]     sb    StreamBuffer 指针
+ * @param[in]     data  源数据
+ * @param[in]     len   期望发送字节数
+ * @param[in,out] woken 可选 woken 标志
  * @return 实际写入字节数（0 表示参数非法、未初始化或无空间）
- *
- * @details
- * 1. 校验 sb/data/len 与 in_use。
- * 2. 进入临界区，n = min(len, 空闲空间)；n==0 则仅退出。
- * 3. sb_write_bytes 写入；sb_wake_recv 可能唤醒阻塞接收者并置 need_yield。
- * 4. 若挂接 QueueSet 则 poke。
- * 5. 退出临界区后 cgrtos_isr_notify_woken；返回 n。
+ * @retval >=0 实际写入字节数
+ * @note 绝不阻塞
+ * @warning 无空间时返回 0，已写部分保留
+ * @attention ✅ ISR；❌ block
  */
 size_t cgrtos_stream_buffer_send_from_isr(cgrtos_stream_buffer_t *sb, const void *data,
                                           size_t len, BaseType_t *woken)
@@ -364,21 +358,16 @@ size_t cgrtos_stream_buffer_send_from_isr(cgrtos_stream_buffer_t *sb, const void
 
 /**
  * @brief 任务上下文从 StreamBuffer 接收数据（可部分读取）
- *
- * @param sb      StreamBuffer 指针
- * @param buf     接收缓冲
- * @param len     期望读取字节数
- * @param timeout 数据不足时的阻塞超时；0 表示不阻塞
+ * @details 循环：avail 达 trigger 或非阻塞且有数据则读取；否则阻塞到 recv_wait_q；超时则读取当前 avail 任意部分。
+ * @param[in]  sb      StreamBuffer 指针
+ * @param[out] buf     接收缓冲
+ * @param[in]  len     期望读取字节数
+ * @param[in]  timeout 数据不足时的阻塞超时；0 表示不阻塞
  * @return 实际读取字节数
- *
- * @details
- * 1. 校验参数；trigger 为 0 时视为 1。
- * 2. 循环：进入临界区，若 avail >= trigger 或（avail>0 且 timeout==0）则读取。
- * 3. 读取 n = min(avail, len)，更新 tail/avail，唤醒发送等待者，返回 n。
- * 4. 若 timeout==0 且无足够数据，返回 0。
- * 5. 否则阻塞到 recv_wait_q，yield 后检查 wake_ok。
- * 6. 超时则尝试读取当前 avail 的任意部分（可能少于 trigger）并返回。
- * 7. 被唤醒后将 timeout 置 0，再试一次。
+ * @retval >=0 实际读取字节数
+ * @note trigger 为 0 时视为 1
+ * @warning 被唤醒后 timeout 置 0 再试一次
+ * @attention ❌ ISR；✅ block
  */
 size_t cgrtos_stream_buffer_recv(cgrtos_stream_buffer_t *sb, void *buf, size_t len,
                                  tick_t timeout)
@@ -444,19 +433,16 @@ size_t cgrtos_stream_buffer_recv(cgrtos_stream_buffer_t *sb, void *buf, size_t l
 
 /**
  * @brief ISR 上下文从 StreamBuffer 接收数据（非阻塞，可部分读取）
- *
- * @param sb    StreamBuffer 指针
- * @param buf   接收缓冲
- * @param len   最大读取字节数
- * @param woken 可选 woken 标志
- *
+ * @details 校验参数；临界区 n = min(avail, len)；若 n>0 则 sb_read_bytes 并 sb_wake_send；notify_woken。
+ * @param[in]     sb    StreamBuffer 指针
+ * @param[out]    buf   接收缓冲
+ * @param[in]     len   最大读取字节数
+ * @param[in,out] woken 可选 woken 标志
  * @return 实际读取字节数（0 表示空或参数非法）
- *
- * @details
- * 1. 校验参数与 in_use。
- * 2. 进入临界区，n = min(avail, len)。
- * 3. 若 n>0：sb_read_bytes，sb_wake_send 可能唤醒发送等待者。
- * 4. 退出临界区后 cgrtos_isr_notify_woken；返回 n。
+ * @retval >=0 实际读取字节数
+ * @note 绝不阻塞
+ * @warning 无
+ * @attention ✅ ISR；❌ block
  */
 size_t cgrtos_stream_buffer_recv_from_isr(cgrtos_stream_buffer_t *sb, void *buf,
                                           size_t len, BaseType_t *woken)
@@ -481,14 +467,14 @@ size_t cgrtos_stream_buffer_recv_from_isr(cgrtos_stream_buffer_t *sb, void *buf,
 
 /**
  * @brief 重置 StreamBuffer（清空数据，不释放内存）
- *
- * @param sb StreamBuffer 指针
+ * @details 校验 sb 与 in_use；临界区内将 head/tail/avail 清零。
+ * @param[in] sb StreamBuffer 指针
  * @return pdPASS 成功；pdFAIL 参数无效
- *
- * @details
- * 1. 校验 sb 与 in_use。
- * 2. 临界区内将 head/tail/avail 清零。
- * 3. 返回 pdPASS。
+ * @retval pdPASS 缓冲已清空
+ * @retval pdFAIL sb 无效或未使用
+ * @note 不唤醒或取消阻塞任务
+ * @warning 重置后等待者仍阻塞直至超时或被 delete 唤醒
+ * @attention ❌ ISR；❌ block
  */
 int cgrtos_stream_buffer_reset(cgrtos_stream_buffer_t *sb)
 {
@@ -503,16 +489,14 @@ int cgrtos_stream_buffer_reset(cgrtos_stream_buffer_t *sb)
 
 /**
  * @brief 删除 StreamBuffer 并释放资源
- *
- * @param sb StreamBuffer 指针
+ * @details 临界区内唤醒所有 send/recv 等待者（wake_ok=0）；保存 buf 指针并清零实例；退出临界区后 free 缓冲并 yield。
+ * @param[in] sb StreamBuffer 指针
  * @return pdPASS 成功；pdFAIL 参数无效
- *
- * @details
- * 1. 校验 sb 与 in_use。
- * 2. 临界区内唤醒所有 send/recv 等待者（wake_ok=0 表示失败/取消）。
- * 3. 保存 buf 指针，清零实例结构。
- * 4. 退出临界区后 free 环形缓冲。
- * 5. yield 让被唤醒任务运行，返回 pdPASS。
+ * @retval pdPASS 实例已删除
+ * @retval pdFAIL sb 无效或未使用
+ * @note 被唤醒任务 wake_ok=0 表示失败/取消
+ * @warning 删除后指针不可再使用
+ * @attention ❌ ISR；✅ block
  */
 int cgrtos_stream_buffer_delete(cgrtos_stream_buffer_t *sb)
 {
@@ -550,14 +534,14 @@ int cgrtos_stream_buffer_delete(cgrtos_stream_buffer_t *sb)
 
 /**
  * @brief 创建 MessageBuffer 实例
- *
- * @param size 环形缓冲总容量（需容纳 4 字节长度前缀 + 载荷）
+ * @details 以 trigger=1 创建底层 StreamBuffer；设置 is_message=1，确保按整消息语义唤醒接收者。
+ * @param[in] size 环形缓冲总容量（需容纳 4 字节长度前缀 + 载荷）
  * @return 成功返回实例指针；失败返回 NULL
- *
- * @details
- * 1. 以 trigger=1 创建底层 StreamBuffer。
- * 2. 设置 is_message=1，确保按整消息语义唤醒接收者。
- * 3. 返回实例指针。
+ * @retval 非 NULL 新创建的 MessageBuffer
+ * @retval NULL     底层 StreamBuffer 创建失败
+ * @note 与 StreamBuffer 共用 g_sbs 池
+ * @warning 单条消息最大载荷 0xFFFF 字节
+ * @attention ❌ ISR；❌ block
  */
 cgrtos_message_buffer_t *cgrtos_message_buffer_create(uint32_t size)
 {
@@ -571,19 +555,17 @@ cgrtos_message_buffer_t *cgrtos_message_buffer_create(uint32_t size)
 
 /**
  * @brief 向 MessageBuffer 发送一条完整消息
- *
- * @param mb      MessageBuffer 指针
- * @param data    消息载荷
- * @param len     载荷字节数（最大 0xFFFF）
- * @param timeout 空间不足时的阻塞超时
+ * @details 校验 len <= 0xFFFF 且 need=4+len <= size；空间足够时原子写入 u32 长度前缀与 payload；否则阻塞或超时返回 0。
+ * @param[in] mb      MessageBuffer 指针
+ * @param[in] data    消息载荷
+ * @param[in] len     载荷字节数（最大 0xFFFF）
+ * @param[in] timeout 空间不足时的阻塞超时
  * @return 成功返回 len；失败或超时返回 0
- *
- * @details
- * 1. 校验 mb/data/len；len 不得超过 0xFFFF；need = 4 + len 不得超过 size。
- * 2. 循环：进入临界区，若 sb_spaces >= need 则原子写入。
- * 3. 先写 u32 小端长度前缀，再写 payload；唤醒接收者并 poke QueueSet。
- * 4. 若 timeout==0 且空间不足，返回 0。
- * 5. 否则阻塞到 send_wait_q；超时返回 0；唤醒后再试（timeout 置 0）。
+ * @retval len 整包发送成功
+ * @retval 0   参数非法、空间不足或超时
+ * @note 绝不部分写入
+ * @warning 无
+ * @attention ❌ ISR；✅ block
  */
 size_t cgrtos_message_buffer_send(cgrtos_message_buffer_t *mb, const void *data,
                                   size_t len, tick_t timeout)
@@ -634,19 +616,17 @@ size_t cgrtos_message_buffer_send(cgrtos_message_buffer_t *mb, const void *data,
 
 /**
  * @brief ISR 向 MessageBuffer 发送一条完整消息（非阻塞）
- *
- * @param mb    MessageBuffer 指针
- * @param data  消息载荷
- * @param len   载荷字节数（最大 0xFFFF）
- * @param woken 可选 woken 标志
- *
+ * @details 校验参数与 need=4+len；空闲不足则返回 0；否则写 u32 前缀与 payload，唤醒接收者并 poke QueueSet。
+ * @param[in]     mb    MessageBuffer 指针
+ * @param[in]     data  消息载荷
+ * @param[in]     len   载荷字节数（最大 0xFFFF）
+ * @param[in,out] woken 可选 woken 标志
  * @return 成功返回 len；空间不足或参数非法返回 0（绝不部分写入）
- *
- * @details
- * 1. 校验 mb/data/len；need = 4 + len 不得超过 mb->size。
- * 2. 进入临界区；空闲 < need 则返回 0（保持缓冲不变）。
- * 3. 先写 u32 长度前缀，再写 payload；唤醒接收者并 poke QueueSet。
- * 4. 退出临界区后 notify_woken；返回 len。
+ * @retval len 整包发送成功
+ * @retval 0   失败或空间不足
+ * @note 绝不部分写入
+ * @warning 无
+ * @attention ✅ ISR；❌ block
  */
 size_t cgrtos_message_buffer_send_from_isr(cgrtos_message_buffer_t *mb, const void *data,
                                            size_t len, BaseType_t *woken)
@@ -679,19 +659,17 @@ size_t cgrtos_message_buffer_send_from_isr(cgrtos_message_buffer_t *mb, const vo
 
 /**
  * @brief ISR 从 MessageBuffer 接收一条完整消息（非阻塞）
- *
- * @param mb      MessageBuffer 指针
- * @param buf     接收缓冲
- * @param buf_len 接收缓冲容量
- * @param woken   可选 woken 标志
- *
+ * @details avail < 4 或无完整消息（avail < 4+L）或 L > buf_len 均返回 0；否则消费前缀与载荷，唤醒发送者。
+ * @param[in]     mb      MessageBuffer 指针
+ * @param[out]    buf     接收缓冲
+ * @param[in]     buf_len 接收缓冲容量
+ * @param[in,out] woken   可选 woken 标志
  * @return 成功返回载荷长度；无完整消息、缓冲过小或参数非法返回 0
- *
- * @details
- * 1. 校验参数；进入临界区。
- * 2. avail < 4 则无长度前缀，返回 0。
- * 3. 窥读长度 L；若 avail < 4+L（消息未到齐）或 L > buf_len，返回 0（不消费）。
- * 4. 否则消费前缀与载荷，唤醒发送者，notify_woken，返回 L。
+ * @retval >0 消息载荷字节数
+ * @retval 0  无完整消息或失败
+ * @note 窥读长度前缀时不移动 tail，消息未到齐不消费
+ * @warning 无
+ * @attention ✅ ISR；❌ block
  */
 size_t cgrtos_message_buffer_recv_from_isr(cgrtos_message_buffer_t *mb, void *buf,
                                            size_t buf_len, BaseType_t *woken)
@@ -727,20 +705,17 @@ size_t cgrtos_message_buffer_recv_from_isr(cgrtos_message_buffer_t *mb, void *bu
 
 /**
  * @brief 从 MessageBuffer 接收一条完整消息
- *
- * @param mb      MessageBuffer 指针
- * @param buf     接收缓冲
- * @param buf_len 接收缓冲容量
- * @param timeout 消息未完整到达时的阻塞超时
+ * @details 循环：avail >= 4 时 peek 长度 L；消息完整且 L <= buf_len 则读出；否则阻塞或超时返回 0。
+ * @param[in]  mb      MessageBuffer 指针
+ * @param[out] buf     接收缓冲
+ * @param[in]  buf_len 接收缓冲容量
+ * @param[in]  timeout 消息未完整到达时的阻塞超时
  * @return 成功返回消息载荷字节数；失败/超时/缓冲过小返回 0
- *
- * @details
- * 1. 校验 mb/buf/buf_len。
- * 2. 循环：进入临界区，若 avail >= 4 则 peek 长度前缀 L（不消费）。
- * 3. 若 avail < 4+L，消息未完整，继续等待或超时返回 0。
- * 4. 若 L > buf_len，调用方缓冲不足，返回 0。
- * 5. 否则读出 4 字节前缀与 L 字节 payload，唤醒发送者，返回 L。
- * 6. timeout==0 且无完整消息则返回 0；否则阻塞到 recv_wait_q。
+ * @retval >0 消息载荷字节数
+ * @retval 0  超时、缓冲不足或参数非法
+ * @note 绝不部分接收
+ * @warning 无
+ * @attention ❌ ISR；✅ block
  */
 size_t cgrtos_message_buffer_recv(cgrtos_message_buffer_t *mb, void *buf, size_t buf_len,
                                   tick_t timeout)
@@ -799,12 +774,14 @@ size_t cgrtos_message_buffer_recv(cgrtos_message_buffer_t *mb, void *buf, size_t
 
 /**
  * @brief 删除 MessageBuffer 实例
- *
- * @param mb MessageBuffer 指针
+ * @details 委托 cgrtos_stream_buffer_delete 释放底层 StreamBuffer 资源。
+ * @param[in] mb MessageBuffer 指针
  * @return pdPASS 成功；pdFAIL 失败
- *
- * @details
- * 1. 委托 cgrtos_stream_buffer_delete 释放底层 StreamBuffer 资源。
+ * @retval pdPASS 已删除
+ * @retval pdFAIL 参数无效
+ * @note MessageBuffer 与 StreamBuffer 共用删除路径
+ * @warning 无
+ * @attention ❌ ISR；✅ block
  */
 int cgrtos_message_buffer_delete(cgrtos_message_buffer_t *mb)
 {

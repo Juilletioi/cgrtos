@@ -1,9 +1,12 @@
 /**
  * @file queue_set.c
  * @brief QueueSet：在多个 Queue / Semaphore / StreamBuffer 上阻塞 select
+ * @author Cong Zhou / Juilletioi
+ * @version 5.0.0
+ * @date 2026-07-22
+ * @copyright CG-RTOS
  *
- * ## 模块设计
- *
+ * @details
  * QueueSet 实现类似 POSIX select 的多路复用：
  *
  * - **成员表** `members[]`：登记 Queue、Semaphore、StreamBuffer 及其类型；
@@ -11,11 +14,7 @@
  * - **就绪环** `ready[]`：FIFO 环形队列，存储就绪成员的索引；同一对象不会重复入队。
  * - **等待队列** `wait_q`：`cgrtos_queue_set_select` 阻塞时挂入，成员就绪时 poke 唤醒。
  *
- * ## 工作流程
- *
- * 1. IPC 路径（send/give/写入 stream）在资源可用时调用 `cgrtos_queue_set_poke`。
- * 2. poke 将成员索引 push 到就绪环，并唤醒 select 等待者。
- * 3. select 从就绪环 pop 一个成员指针，调用方再对该对象 take/recv。
+ * IPC 路径在资源可用时调用 cgrtos_queue_set_poke；select 从就绪环 pop 成员指针。
  *
  * @see cgrtos_qset
  */
@@ -26,14 +25,16 @@ static cgrtos_queue_set_t g_qsets[CGRTOS_MAX_QUEUE_SET];
 
 /**
  * @brief 在 members[] 中按对象指针查找成员索引
- *
- * @param set QueueSet 指针
- * @param obj 成员对象指针（Queue/Sem/Stream）
+ * @details 线性扫描 members[0..n_members)，比较 obj 指针；匹配则返回索引 i。
+ * @param[in] set QueueSet 指针
+ * @param[in] obj 成员对象指针（Queue/Sem/Stream）
  * @return 成员索引；未找到返回 -1
- *
- * @details
- * 1. 线性扫描 members[0..n_members)，比较 obj 指针。
- * 2. 匹配则返回索引 i；扫描结束未找到返回 -1。
+ * @retval >=0 成员索引
+ * @retval -1  未注册
+ * @note O(n) 线性查找
+ * @warning 无
+ * @attention ❌ ISR；❌ block
+ * @internal
  */
 static int qs_find_member(cgrtos_queue_set_t *set, void *obj)
 {
@@ -47,15 +48,16 @@ static int qs_find_member(cgrtos_queue_set_t *set, void *obj)
 
 /**
  * @brief 检查就绪环中是否已包含指定对象
- *
- * @param set QueueSet 指针
- * @param obj 待查对象指针
+ * @details 从 rq_tail 起遍历 rq_cnt 个就绪槽；通过 ready[i] 索引取 members[idx].obj 与 obj 比较。
+ * @param[in] set QueueSet 指针
+ * @param[in] obj 待查对象指针
  * @return 1 已存在；0 不存在
- *
- * @details
- * 1. 从 rq_tail 起遍历 rq_cnt 个就绪槽。
- * 2. 通过 ready[i] 索引取 members[idx].obj 与 obj 比较。
- * 3. 任一匹配则返回 1；遍历完返回 0。
+ * @retval 1 就绪环中已有该对象
+ * @retval 0 不在就绪环中
+ * @note 用于 push 前去重
+ * @warning 无
+ * @attention ❌ ISR；❌ block
+ * @internal
  */
 static int qs_ready_contains(cgrtos_queue_set_t *set, void *obj)
 {
@@ -72,15 +74,15 @@ static int qs_ready_contains(cgrtos_queue_set_t *set, void *obj)
 
 /**
  * @brief 将成员推入就绪环（去重、容量检查）
- *
- * @param set QueueSet 指针
- * @param obj 就绪的成员对象指针
- *
- * @details
- * 1. 查找 obj 在 members 中的索引；非成员则直接返回。
- * 2. 若就绪环已含该 obj，去重返回。
- * 3. 若 rq_cnt 已达 CGRTOS_QUEUE_SET_LENGTH，丢弃（环满）。
- * 4. 将成员索引写入 ready[rq_head]，推进 head 并 rq_cnt++。
+ * @details 查找 obj 在 members 中的索引；非成员或已就绪则返回；环满则丢弃；否则写入 ready[rq_head] 并推进 head/rq_cnt。
+ * @param[in] set QueueSet 指针
+ * @param[in] obj 就绪的成员对象指针
+ * @return 无
+ * @retval 无
+ * @note 环满时静默丢弃 poke
+ * @warning 调用方通常已在临界区内
+ * @attention ✅ ISR；❌ block
+ * @internal
  */
 static void qs_push_ready(cgrtos_queue_set_t *set, void *obj)
 {
@@ -101,14 +103,15 @@ static void qs_push_ready(cgrtos_queue_set_t *set, void *obj)
 
 /**
  * @brief 从就绪环弹出一个成员对象指针
- *
- * @param set QueueSet 指针
+ * @details 若 rq_cnt==0 返回 NULL；从 ready[rq_tail] 取成员索引，推进 tail 并 rq_cnt--；校验索引后返回 members[idx].obj。
+ * @param[in] set QueueSet 指针
  * @return 成员 obj 指针；环空或索引非法时返回 NULL
- *
- * @details
- * 1. 若 rq_cnt==0，返回 NULL。
- * 2. 从 ready[rq_tail] 取成员索引，推进 tail 并 rq_cnt--。
- * 3. 校验索引 < n_members，返回 members[idx].obj；否则返回 NULL。
+ * @retval 非 NULL 就绪成员对象指针
+ * @retval NULL     就绪环为空或索引损坏
+ * @note FIFO 顺序
+ * @warning 无
+ * @attention ❌ ISR；❌ block
+ * @internal
  */
 static void *qs_pop_ready(cgrtos_queue_set_t *set)
 {
@@ -126,15 +129,14 @@ static void *qs_pop_ready(cgrtos_queue_set_t *set)
 
 /**
  * @brief 创建 QueueSet 实例
- *
- * @param length 参数保留（实际容量固定为 CGRTOS_QUEUE_SET_LENGTH）
+ * @details 忽略 length（固定环长由宏定义）；临界区内在静态池 g_qsets 中找 in_use==0 的槽，清零并置 in_use=1。
+ * @param[in] length 参数保留（实际容量固定为 CGRTOS_QUEUE_SET_LENGTH）
  * @return 成功返回实例指针；池满返回 NULL
- *
- * @details
- * 1. 忽略 length（固定环长由宏定义）。
- * 2. 进入临界区，在静态池 g_qsets 中找 in_use==0 的槽。
- * 3. 清零并置 in_use=1，退出临界区返回指针。
- * 4. 池满则返回 NULL。
+ * @retval 非 NULL 新创建的 QueueSet
+ * @retval NULL     静态池已满
+ * @note length 参数当前未使用
+ * @warning 无
+ * @attention ❌ ISR；❌ block
  */
 cgrtos_queue_set_t *cgrtos_queue_set_create(uint32_t length)
 {
@@ -154,19 +156,17 @@ cgrtos_queue_set_t *cgrtos_queue_set_create(uint32_t length)
 
 /**
  * @brief 向 QueueSet 添加成员（内部通用实现）
- *
- * @param set  QueueSet 指针
- * @param type 成员类型（QUEUE/SEM/STREAM）
- * @param obj  成员对象指针
+ * @details 校验 set/obj/in_use；检查成员数未达上限且 obj 未重复；登记 type/obj 并设置 IPC 对象 qset 反向指针；若成员已有资源则 push 就绪环。
+ * @param[in] set  QueueSet 指针
+ * @param[in] type 成员类型（QUEUE/SEM/STREAM）
+ * @param[in] obj  成员对象指针
  * @return pdPASS 成功；pdFAIL 失败
- *
- * @details
- * 1. 校验 set/obj/in_use。
- * 2. 临界区内检查：成员数未达上限且 obj 未重复注册。
- * 3. 在 members[n_members] 记录 type 与 obj，n_members++。
- * 4. 按类型在 IPC 对象上设置 qset 反向指针。
- * 5. 若成员当前已有资源（cnt/count/avail>0），立即 push 到就绪环。
- * 6. 退出临界区返回 pdPASS。
+ * @retval pdPASS 成员已添加
+ * @retval pdFAIL 参数非法、已满或重复注册
+ * @note 添加时若 cnt/count/avail>0 立即标记就绪
+ * @warning 同一 obj 不可加入多个 QueueSet
+ * @attention ❌ ISR；❌ block
+ * @internal
  */
 static int qs_add(cgrtos_queue_set_t *set, cgrtos_qset_type_t type, void *obj)
 {
@@ -205,13 +205,15 @@ static int qs_add(cgrtos_queue_set_t *set, cgrtos_qset_type_t type, void *obj)
 
 /**
  * @brief 向 QueueSet 添加 Queue 成员
- *
- * @param set QueueSet 指针
- * @param q   Queue 指针
+ * @details 调用 qs_add，类型为 CGRTOS_QSET_QUEUE。
+ * @param[in] set QueueSet 指针
+ * @param[in] q   Queue 指针
  * @return pdPASS 成功；pdFAIL 失败
- *
- * @details
- * 1. 调用 qs_add，类型为 CGRTOS_QSET_QUEUE。
+ * @retval pdPASS 成员已添加
+ * @retval pdFAIL 添加失败
+ * @note 便捷包装
+ * @warning 无
+ * @attention ❌ ISR；❌ block
  */
 int cgrtos_queue_set_add_queue(cgrtos_queue_set_t *set, cgrtos_queue_t *q)
 {
@@ -220,13 +222,15 @@ int cgrtos_queue_set_add_queue(cgrtos_queue_set_t *set, cgrtos_queue_t *q)
 
 /**
  * @brief 向 QueueSet 添加 Semaphore 成员
- *
- * @param set QueueSet 指针
- * @param sem Semaphore 指针
+ * @details 调用 qs_add，类型为 CGRTOS_QSET_SEM。
+ * @param[in] set QueueSet 指针
+ * @param[in] sem Semaphore 指针
  * @return pdPASS 成功；pdFAIL 失败
- *
- * @details
- * 1. 调用 qs_add，类型为 CGRTOS_QSET_SEM。
+ * @retval pdPASS 成员已添加
+ * @retval pdFAIL 添加失败
+ * @note 便捷包装
+ * @warning 无
+ * @attention ❌ ISR；❌ block
  */
 int cgrtos_queue_set_add_sem(cgrtos_queue_set_t *set, cgrtos_sem_t *sem)
 {
@@ -235,13 +239,15 @@ int cgrtos_queue_set_add_sem(cgrtos_queue_set_t *set, cgrtos_sem_t *sem)
 
 /**
  * @brief 向 QueueSet 添加 StreamBuffer 成员
- *
- * @param set QueueSet 指针
- * @param sb  StreamBuffer 指针
+ * @details 调用 qs_add，类型为 CGRTOS_QSET_STREAM。
+ * @param[in] set QueueSet 指针
+ * @param[in] sb  StreamBuffer 指针
  * @return pdPASS 成功；pdFAIL 失败
- *
- * @details
- * 1. 调用 qs_add，类型为 CGRTOS_QSET_STREAM。
+ * @retval pdPASS 成员已添加
+ * @retval pdFAIL 添加失败
+ * @note 便捷包装
+ * @warning 无
+ * @attention ❌ ISR；❌ block
  */
 int cgrtos_queue_set_add_stream(cgrtos_queue_set_t *set, cgrtos_stream_buffer_t *sb)
 {
@@ -250,18 +256,15 @@ int cgrtos_queue_set_add_stream(cgrtos_queue_set_t *set, cgrtos_stream_buffer_t 
 
 /**
  * @brief 从 QueueSet 移除成员
- *
- * @param set QueueSet 指针
- * @param obj 待移除成员对象指针
+ * @details 临界区内查找成员索引；按类型清除 IPC 对象 qset 反向指针；压缩 members 数组；清空就绪环（索引可能已失效）。
+ * @param[in] set QueueSet 指针
+ * @param[in] obj 待移除成员对象指针
  * @return pdPASS 成功；pdFAIL 失败
- *
- * @details
- * 1. 校验 set/obj；临界区内查找成员索引 mi。
- * 2. 未找到则返回 pdFAIL。
- * 3. 按类型清除 IPC 对象上的 qset 反向指针。
- * 4. 压缩 members 数组（mi 之后的条目前移），n_members--。
- * 5. 清空就绪环（索引可能已失效）。
- * 6. 退出临界区返回 pdPASS。
+ * @retval pdPASS 成员已移除
+ * @retval pdFAIL 参数非法或未找到
+ * @note 移除后清空整个就绪环
+ * @warning 不清除 IPC 对象内已有数据
+ * @attention ❌ ISR；❌ block
  */
 int cgrtos_queue_set_remove(cgrtos_queue_set_t *set, void *obj)
 {
@@ -296,14 +299,14 @@ int cgrtos_queue_set_remove(cgrtos_queue_set_t *set, void *obj)
 
 /**
  * @brief IPC 路径通知 QueueSet 某成员已就绪
- *
- * @param set QueueSet 指针
- * @param obj 就绪的成员对象指针
- *
- * @details
- * 1. 校验 set/obj/in_use；调用方通常已在临界区内（嵌套安全）。
- * 2. 将 obj 推入就绪环（qs_push_ready 去重）。
- * 3. 若 wait_q 有 select 等待者，弹出最高优先级者，wake_ok=1 并 unblock。
+ * @details 校验 set/obj/in_use；将 obj 推入就绪环（去重）；若 wait_q 有 select 等待者则弹出最高优先级者并 unblock。
+ * @param[in] set QueueSet 指针
+ * @param[in] obj 就绪的成员对象指针
+ * @return 无
+ * @retval 无
+ * @note 调用方通常已在 IPC 临界区内（嵌套安全）
+ * @warning 环满时 poke 被静默丢弃
+ * @attention ✅ ISR；❌ block
  */
 void cgrtos_queue_set_poke(cgrtos_queue_set_t *set, void *obj)
 {
@@ -324,18 +327,15 @@ void cgrtos_queue_set_poke(cgrtos_queue_set_t *set, void *obj)
 
 /**
  * @brief 阻塞等待 QueueSet 中任一成员就绪
- *
- * @param set     QueueSet 指针
- * @param timeout 阻塞超时 tick；0 表示不阻塞
+ * @details 循环：临界区尝试 qs_pop_ready；有则返回 obj；timeout==0 或无 running 任务则返回 NULL；否则阻塞到 wait_q 并 yield。
+ * @param[in] set     QueueSet 指针
+ * @param[in] timeout 阻塞超时 tick；0 表示不阻塞
  * @return 就绪成员 obj 指针；超时或无就绪返回 NULL
- *
- * @details
- * 1. 校验 set/in_use。
- * 2. 循环：进入临界区，尝试 qs_pop_ready；有则立即返回 obj。
- * 3. timeout==0 且无就绪，返回 NULL。
- * 4. 当前任务无效（idle）则返回 NULL。
- * 5. 阻塞当前任务（BLOCK_QUEUE_SET），挂入 wait_q，yield。
- * 6. 被唤醒后再试（timeout 置 0）；wake_ok==0 表示超时，返回 NULL。
+ * @retval 非 NULL 就绪成员指针
+ * @retval NULL     超时、非阻塞无就绪或 idle 无法阻塞
+ * @note 返回指针后调用方须对该对象 take/recv
+ * @warning 就绪环 pop 后该成员事件被消费
+ * @attention ❌ ISR；✅ block
  */
 void *cgrtos_queue_set_select(cgrtos_queue_set_t *set, tick_t timeout)
 {
@@ -377,16 +377,14 @@ void *cgrtos_queue_set_select(cgrtos_queue_set_t *set, tick_t timeout)
 
 /**
  * @brief 删除 QueueSet 并释放槽位
- *
- * @param set QueueSet 指针
+ * @details 临界区内遍历所有成员清除 qset 反向指针；唤醒所有 wait_q 等待者（wake_ok=0）；清零 set 结构；yield 后返回。
+ * @param[in] set QueueSet 指针
  * @return pdPASS 成功；pdFAIL 失败
- *
- * @details
- * 1. 校验 set/in_use。
- * 2. 临界区内遍历所有成员，清除 IPC 对象上的 qset 反向指针。
- * 3. 唤醒所有 wait_q 等待者（wake_ok=0）。
- * 4. 清零整个 set 结构，退出临界区。
- * 5. yield 后返回 pdPASS。
+ * @retval pdPASS 已删除
+ * @retval pdFAIL 参数无效
+ * @note 被唤醒 select 者 wake_ok=0 表示取消
+ * @warning 不删除成员 IPC 对象本身
+ * @attention ❌ ISR；✅ block
  */
 int cgrtos_queue_set_delete(cgrtos_queue_set_t *set)
 {

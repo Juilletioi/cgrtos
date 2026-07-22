@@ -1,20 +1,101 @@
+/**
+ * @file test_cases.h
+ * @brief 功能测试用例表与运行器对外接口
+ * @author Cong Zhou / Juilletioi
+ * @version 5.0.0
+ * @date 2026-07-22
+ * @copyright CG-RTOS
+ *
+ * @details
+ * 供 APP=test / APP=cli 共享。用例以名称字符串注册，CLI 可通过 `run <name>` 触发。
+ */
+
 #ifndef TEST_CASES_H
 #define TEST_CASES_H
 
+/**
+ * @brief 单个测试用例入口函数类型
+ * @details 无参数、无返回值；内部通过 expect() 累计 pass/fail。
+ */
 typedef void (*test_case_fn_t)(void);
 
+/**
+ * @brief 测试用例描述符
+ * @details 只读表项；应用不得改写 name/help/run 指针。
+ */
 typedef struct {
-    const char *name;   /* short command name, e.g. "mem" */
-    const char *help;   /* one-line description */
-    test_case_fn_t run;
+    const char *name;      ///< 短命令名，如 "mem"、"sched_m1"
+    const char *help;      ///< 一行帮助说明
+    test_case_fn_t run;    ///< 用例执行函数；不可为 NULL
 } test_case_t;
 
-void test_cases_reset(void);           /* clear pass/fail counters */
-int  test_cases_pass_count(void);
-int  test_cases_fail_count(void);
-const test_case_t *test_cases_get(int *count); /* table, not including synthetic "all" */
-/* Run one case by name, or "all" to run every case. Returns 0 if ok found+ran, -1 unknown. */
-int  test_cases_run(const char *name);
-void test_cases_list(void);            /* printf list of cases */
+/**
+ * @brief 清零全局 pass/fail 计数器
+ * @details 不删除已注册用例表。可在任务上下文调用。
+ * @return 无
+ * @retval 无
+ * @note 与 test_cases_run 独立
+ * @warning 多任务并发调用时计数无原子保护（测试单驱动场景）
+ * @attention ❌ 勿在 ISR 依赖其副作用；❌ 不阻塞
+ */
+void test_cases_reset(void);
+
+/**
+ * @brief 读取当前通过计数
+ * @details 返回自上次 reset 或启动以来的 [PASS] 次数。
+ * @return 通过次数（非负）
+ * @retval >=0 累计通过数
+ * @note 只读
+ * @warning 无
+ * @attention ✅ ISR 可读；❌ 不阻塞
+ */
+int test_cases_pass_count(void);
+
+/**
+ * @brief 读取当前失败计数
+ * @details 返回自上次 reset 或启动以来的 [FAIL] 次数。
+ * @return 失败次数（非负）
+ * @retval >=0 累计失败数
+ * @note 只读
+ * @warning 无
+ * @attention ✅ ISR 可读；❌ 不阻塞
+ */
+int test_cases_fail_count(void);
+
+/**
+ * @brief 获取静态用例表指针与条目数
+ * @details 不含合成名 "all"；表驻留 .rodata/.data。
+ * @param[out] count 非 NULL 时写入表长度
+ * @return 用例表首地址；count 为 NULL 时仍返回表指针
+ * @retval 非 NULL 表有效
+ * @note 调用方勿 free
+ * @warning 勿修改表项
+ * @attention ✅ ISR；❌ 不阻塞
+ */
+const test_case_t *test_cases_get(int *count);
+
+/**
+ * @brief 按名称运行单个用例，或运行全部（"all"）
+ * @details 名称匹配 g_cases[]；"all" 依次执行全部功能用例（不含 stress）。
+ * @param[in] name 用例名或 "all"；NULL 视为非法
+ * @return 0 找到并执行；-1 未知名称
+ * @retval 0  成功调度执行
+ * @retval -1 名称未知或 name 为空
+ * @note 用例内部可能创建任务/阻塞，须在调度已启动后调用
+ * @warning 长时间用例会占用驱动任务
+ * @attention ❌ ISR；✅ 用例内可能阻塞并切换
+ */
+int test_cases_run(const char *name);
+
+/**
+ * @brief 向控制台打印全部用例名与帮助
+ * @details 遍历表并 cgrtos_printf。
+ * @return 无
+ * @retval 无
+ * @note 仅输出，不执行用例
+ * @warning 无
+ * @attention ❌ 建议任务上下文（printf 带锁）；❌ 不阻塞调度语义
+ */
+void test_cases_list(void);
 
 #endif

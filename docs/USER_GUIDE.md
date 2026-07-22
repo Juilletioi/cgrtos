@@ -6,6 +6,7 @@ Freestanding RISC-V64 **可配置核数 SMP** 实时内核（Nuclei UX900 / `nuc
 | 文档 | 内容 |
 |------|------|
 | 本文 | 编译、运行、CLI、常用 API、GDB |
+| [SCRIPTS.md](SCRIPTS.md) | **编译/运行脚本详细说明**、clangd、选项表 |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | 启动 / 调度 / 陷阱流程图 |
 | [HAL.md](HAL.md) | 外设驱动框架 / 用户 HAL / 多核安全契约 |
 | `./scripts/cgrtos.sh sdk` | 公开头 + API HTML（`sdk/`） |
@@ -19,6 +20,11 @@ Freestanding RISC-V64 **可配置核数 SMP** 实时内核（Nuclei UX900 / `nuc
 export SYSROOT=...   # 可选
 export QEMU=...      # 可选
 
+# 推荐：编译与运行分开（编译后可用 clangd 浏览）
+./scripts/build.sh --app test --cores 2
+./scripts/run.sh  --app test --cores 2
+
+# 或一键：编完即跑
 ./scripts/cgrtos.sh test              # 默认双核 → RESULT: TEST_SUITE_PASSED
 ./scripts/cgrtos.sh test --cores 1    # 单核
 ./scripts/cgrtos.sh test --cores 4    # 四核
@@ -26,7 +32,7 @@ export QEMU=...      # 可选
 ./scripts/cgrtos.sh sdk               # 生成 sdk/include/cgrtos.h + sdk/docs/api/
 ```
 
-退出 QEMU：`Ctrl-A` 然后 `X`。
+退出 QEMU：`Ctrl-A` 然后 `X`。完整脚本说明见 [SCRIPTS.md](SCRIPTS.md)。
 
 ---
 
@@ -34,22 +40,25 @@ export QEMU=...      # 可选
 
 ```bash
 ./scripts/cgrtos.sh <命令> [选项]
+./scripts/build.sh …          # 只编译（含 clangd 数据库）
+./scripts/run.sh …            # 只运行已有 cgrtos.bin
 ```
 
 | 命令 | 作用 |
 |------|------|
-| `test` | 编译并跑全部功能 case |
+| `build --app X` | **只编译**；默认刷新 `compile_commands.json`（clangd） |
+| `run --app X` | **只运行**已有 `cgrtos.bin`（从不 make） |
+| `compdb` | 仅重新生成 `compile_commands.json` |
+| `test` | 先 build 再跑全部功能 case |
 | `cli` | UART 交互 CLI，按名跑 case |
 | `stress` | 多任务压力（**不**包含在 `run all`） |
 | `demo` / `bench` | 演示 / 微基准 |
-| `build --app X` | 只编译 |
-| `run --app X [--no-build]` | 编译（可选）并启动 QEMU |
 | `gdb` / `--gdb` | 本窗 QEMU，另窗 GDB TUI（C 源码） |
 | `docs` | 仅 Doxygen → `docs/doxygen/html/` |
 | `sdk` | Doxygen + 打包 `sdk/` |
 | `help` | 内置帮助 |
 
-常用选项：`--app demo|test|bench|stress|cli`、`--cores 1|2|4`（默认 2）、`--gdb`/`-g`、`--no-build`、`--timeout SEC`、`--port N`。
+常用选项：`--app demo|test|bench|stress|cli`、`--cores 1|2|4`（默认 2）、`--profile minimal`、`--clean`、`--no-compdb`、`--gdb`/`-g`、`--no-build`、`--timeout SEC`、`--port N`。
 
 Makefile 捷径：`make test` / `make CORES=4 test` / `make cli` / `make sdk` 等，内部都转调 `cgrtos.sh`。
 

@@ -1,6 +1,10 @@
 /**
  * @file uart.c
  * @brief Nuclei evalsoc UART0 板级驱动（纯硬件层，供 HAL 调用）
+ * @author Cong Zhou / Juilletioi
+ * @version 5.0.0
+ * @date 2026-07-22
+ * @copyright CG-RTOS
  *
  * @details
  * ## 分层位置
@@ -25,15 +29,18 @@
 #define UART_RXCTRL HAL_BOARD_UART_RXCTRL
 
 /**
- * @brief 硬件初始化：使能 TX/RX 通道
- *
- * @param dev 设备描述符（本驱动未使用 priv）
- * @return HAL_OK
- *
- * @details 步骤：
+ * @brief UART 硬件初始化：使能 TX/RX 通道
+ * @details
  * 1. 取 TXCTRL / RXCTRL 寄存器指针。
  * 2. 将 bit0 置 1，分别打开发送与接收。
  * 3. 返回 HAL_OK。
+ * @param[in] dev 设备描述符；本驱动未使用 priv
+ * @return HAL_OK
+ * @retval HAL_OK 成功
+ * @note 由 HAL hal_console_init 经 ops->init 调用
+ * @warning 驱动层禁止调用 hal_* 用户 API
+ * @attention ❌ ISR；❌ 不阻塞
+ * @internal
  */
 static hal_status_t uart_hw_init(hal_device_t *dev)
 {
@@ -48,17 +55,18 @@ static hal_status_t uart_hw_init(hal_device_t *dev)
 }
 
 /**
- * @brief 阻塞发送一字符
- *
- * @param dev 设备
- * @param c  待发送字符
- *
- * @details 步骤：
- * 1. 轮询 TXDATA.TXFULL 直至可写。
+ * @brief 阻塞发送一字符到 UART
+ * @details
+ * 1. 轮询 TXDATA.TXFULL 直至 FIFO 可写。
  * 2. 写入字符低 8 位。
  * 3. 若为 '\\n'，再次等待可写并追加 '\\r'（CRLF）。
- *
- * @note 由 HAL 在控制台锁内调用；本函数不加锁。
+ * @param[in] dev 设备描述符；本驱动未使用
+ * @param[in] c   待发送字符
+ * @return 无
+ * @note 由 HAL 在控制台锁内调用；本函数不加锁
+ * @warning 轮询等待 TXFULL 清空，可能长时间占用 CPU
+ * @attention ✅ ISR；✅ 阻塞（轮询 TX FIFO）
+ * @internal
  */
 static void uart_hw_putc(hal_device_t *dev, char c)
 {
@@ -79,13 +87,18 @@ static void uart_hw_putc(hal_device_t *dev, char c)
 
 /**
  * @brief 非阻塞接收一字符
- *
- * @return 0..255 数据；-1 表示 RX 空（非 HAL 错误码）
- *
- * @details 步骤：
- * 1. 读 RXDATA。
+ * @details
+ * 1. 读 RXDATA 寄存器。
  * 2. 若 bit31（RXEMPTY）置位，返回 -1。
- * 3. 否则返回低 8 位。
+ * 3. 否则返回低 8 位数据。
+ * @param[in] dev 设备描述符；本驱动未使用
+ * @return 接收到的字节或 -1
+ * @retval 0..255 有效数据
+ * @retval -1     RX 空（非 HAL 错误码）
+ * @note 由 HAL hal_console_pollc 在锁内调用
+ * @warning 返回值 -1 勿与 HAL_ERR_* 混淆
+ * @attention ✅ ISR；❌ 不阻塞
+ * @internal
  */
 static int uart_hw_pollc(hal_device_t *dev)
 {
@@ -114,13 +127,15 @@ static hal_device_t s_uart_dev = {
 };
 
 /**
- * @brief 向 HAL 导出 UART 设备（不注册）
- *
- * @return &s_uart_dev
- *
- * @details 步骤：
- * 1. 返回静态设备地址。
+ * @brief 向 HAL 导出 UART 控制台设备描述符
+ * @details
+ * 1. 返回静态 s_uart_dev 指针。
  * 2. 注册由 hal_board_init → hal_device_register 完成。
+ * @return 非 NULL 静态设备指针；生命周期 = 系统寿命
+ * @retval 非 NULL 成功
+ * @note 勿释放返回值；应用应使用 hal_console_*
+ * @warning 驱动不得自行调用 hal_device_register
+ * @attention ✅ ISR；❌ 不阻塞
  */
 hal_device_t *drv_uart_device(void)
 {
@@ -128,16 +143,15 @@ hal_device_t *drv_uart_device(void)
 }
 
 /**
- * @brief 极早期 / trap 诊断用 putc（直写 MMIO，不经 HAL）
- *
- * @param c 字符；'\n' 自动补 '\r'
- *
- * @details 步骤：
- * 1. 轮询 TXFULL 直至可写。
- * 2. 写字符。
- * 3. 若为换行则再写 '\r'。
- *
- * @note 仅供异常诊断等底层路径；应用请用 hal_console_*。
+ * @brief 极早期 / trap 诊断用单字符输出（直写 MMIO，不经 HAL）
+ * @details
+ * 1. 委托 uart_hw_putc 直写 UART MMIO。
+ * 2. '\\n' 自动补 '\\r'。
+ * @param[in] c 待输出字符
+ * @return 无
+ * @note 仅供异常诊断等底层路径；应用请用 hal_console_*
+ * @warning 无锁、轮询阻塞；多核并发输出可能字节交错
+ * @attention ✅ ISR；✅ 阻塞（轮询 TX FIFO）
  */
 void drv_uart_early_putc(char c)
 {
@@ -145,9 +159,15 @@ void drv_uart_early_putc(char c)
 }
 
 /**
- * @brief 极早期 puts（直写 MMIO）
- * @param s NUL 字符串；NULL 忽略
- * @details 步骤：1. 空指针直接返回；2. 逐字符 early_putc。
+ * @brief 极早期 / trap 诊断用字符串输出（直写 MMIO，不经 HAL）
+ * @details
+ * 1. s 为 NULL 时直接返回。
+ * 2. 逐字符调用 drv_uart_early_putc 输出。
+ * @param[in] s NUL 结尾字符串；NULL 忽略
+ * @return 无
+ * @note 仅供异常诊断等底层路径；应用请用 hal_console_puts
+ * @warning 无锁、轮询阻塞；多核并发输出可能字节交错
+ * @attention ✅ ISR；✅ 阻塞（轮询 TX FIFO）
  */
 void drv_uart_early_puts(const char *s)
 {

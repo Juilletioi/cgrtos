@@ -1,6 +1,11 @@
 /**
  * @file cgrtos.c
  * @brief 内核全局变量、临界区与 SMP 启动
+ * @author Cong Zhou / Juilletioi
+ * @version 5.0.0
+ * @date 2026-07-22
+ * @copyright CG-RTOS
+ *
  * @details 提供 CG-RTOS 内核全局状态、可嵌套临界区、自旋锁、
  *          系统初始化/启动、次核启动、运行时统计及 ISR 进出跟踪。
  *
@@ -8,11 +13,14 @@
  *   hart0: cgrtos_init → 唤醒次核 MSIP → 应用创建任务 → cgrtos_start
  *   hart1: secondary_main → 等待 g_sched_run → idle
  *
- * 临界区：每核可嵌套的 IRQ 关闭 + 全局自旋锁 g_klock。
+ * 临界区：每核可嵌套 IRQ 关闭 + 全局自旋锁 g_klock。
  */
 #include "cgrtos.h"
 #include "hal/hal_board.h"
 #include <string.h>
+#if CONFIG_USE_VFS
+#include "vfs.h"
+#endif
 
 /** @brief 全局任务控制块数组 */
 cgrtos_task_t g_tasks[CONFIG_MAX_TASKS];
@@ -63,10 +71,13 @@ cgrtos_malloc_failed_hook_t g_malloc_failed_hook;
 
 /**
  * @brief 注册 idle 任务钩子函数
- * @param hook 钩子回调；NULL 表示清除
- * @details
- * 1. 将全局 g_idle_hook 设为 hook。
- * 2. idle 任务每轮循环开头若 hook 非空则调用。
+ * @details 将全局 g_idle_hook 设为 hook；idle 任务每轮循环开头若 hook 非空则调用。
+ * @param[in] hook 钩子回调；NULL 表示清除
+ * @return 无
+ * @retval 无
+ * @note CONFIG_USE_HOOKS 编译
+ * @warning 钩子须短小非阻塞
+ * @attention ❌ ISR；❌ block/switch
  */
 void cgrtos_set_idle_hook(cgrtos_hook_fn_t hook)
 {
@@ -75,10 +86,13 @@ void cgrtos_set_idle_hook(cgrtos_hook_fn_t hook)
 
 /**
  * @brief 注册系统 tick 钩子函数
- * @param hook 钩子回调；NULL 表示清除
- * @details
- * 1. 将全局 g_tick_hook 设为 hook。
- * 2. 由 tick ISR 路径在适当时机调用（若已注册）。
+ * @details 将 g_tick_hook 设为 hook；tick ISR 路径在适当时机调用。
+ * @param[in] hook 钩子回调；NULL 清除
+ * @return 无
+ * @retval 无
+ * @note CONFIG_USE_HOOKS
+ * @warning 钩子内勿阻塞
+ * @attention ❌ ISR；❌ block/switch
  */
 void cgrtos_set_tick_hook(cgrtos_hook_fn_t hook)
 {
@@ -87,9 +101,13 @@ void cgrtos_set_tick_hook(cgrtos_hook_fn_t hook)
 
 /**
  * @brief 注册堆分配失败钩子
- * @param hook 钩子回调；NULL 表示清除
- * @details
- * 1. 将全局 g_malloc_failed_hook 设为 hook。
+ * @details 保存 g_malloc_failed_hook；malloc 失败路径调用。
+ * @param[in] hook 回调；NULL 清除
+ * @return 无
+ * @retval 无
+ * @note CONFIG_USE_HOOKS
+ * @warning 无
+ * @attention ❌ ISR；❌ block/switch
  */
 void cgrtos_set_malloc_failed_hook(cgrtos_malloc_failed_hook_t hook)
 {
@@ -108,9 +126,13 @@ cgrtos_stack_overflow_hook_t g_stack_overflow_hook;
 
 /**
  * @brief 注册断言失败钩子
- * @param hook 回调；NULL 清除。仍会在钩子返回后 halt
- * @details
- * 1. 保存 g_assert_hook。
+ * @details 保存 g_assert_hook；assert 失败时在 halt 前调用。
+ * @param[in] hook 回调；NULL 清除
+ * @return 无
+ * @retval 无
+ * @note 钩子返回后仍 halt
+ * @warning 无
+ * @attention ❌ ISR；❌ block/switch
  */
 void cgrtos_set_assert_hook(cgrtos_assert_hook_t hook)
 {
@@ -119,9 +141,13 @@ void cgrtos_set_assert_hook(cgrtos_assert_hook_t hook)
 
 /**
  * @brief 注册栈溢出钩子
- * @param hook 回调；NULL 清除。默认随后仍 assert halt
- * @details
- * 1. 保存 g_stack_overflow_hook。
+ * @details 保存 g_stack_overflow_hook；溢出检测后调用，默认仍 assert halt。
+ * @param[in] hook 回调；NULL 清除
+ * @return 无
+ * @retval 无
+ * @note 可与 CONFIG_CHECK_STACK_OVERFLOW 配合
+ * @warning 无
+ * @attention ❌ ISR；❌ block/switch
  */
 void cgrtos_set_stack_overflow_hook(cgrtos_stack_overflow_hook_t hook)
 {
@@ -145,10 +171,13 @@ void cgrtos_sched_init(void);
 
 /**
  * @brief 获取自旋锁（Test-And-Set 忙等）
- * @param lock 自旋锁变量指针
- * @details
- * 1. 循环 __sync_lock_test_and_set(lock, 1) 直至成功获取（返回 0）。
- * 2. __sync_synchronize 内存屏障，保证临界区前的写对该锁持有者可见。
+ * @details 循环 __sync_lock_test_and_set 直至成功；__sync_synchronize 屏障。
+ * @param[inout] lock 自旋锁指针
+ * @return 无
+ * @retval 无
+ * @note 临界区外层与 ready_lock 等使用
+ * @warning 持锁期间勿阻塞
+ * @attention ✅ ISR；❌ block/switch
  */
 void cgrtos_spin_lock(spinlock_t *lock)
 {
@@ -159,10 +188,13 @@ void cgrtos_spin_lock(spinlock_t *lock)
 
 /**
  * @brief 释放自旋锁
- * @param lock 自旋锁变量指针
- * @details
- * 1. __sync_synchronize 屏障，保证临界区内写先于锁释放完成。
- * 2. __sync_lock_release(lock) 原子写 0 释放锁。
+ * @details __sync_synchronize 后 __sync_lock_release 写 0。
+ * @param[inout] lock 自旋锁指针
+ * @return 无
+ * @retval 无
+ * @note 与 spin_lock 配对
+ * @warning 无
+ * @attention ✅ ISR；❌ block/switch
  */
 void cgrtos_spin_unlock(spinlock_t *lock)
 {
@@ -172,11 +204,12 @@ void cgrtos_spin_unlock(spinlock_t *lock)
 
 /**
  * @brief 保存 mstatus 并关闭全局 M 模式中断（MIE）
- * @return 进入前的完整 mstatus 值，供 cgrtos_irq_restore 恢复
- * @details
- * 1. read_csr(mstatus) 保存当前状态。
- * 2. clear_csr_bits 清除 MIE 位（0x8），禁止 M 模式中断。
- * 3. 返回 flags 供配对 restore 使用。
+ * @details read_csr(mstatus) 保存；clear MIE 位；返回 flags 供 restore。
+ * @return 进入前的完整 mstatus
+ * @retval 完整 mstatus 快照
+ * @note 与 irq_restore 配对
+ * @warning 无
+ * @attention ✅ ISR；❌ block/switch
  */
 uint64_t cgrtos_irq_save(void)
 {
@@ -187,9 +220,13 @@ uint64_t cgrtos_irq_save(void)
 
 /**
  * @brief 恢复 mstatus（含 MIE 等全部位）
- * @param flags cgrtos_irq_save 返回的 mstatus 快照
- * @details
- * 1. write_csr(mstatus, flags) 一次性恢复进入 irq_save 前的中断使能状态。
+ * @details write_csr(mstatus, flags) 一次性恢复。
+ * @param[in] flags cgrtos_irq_save 返回值
+ * @return 无
+ * @retval 无
+ * @note 与 irq_save 配对
+ * @warning 无
+ * @attention ✅ ISR；❌ block/switch
  */
 void cgrtos_irq_restore(uint64_t flags)
 {
@@ -198,11 +235,12 @@ void cgrtos_irq_restore(uint64_t flags)
 
 /**
  * @brief 进入内核临界区（可嵌套；首层关中断并持全局锁）
- * @details
- * 1. 读取当前 hartid 作为 cpu 索引。
- * 2. 若 g_crit_nest[cpu]==0（最外层），irq_save 关中断并 spin_lock g_klock。
- * 3. g_crit_nest[cpu]++ 记录嵌套深度。
- * @note 必须与 cgrtos_exit_critical 配对调用
+ * @details 最外层 irq_save + spin_lock g_klock + safety_on_crit_enter；nest++。
+ * @return 无
+ * @retval 无
+ * @note 必须与 exit_critical 配对
+ * @warning 持 g_klock 时 EDF kick 推迟
+ * @attention ❌ ISR；❌ block/switch
  */
 void cgrtos_enter_critical(void)
 {
@@ -220,10 +258,12 @@ void cgrtos_enter_critical(void)
 
 /**
  * @brief 退出内核临界区（嵌套归零时解锁并恢复中断）
- * @details
- * 1. 若 nest 已为 0 则直接返回（防御性）。
- * 2. g_crit_nest[cpu]--；若仍 >0 则仅减计数，保持锁与中断关闭。
- * 3. 嵌套归零时 spin_unlock g_klock，irq_restore 恢复 MIE。
+ * @details nest--；归零则 safety_on_crit_exit、unlock、irq_restore、edf_kick_flush。
+ * @return 无
+ * @retval 无
+ * @note 最外层退出时补发推迟的 EDF kick
+ * @warning nest 已为 0 则防御返回
+ * @attention ❌ ISR；❌ block/switch
  */
 void cgrtos_exit_critical(void)
 {
@@ -246,9 +286,13 @@ void cgrtos_exit_critical(void)
 
 /**
  * @brief 查询当前核是否处于临界区内
- * @return 非零表示 g_crit_nest[cpu]>0；否则 0
- * @details
- * 1. 读取 mhartid，返回 g_crit_nest[cpu] 是否大于 0。
+ * @details 返回 g_crit_nest[cpu]>0。
+ * @return 非零表示在临界区
+ * @retval 1 在临界区
+ * @retval 0 不在
+ * @note 调度 kick 推迟判断等
+ * @warning 无
+ * @attention ✅ ISR；❌ block/switch
  */
 int cgrtos_in_critical(void)
 {
@@ -257,11 +301,14 @@ int cgrtos_in_critical(void)
 }
 
 /**
- * @brief 查询当前核是否处于 ISR（中断服务）上下文
- * @return 非零表示 g_in_isr[cpu]>0；非法 cpu 返回 0
- * @details
- * 1. 读取 mhartid；若 >= CONFIG_NUM_CORES 返回 0。
- * 2. 返回 g_in_isr[cpu] 嵌套深度是否大于 0。
+ * @brief 查询当前核是否处于 ISR 上下文
+ * @details mhartid 合法则返回 g_in_isr[cpu]>0。
+ * @return 非零表示在 ISR
+ * @retval 1 在 ISR
+ * @retval 0 任务上下文或非法 cpu
+ * @note yield/block 路径分支
+ * @warning 无
+ * @attention ✅ ISR；❌ block/switch
  */
 int cgrtos_in_isr(void)
 {
@@ -274,13 +321,14 @@ int cgrtos_in_isr(void)
 
 /**
  * @brief 断言失败处理：计数、钩子、打印后停机
- * @param file 触发断言的源文件名
- * @param line 触发断言的行号
- * @details
- * 1. g_assert_count++。
- * 2. 若 g_assert_hook 非空则先调用。
- * 3. 进入临界区打印 [ASSERT FAILED] 文件与行号。
- * 4. 无限 WFI 循环 halt。
+ * @details g_assert_count++；可选 hook；enter_critical 打印；WFI 死循环。
+ * @param[in] file 源文件名
+ * @param[in] line 行号
+ * @return 无
+ * @retval 无
+ * @note 不返回
+ * @warning 系统 halt
+ * @attention ✅ ISR；❌ block/switch
  */
 void cgrtos_assert_failed(const char *file, int line)
 {
@@ -301,9 +349,12 @@ void cgrtos_assert_failed(const char *file, int line)
 
 /**
  * @brief 获取系统 tick 计数（全局时间基）
- * @return 当前 g_ticks（__ATOMIC_SEQ_CST 顺序一致读）
- * @details
- * 1. __atomic_load_n 以 SEQ_CST 语义读取 g_ticks，与 tick ISR 写保持可见序。
+ * @details __atomic_load_n g_ticks SEQ_CST 读。
+ * @return 当前 tick 值
+ * @retval >=0 全局 tick
+ * @note 与 tick ISR 写保持可见序
+ * @warning 无
+ * @attention ✅ ISR；❌ block/switch
  */
 tick_t cgrtos_get_ticks(void)
 {
@@ -312,12 +363,12 @@ tick_t cgrtos_get_ticks(void)
 
 /**
  * @brief 向次核发送 IPI，完成 SMP 启动握手同步
- * @details
- * 1. CONFIG_NUM_CORES==1 时为空操作。
- * 2. 写入 g_boot_sync=0xCAFE5A5A 并内存屏障，通知次核可离开 startup 轮询。
- * 3. 对每个次核 cgrtos_smp_send_ipi 触发 MSIP。
- * 4. 忙等直至所有 1..N-1 的 g_hart_stage[c]≥4（或超时）。
- * 5. 打印各次核同步结果。
+ * @details 写 boot_sync 魔数；对各次核 MSIP；忙等 g_hart_stage>=4；打印结果。
+ * @return 无
+ * @retval 无
+ * @note 单核为空操作
+ * @warning 仅 init 早期调用
+ * @attention ❌ ISR；❌ block/switch
  */
 void cgrtos_smp_kick_secondaries(void)
 {
@@ -357,12 +408,12 @@ void cgrtos_smp_kick_secondaries(void)
 
 /**
  * @brief 内核早期初始化（hart0 在创建用户任务前调用）
- * @details
- * 1. 清零 g_tasks/g_current/g_idle、临界区 nest、yield/remote_tick 等全局状态。
- * 2. 重置 tick、上下文切换计数、负载均衡计数、g_sched_run=0、g_klock=0。
- * 3. 各核 g_in_isr 清零；次核 online 与钩子指针（若启用）清零。
- * 4. cgrtos_sched_init；`hal_board_init()` 注册并初始化全部板级外设（CPU/UART/PLIC/CLINT/IPI）。
- * 5. cgrtos_smp_kick_secondaries 唤醒次核；打印版本横幅；cgrtos_fs_init。
+ * @details 清零全局状态；sched_init；hal_board_init；kick 次核；打印横幅；fs_init；可选 mpu_init。
+ * @return 无
+ * @retval 无
+ * @note hart0 专用
+ * @warning 未完成前勿启动调度
+ * @attention ❌ ISR；❌ block/switch
  */
 void cgrtos_init(void)
 {
@@ -416,20 +467,22 @@ void cgrtos_init(void)
                   HAL_BOARD_NAME, hal_device_count());
     cgrtos_printf("  Features: M1-M6 EDF-heap DPCP klog mempool safety\n");
     cgrtos_fs_init();
+#if CONFIG_USE_VFS
+    vfs_init();
+#endif
 #if CONFIG_USE_MPU
     (void)cgrtos_mpu_init();
 #endif
 }
 
 /**
- * @brief 启动调度器（hart0 在应用任务创建完毕后调用，不再返回）
- * @details
- * 1. cgrtos_init_idle_tasks 初始化各核 idle；可选 cgrtos_timer_init。
- * 2. g_sched_run=1 发布，次核可进入调度。
- * 3. 扫描 g_tasks 找首个 READY 且 cpu_aff 为 0xFF 或 0 的任务作 first。
- * 4. 若无则 first=g_idle[0]；否则从就绪队列 remove first。
- * 5. g_current[0]=first，state=RUNNING，run_cpu=0。
- * 6. 重新 clint_init 使首个 deadline 相对调度起点；start_first_task 跳转运行。
+ * @brief 启动调度器（hart0 应用任务创建后调用，不再返回）
+ * @details init_idle；timer_init；g_sched_run=1；选 first READY；clint_init；start_first_task。
+ * @return 无
+ * @retval 无
+ * @note 不返回用户代码
+ * @warning 须先 cgrtos_init
+ * @attention ❌ ISR；✅ block/switch
  */
 void cgrtos_start(void)
 {
@@ -472,14 +525,13 @@ void cgrtos_start(void)
 
 /**
  * @brief 次核进入调度器（secondary_main 调用，不再返回）
- * @param hartid 硬件线程 ID（1..N-1）
- * @details
- * 1. hartid 非法（≤0 或 ≥ CONFIG_NUM_CORES）则 WFI 死循环（多出的 QEMU hart）。
- * 2. 自旋等待 g_sched_run==1（hart0 已 cgrtos_start）。
- * 3. 本地 clint_init；set_csr MSIE 允许 IPI。
- * 4. g_current[hartid]=idle[hartid]，idle state=RUNNING。
- * 5. 原子置位 g_secondary_online bit hartid；start_first_task 运行 idle。
- * @note g_ticks 仍仅由 hart0 递增
+ * @details 非法 hart WFI；等 g_sched_run；clint_init+MSIE；current=idle；置 online；start_first_task。
+ * @param[in] hartid 硬件线程 ID（1..N-1）
+ * @return 无
+ * @retval 无
+ * @note g_ticks 仍仅 hart0 递增
+ * @warning 越界 hart 永久 WFI
+ * @attention ❌ ISR；✅ block/switch
  */
 void cgrtos_start_secondary(int hartid)
 {
@@ -509,11 +561,12 @@ void cgrtos_start_secondary(int hartid)
 
 /**
  * @brief 经 UART 转储 CG-RTOS 运行时统计与任务列表
- * @details
- * 1. 打印版本、uptime、存活任务、上下文切换。
- * 2. 打印各核 ready/负载、LB、堆、IPC 计数。
- * 3. 打印 creates/deletes/asserts/stack_overflows。
- * 4. 遍历任务表打印明细（含 exec / hwm）。
+ * @details stats_get 后打印版本、uptime、切换、负载、堆、IPC、断言及任务明细。
+ * @return 无
+ * @retval 无
+ * @note 调试/CLI 使用
+ * @warning 输出量大
+ * @attention ❌ ISR；❌ block/switch
  */
 void cgrtos_stats_dump(void)
 {
@@ -583,10 +636,13 @@ void cgrtos_stats_dump(void)
 
 /**
  * @brief 填充运行时统计快照
- * @param out 输出结构；NULL 则直接返回
- * @details
- * 1. 校验 out 非空。
- * 2. 复制全局计数器与堆水位、uptime、存活任务数。
+ * @details out 非空则 memset 后复制全局计数器、堆水位、uptime、可选 sched_stats。
+ * @param[out] out 输出结构；NULL 则返回
+ * @return 无
+ * @retval 无
+ * @note stats_dump 与外部监控共用
+ * @warning out 为 NULL 直接返回
+ * @attention ✅ ISR；❌ block/switch
  */
 void cgrtos_stats_get(cgrtos_runtime_stats_t *out)
 {
@@ -622,29 +678,37 @@ void cgrtos_stats_get(cgrtos_runtime_stats_t *out)
 
 /**
  * @brief ISR 入口钩子：递增当前核 ISR 嵌套计数
- * @details
- * 1. 读取 mhartid；合法 cpu 则 g_in_isr[cpu]++。
- * 2. 供 cgrtos_in_isr 判断当前是否在中断上下文。
+ * @details 合法 cpu 则 g_in_isr[cpu]++；供 cgrtos_in_isr 判断。
+ * @return 无
+ * @retval 无
+ * @note trap_vector 入口调用
+ * @warning 无
+ * @attention ✅ ISR；❌ block/switch
  */
 void cgrtos_isr_enter(void)
 {
     uint8_t cpu = (uint8_t)read_csr(mhartid);
     if (cpu < CONFIG_NUM_CORES) {
         g_in_isr[cpu]++;
+        CGRTOS_TRACE(CGRTOS_TRACE_ISR_ENTER, g_in_isr[cpu], 0);
     }
 }
 
 /**
  * @brief ISR 出口钩子：递减当前核 ISR 嵌套计数
- * @details
- * 1. 读取 mhartid；若 g_in_isr[cpu]>0 则递减。
- * 2. 实际任务切换在 trap_vector 中经 cgrtos_sched_switch_from_trap 完成，此处不 yield。
+ * @details g_in_isr[cpu]--；实际切换在 switch_from_trap。
+ * @return 无
+ * @retval 无
+ * @note 与 isr_enter 配对
+ * @warning 嵌套须对称
+ * @attention ✅ ISR；❌ block/switch
  */
 void cgrtos_isr_exit(void)
 {
     uint8_t cpu = (uint8_t)read_csr(mhartid);
     if (cpu < CONFIG_NUM_CORES && g_in_isr[cpu] > 0) {
         g_in_isr[cpu]--;
+        CGRTOS_TRACE(CGRTOS_TRACE_ISR_EXIT, g_in_isr[cpu], 0);
     }
     /* 实际切换在 trap_vector 的 cgrtos_sched_switch_from_trap 中发生 */
 }

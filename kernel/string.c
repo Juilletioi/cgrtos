@@ -1,24 +1,26 @@
 /**
  * @file string.c
  * @brief 最小 C 字符串与内存例程
- * @details 提供 memset/memcpy/memcmp/strlen/strncmp/strncpy 及
- *          cgrtos_snprintf，供无 libc 环境下内核与驱动使用。
+ * @author Cong Zhou / Juilletioi
+ * @version 5.0.0
+ * @date 2026-07-22
+ * @copyright CG-RTOS
  */
+
 #include <stdint.h>
 #include <stddef.h>
 
 /**
- * @brief 将内存块填充为指定字节。
- *
- * @param s 目标缓冲区。
- * @param c 填充字节。
- * @param n 字节数。
- * @return s 原指针。
- *
- * @details
- * 1. 将 s 转为 unsigned char 指针。
- * 2. 循环 n 次，逐字节写入 (unsigned char)c。
- * 3. 返回原始指针 s。
+ * @brief 将内存块填充为指定字节
+ * @details 逐字节写入 (unsigned char)c，共 n 字节。纯内存操作，无系统调用，不阻塞、不切换。
+ * @param[out] s 目标缓冲区
+ * @param[in]  c 填充字节
+ * @param[in]  n 字节数
+ * @return s 原指针
+ * @retval s 填充完成后的缓冲区首地址
+ * @note 行为等价于标准库 memset
+ * @warning s 为 NULL 且 n>0 时行为未定义
+ * @attention ✅ ISR；❌ block/switch
  */
 void* memset(void* s,int c,size_t n){
     /* 1. 转为 unsigned char 指针 */
@@ -30,17 +32,16 @@ void* memset(void* s,int c,size_t n){
 }
 
 /**
- * @brief 复制内存块（源与目标不可重叠）。
- *
- * @param d 目标缓冲区。
- * @param s 源缓冲区。
- * @param n 字节数。
- * @return d 原指针。
- *
- * @details
- * 1. 将 d、s 转为 unsigned char 指针。
- * 2. 循环 n 次，逐字节从源复制到目标。
- * 3. 返回目标指针 d。
+ * @brief 复制内存块（源与目标不可重叠）
+ * @details 从前向后逐字节复制 n 字节。纯内存操作，不阻塞、不切换。
+ * @param[out] d 目标缓冲区
+ * @param[in]  s 源缓冲区
+ * @param[in]  n 字节数
+ * @return d 原指针
+ * @retval d 复制完成后的目标首地址
+ * @note 重叠区域请使用 memmove
+ * @warning 源与目标重叠时结果未定义
+ * @attention ✅ ISR；❌ block/switch
  */
 void* memcpy(void* d,const void* s,size_t n){
     /* 1. 转为 unsigned char 指针 */
@@ -53,18 +54,16 @@ void* memcpy(void* d,const void* s,size_t n){
 }
 
 /**
- * @brief 可重叠的内存移动。
- *
- * @param d 目标缓冲区。
- * @param s 源缓冲区。
- * @param n 字节数。
- * @return d 原指针。
- *
- * @details
- * 1. 若 d==s 或 n==0，无需移动，直接返回 d。
- * 2. 若 d < s（目标在前），从前向后逐字节复制，避免覆盖未读源数据。
- * 3. 若 d > s（目标在后），从后向前逐字节复制，避免覆盖未读源数据。
- * 4. 返回目标指针 d。
+ * @brief 可重叠的内存移动
+ * @details 根据 d 与 s 相对位置选择前向或后向复制，保证重叠安全。纯内存操作，不阻塞、不切换。
+ * @param[out] d 目标缓冲区
+ * @param[in]  s 源缓冲区
+ * @param[in]  n 字节数
+ * @return d 原指针
+ * @retval d 移动完成后的目标首地址
+ * @note d==s 或 n==0 时直接返回，不做复制
+ * @warning 无
+ * @attention ✅ ISR；❌ block/switch
  */
 void* memmove(void* d,const void* s,size_t n){
     unsigned char* dd=(unsigned char*)d;
@@ -80,17 +79,17 @@ void* memmove(void* d,const void* s,size_t n){
 }
 
 /**
- * @brief 比较两块内存。
- *
- * @param s1 缓冲区 1。
- * @param s2 缓冲区 2。
- * @param n  比较字节数。
- * @return 首个不等字节之差 (s1[i]-s2[i])，相等返回 0。
- *
- * @details
- * 1. 将 s1、s2 转为 unsigned char 指针。
- * 2. 逐字节比较，遇不等立即返回差值。
- * 3. 全部相等则返回 0。
+ * @brief 比较两块内存
+ * @details 逐字节比较至多 n 字节，遇首个不等字节即返回差值。纯内存操作，不阻塞、不切换。
+ * @param[in] s1 缓冲区 1
+ * @param[in] s2 缓冲区 2
+ * @param[in] n  比较字节数
+ * @return 首个不等字节之差 (s1[i]-s2[i])；全部相等返回 0
+ * @retval 0     两块内存前 n 字节相同
+ * @retval !=0   首个不等字节的 signed 差值
+ * @note 按 unsigned char 解释字节
+ * @warning 无
+ * @attention ✅ ISR；❌ block/switch
  */
 int memcmp(const void* s1,const void* s2,size_t n){
     /* 1. 转为 unsigned char 指针 */
@@ -103,14 +102,14 @@ int memcmp(const void* s1,const void* s2,size_t n){
 }
 
 /**
- * @brief 计算以 NUL 结尾的字符串长度。
- *
- * @param s 字符串。
- * @return 长度（不含终止符 '\0'）。
- *
- * @details
- * 1. 从索引 0 起逐字符检查，直至遇到 '\0'。
- * 2. 返回已扫描字符数。
+ * @brief 计算以 NUL 结尾的字符串长度
+ * @details 从索引 0 起扫描直至 '\0'，返回字符数（不含终止符）。纯内存操作，不阻塞、不切换。
+ * @param[in] s 字符串
+ * @return 长度（不含 '\0'）
+ * @retval >=0 字符数
+ * @note s 须以 NUL 结尾
+ * @warning s 为 NULL 时行为未定义
+ * @attention ✅ ISR；❌ block/switch
  */
 size_t strlen(const char* s){
     size_t l=0;
@@ -121,18 +120,17 @@ size_t strlen(const char* s){
 }
 
 /**
- * @brief 比较至多 n 个字符。
- *
- * @param s1 字符串 1。
- * @param s2 字符串 2。
- * @param n  最大比较长度。
- * @return 首个不等字符之差，相等或均遇 '\0' 返回 0。
- *
- * @details
- * 1. 循环至多 n 次，逐字符比较 s1[i] 与 s2[i]。
- * 2. 遇不等返回 (unsigned char) 差值。
- * 3. 若 s1[i]=='\0' 提前结束，视为相等。
- * 4. 循环结束返回 0。
+ * @brief 比较至多 n 个字符
+ * @details 逐字符比较 s1 与 s2，至多 n 次；s1 遇 NUL 提前结束视为相等。不阻塞、不切换。
+ * @param[in] s1 字符串 1
+ * @param[in] s2 字符串 2
+ * @param[in] n  最大比较长度
+ * @return 首个不等字符之差；相等或均遇 '\0' 返回 0
+ * @retval 0     前 n 字符（或至 NUL）相同
+ * @retval !=0   首个不等字符的 unsigned char 差值
+ * @note 按 unsigned char 比较
+ * @warning 无
+ * @attention ✅ ISR；❌ block/switch
  */
 int strncmp(const char* s1,const char* s2,size_t n){
     /* 1. 至多 n 次逐字符比较 */
@@ -147,17 +145,16 @@ int strncmp(const char* s1,const char* s2,size_t n){
 }
 
 /**
- * @brief 复制至多 n 个字符并补 NUL。
- *
- * @param d 目标缓冲区。
- * @param s 源字符串。
- * @param n 目标容量。
- * @return d 原指针。
- *
- * @details
- * 1. 从 s 复制字符到 d，最多 n 个，遇 s[i]=='\0' 停止。
- * 2. 若复制不足 n 个，剩余位置填充 '\0'。
- * 3. 返回目标指针 d。
+ * @brief 复制至多 n 个字符并补 NUL
+ * @details 从 s 复制字符到 d，最多 n 个，遇 s[i]=='\0' 停止；剩余位置填充 '\0'。不阻塞、不切换。
+ * @param[out] d 目标缓冲区
+ * @param[in]  s 源字符串
+ * @param[in]  n 目标容量（含终止符空间）
+ * @return d 原指针
+ * @retval d 复制完成后的目标首地址
+ * @note 若源长度 >= n，结果可能不以 NUL 结尾（与 POSIX 一致）
+ * @warning 目标缓冲区须至少 n 字节
+ * @attention ✅ ISR；❌ block/switch
  */
 char* strncpy(char* d,const char* s,size_t n){
     size_t i;
@@ -170,22 +167,17 @@ char* strncpy(char* d,const char* s,size_t n){
 }
 
 /**
- * @brief 受限格式化输出（子集：%s %d %i %u %x %lu %c %%）。
- *
- * @param buf 输出缓冲区。
- * @param n   缓冲区容量（含终止符）。
- * @param fmt 格式串。
- * @param ... 可变参数。
- * @return 写入字符数（不含 NUL）。
- *
- * @details
- * 1. 初始化可变参数列表 ap。
- * 2. 逐字符扫描 fmt，保留至少 1 字节给 NUL（rem > 1）：
- *    a. 普通字符直接写入 buf；
- *    b. '%' 后解析格式符，从 ap 取参并格式化写入。
- * 3. 支持 %s %d %i %u %x %lu %c %%。
- * 4. 在 buf 末尾写入 '\0'（若 n > 0）。
- * 5. 返回已写入字符数 r。
+ * @brief 受限格式化输出（子集：%s %d %i %u %x %lu %c %%）
+ * @details 解析 fmt 并将结果写入 buf，保留至少 1 字节给 NUL。纯栈上格式化，不阻塞、不切换（不含浮点/宽度/精度）。
+ * @param[out] buf 输出缓冲区
+ * @param[in]  n   缓冲区容量（含终止符）
+ * @param[in]  fmt 格式串
+ * @param[in]  ... 可变参数
+ * @return 写入字符数（不含 NUL）
+ * @retval >=0 实际写入字符数
+ * @note 不支持 %p、%lld 等扩展格式
+ * @warning buf 为 NULL 或 n==0 时不写入；超长输出会被截断
+ * @attention ✅ ISR；❌ block/switch
  */
 int cgrtos_snprintf(char* buf,size_t n,const char* fmt,...){
     /* 1. 初始化可变参数列表 */
