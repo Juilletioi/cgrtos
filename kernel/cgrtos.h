@@ -30,7 +30,7 @@
 /* -------------------------------------------------------------------------- */
 
 /** @def CGRTOS_VERSION 内核版本字符串 */
-#define CGRTOS_VERSION              "4.8.0"
+#define CGRTOS_VERSION              "5.0.0"
 
 /** @def CONFIG_SMP_ENABLE 使能 SMP 代码路径（1=开） */
 #define CONFIG_SMP_ENABLE           1
@@ -76,6 +76,116 @@
  */
 #ifndef CONFIG_MCEDF_PRIO_SLACK_TICKS
 #define CONFIG_MCEDF_PRIO_SLACK_TICKS  1
+#endif
+
+/**
+ * @def CONFIG_USE_EDF
+ * @brief 编译 EDF / MC-EDF 路径；置 0 可裁剪全局 EDF 链与释放轮
+ */
+#ifndef CONFIG_USE_EDF
+#define CONFIG_USE_EDF              1
+#endif
+
+/**
+ * @def CONFIG_USE_PREEMPT_THRESH
+ * @brief 抢占阈值：仅 prio > preempt_thresh 的任务可抢占当前任务
+ */
+#ifndef CONFIG_USE_PREEMPT_THRESH
+#define CONFIG_USE_PREEMPT_THRESH   1
+#endif
+
+/**
+ * @def CONFIG_USE_DPCP
+ * @brief 互斥量截止期限/优先级天花板协议（EDF+FP）
+ */
+#ifndef CONFIG_USE_DPCP
+#define CONFIG_USE_DPCP             1
+#endif
+
+/**
+ * @def CONFIG_SCHED_STATS
+ * @brief 调度延迟与 CPU 占用采样
+ */
+#ifndef CONFIG_SCHED_STATS
+#define CONFIG_SCHED_STATS          1
+#endif
+
+/**
+ * @def CONFIG_DETECT_DEADLOCK
+ * @brief 互斥锁等待环基础检测（可选）
+ */
+#ifndef CONFIG_DETECT_DEADLOCK
+#define CONFIG_DETECT_DEADLOCK      1
+#endif
+
+/**
+ * @def CONFIG_ISR_API_GUARD
+ * @brief 中断上下文禁止阻塞 API，返回 errISR 并触发钩子
+ */
+#ifndef CONFIG_ISR_API_GUARD
+#define CONFIG_ISR_API_GUARD        1
+#endif
+
+/**
+ * @def CONFIG_IRQ_DISABLE_MONITOR
+ * @brief 监控关中断/临界区时长并告警
+ */
+#ifndef CONFIG_IRQ_DISABLE_MONITOR
+#define CONFIG_IRQ_DISABLE_MONITOR  0
+#endif
+
+#ifndef CONFIG_IRQ_DISABLE_WARN_US
+#define CONFIG_IRQ_DISABLE_WARN_US  5000U
+#endif
+
+/**
+ * @def CONFIG_HEAP_REDZONE
+ * @brief 堆用户区尾部金丝雀（越界写检测）
+ */
+#ifndef CONFIG_HEAP_REDZONE
+#define CONFIG_HEAP_REDZONE         0
+#endif
+
+/**
+ * @def CONFIG_USE_EDF_HEAP
+ * @brief EDF 就绪结构用最小堆（1）或有序链表（0）
+ */
+#ifndef CONFIG_USE_EDF_HEAP
+#define CONFIG_USE_EDF_HEAP         0
+#endif
+
+/**
+ * @def CONFIG_USE_KLOG
+ * @brief 内核分级日志
+ */
+#ifndef CONFIG_USE_KLOG
+#define CONFIG_USE_KLOG             1
+#endif
+
+#ifndef CONFIG_LOG_LEVEL
+#define CONFIG_LOG_LEVEL            3 /* INFO */
+#endif
+
+/**
+ * @def CONFIG_USE_MPU
+ * @brief MPU/任务隔离接口桩（硬件适配前为软件桩）
+ */
+#ifndef CONFIG_USE_MPU
+#define CONFIG_USE_MPU              0
+#endif
+
+#ifndef CONFIG_MPU_MAX_REGIONS
+#define CONFIG_MPU_MAX_REGIONS      8
+#endif
+
+/** @def CONFIG_IDLE_SLEEP_HOOK 空闲低功耗入口钩子（与 idle_hook 分离） */
+#ifndef CONFIG_IDLE_SLEEP_HOOK
+#define CONFIG_IDLE_SLEEP_HOOK      1
+#endif
+
+/** @def CONFIG_HEAP_POISON 堆喷毒（调试，0=关） */
+#ifndef CONFIG_HEAP_POISON
+#define CONFIG_HEAP_POISON          0
 #endif
 /** @def CONFIG_TASK_STACK_WORDS 普通任务内嵌栈深度（字，64-bit） */
 #define CONFIG_TASK_STACK_WORDS     256
@@ -147,8 +257,6 @@
 #define CONFIG_LB_PRIO_SCALE        4
 /** @def CONFIG_LB_CFS_WEIGHT CFS/Hybrid-CFS 基础权重 */
 #define CONFIG_LB_CFS_WEIGHT        3
-/** @def CONFIG_HEAP_POISON 堆喷毒（调试，0=关） */
-#define CONFIG_HEAP_POISON          0
 /** @def CONFIG_SMP_INITIAL_PLACE 新建任务放到当前最轻载核 */
 #define CONFIG_SMP_INITIAL_PLACE    1
 
@@ -193,6 +301,39 @@ typedef int                         BaseType_t;
 #define errQUEUE_EMPTY              (-1)
 /** @def errQUEUE_FULL 队列满 */
 #define errQUEUE_FULL               (-2)
+/** @def errTIMEOUT 阻塞超时 */
+#define errTIMEOUT                  (-3)
+/** @def errPARAM 参数非法 */
+#define errPARAM                    (-4)
+/** @def errNO_MEM 资源/内存不足 */
+#define errNO_MEM                   (-5)
+/** @def errISR 中断上下文禁止调用 */
+#define errISR                      (-6)
+/** @def errDEADLOCK 死锁检测命中 */
+#define errDEADLOCK                 (-7)
+/** @def errOVERFLOW 溢出/二次释放等 */
+#define errOVERFLOW                 (-8)
+/** @def errSTATE 对象状态非法（重复删除等） */
+#define errSTATE                    (-9)
+
+/** @def CGRTOS_LOG_NONE 关闭日志 */
+#define CGRTOS_LOG_NONE             0
+#define CGRTOS_LOG_ERROR            1
+#define CGRTOS_LOG_WARN             2
+#define CGRTOS_LOG_INFO             3
+#define CGRTOS_LOG_DEBUG            4
+
+#if CONFIG_USE_KLOG
+#define CGRTOS_LOGE(tag, msg) cgrtos_log(CGRTOS_LOG_ERROR, (tag), (msg))
+#define CGRTOS_LOGW(tag, msg) cgrtos_log(CGRTOS_LOG_WARN, (tag), (msg))
+#define CGRTOS_LOGI(tag, msg) cgrtos_log(CGRTOS_LOG_INFO, (tag), (msg))
+#define CGRTOS_LOGD(tag, msg) cgrtos_log(CGRTOS_LOG_DEBUG, (tag), (msg))
+#else
+#define CGRTOS_LOGE(tag, msg) ((void)0)
+#define CGRTOS_LOGW(tag, msg) ((void)0)
+#define CGRTOS_LOGI(tag, msg) ((void)0)
+#define CGRTOS_LOGD(tag, msg) ((void)0)
+#endif
 
 /** @brief 系统节拍计数类型 */
 typedef uint64_t                    tick_t;
@@ -213,6 +354,7 @@ typedef enum {
     TASK_RUNNING,     /**< 正在某核上运行 */
     TASK_BLOCKED,     /**< 阻塞（延时/IPC/通知） */
     TASK_SUSPENDED,   /**< 被挂起 */
+    TASK_TERMINATED,  /**< 已退出，等待回收为 DELETED */
     TASK_DELETED      /**< 已删除，槽可复用 */
 } task_state_t;
 
@@ -247,6 +389,7 @@ typedef enum {
     eBlocked,
     eSuspended,
     eDeleted,
+    eTerminated,
     eInvalid
 } eTaskState_t;
 
@@ -272,14 +415,26 @@ typedef struct cgrtos_task {
     char                name[CGRTOS_TASK_NAME_MAX];
     task_id_t           id;              /* unique id; 0 = free / idle slot */
     uint8_t             prio;            /* current effective priority */
-    uint8_t             base_prio;       /* priority before PI boost */
+    uint8_t             base_prio;       /* priority before PI / DPCP boost */
+#if CONFIG_USE_PREEMPT_THRESH
+    uint8_t             preempt_thresh;  /* 抢占阈值：仅更高 prio 可抢占 */
+#endif
     task_state_t        state;
     sched_policy_t      policy;
+    task_func_t         entry_fn;        /* 用户入口（bootstrap 调用） */
+    void               *entry_arg;
     block_reason_t      block_reason;
     tick_t              wake_tick;       /* delayed-list absolute wake time */
     tick_t              deadline;        /* EDF absolute deadline */
     tick_t              period;          /* EDF period (0 = sporadic) */
     tick_t              exec;            /* ticks spent running (stats) */
+#if CONFIG_SCHED_STATS
+    tick_t              ready_since;     /* 进入 READY 的 g_ticks */
+    tick_t              max_sched_latency;
+    tick_t              last_sched_latency;
+    uint64_t            sched_latency_sum;
+    uint32_t            sched_latency_samples;
+#endif
     tick_t              vruntime;        /* CFS virtual runtime */
     tick_t              last_run;        /* last dispatch tick */
     tick_t              slice_remain;    /* RR/CFS remaining time slice */
@@ -329,7 +484,25 @@ typedef struct {
     uint32_t       asserts;                               /**< 断言失败次数 */
     unsigned long  free_heap;                             /**< 当前空闲堆 */
     unsigned long  min_free_heap;                         /**< 历史最小空闲堆 */
+#if CONFIG_SCHED_STATS
+    tick_t         max_sched_latency;                     /**< 全局最大调度延迟 */
+    uint32_t       sched_latency_samples;                 /**< 延迟采样次数 */
+#endif
 } cgrtos_runtime_stats_t;
+
+#if CONFIG_SCHED_STATS
+/**
+ * @brief 单任务调度统计
+ */
+typedef struct {
+    tick_t   max_latency;
+    tick_t   last_latency;
+    uint64_t latency_sum;
+    uint32_t latency_samples;
+    tick_t   exec_ticks;
+    uint32_t cpu_util_permille; /**< exec/uptime*1000；uptime=0 则为 0 */
+} cgrtos_task_sched_stats_t;
+#endif
 
 /* -------------------------------------------------------------------------- */
 /* IPC objects                                                                */
@@ -356,8 +529,16 @@ typedef struct {
 typedef struct {
     cgrtos_task_t      *owner;     /**< 当前持有者 */
     uint8_t             owner_prio;/**< 持有者拿锁时的优先级 */
-    uint8_t             inherit;   /**< 是否启用优先级继承 */
+    uint8_t             inherit;   /**< 1=优先级继承 PI（非 DPCP 时） */
     uint8_t             in_use;    /**< 池槽占用标志 */
+#if CONFIG_USE_DPCP
+    uint8_t             dpcp;      /**< 1=启用 DPCP 天花板 */
+    uint8_t             ceiling_prio; /**< FP 优先级天花板 */
+    tick_t              ceiling_rel;  /**< EDF 相对 deadline 天花板；0=不用 */
+    uint8_t             saved_prio;   /**< 加锁前 prio */
+    tick_t              saved_deadline; /**< 加锁前 deadline */
+    uint8_t             ceiling_applied; /**< 是否已应用天花板 */
+#endif
     uint32_t            recursive; /**< 递归加锁深度 */
     spinlock_t          lock;
     cgrtos_task_t      *volatile wait_q;
@@ -645,6 +826,21 @@ int cgrtos_task_suspend(task_id_t id);
 int cgrtos_task_resume(task_id_t id);
 /** @brief 设置优先级 */
 int cgrtos_task_set_priority(task_id_t id, uint8_t prio);
+#if CONFIG_USE_PREEMPT_THRESH
+/**
+ * @brief 设置抢占阈值
+ * @param thresh 须 >= 当前 base_prio；仅更高优先级可抢占
+ * @return pdPASS / pdFAIL
+ */
+int cgrtos_task_set_preempt_threshold(task_id_t id, uint8_t thresh);
+/** @brief 读抢占阈值 */
+uint8_t cgrtos_task_get_preempt_threshold(task_id_t id);
+#endif
+/**
+ * @brief 当前任务正常退出（TERMINATED→DELETED）；永不返回
+ * @note 任务入口返回时由 bootstrap 自动调用
+ */
+void cgrtos_task_exit(void);
 /**
  * @brief 设置 CPU 亲和性
  * @param cpu 0xFF=任意核；否则硬绑定
@@ -757,6 +953,18 @@ int cgrtos_sem_delete(cgrtos_sem_t *sem);
 
 /** @brief 创建互斥量 */
 cgrtos_mutex_t *cgrtos_mutex_create(void);
+#if CONFIG_USE_DPCP
+/**
+ * @brief 创建启用 DPCP 的互斥量
+ * @param ceiling_prio FP 天花板（0..CONFIG_MAX_PRIORITY）
+ * @param ceiling_rel  EDF 相对 deadline 天花板；0 表示仅用优先级天花板
+ */
+cgrtos_mutex_t *cgrtos_mutex_create_dpcp(uint8_t ceiling_prio, tick_t ceiling_rel);
+/** @brief 配置/更新天花板；mutex 须空闲（无 owner） */
+int cgrtos_mutex_set_ceiling(cgrtos_mutex_t *mutex, uint8_t ceiling_prio,
+                             tick_t ceiling_rel);
+#endif
+
 /** @brief 静态创建互斥量 */
 cgrtos_mutex_t *cgrtos_mutex_create_static(cgrtos_mutex_t *mutex);
 /**
@@ -1100,6 +1308,69 @@ void cgrtos_set_assert_hook(cgrtos_assert_hook_t hook);
 /** @brief 注册栈溢出钩子 */
 void cgrtos_set_stack_overflow_hook(cgrtos_stack_overflow_hook_t hook);
 
+#if CONFIG_USE_HOOKS
+void cgrtos_set_task_create_hook(cgrtos_hook_fn_t hook);
+void cgrtos_set_task_delete_hook(cgrtos_hook_fn_t hook);
+void cgrtos_set_isr_api_hook(cgrtos_hook_fn_t hook);
+void cgrtos_set_sched_error_hook(cgrtos_hook_fn_t hook);
+void cgrtos_set_irq_exception_hook(cgrtos_hook_fn_t hook);
+void cgrtos_set_watchdog_hook(cgrtos_hook_fn_t hook);
+void cgrtos_set_crit_overrun_hook(cgrtos_hook_fn_t hook);
+#if CONFIG_IDLE_SLEEP_HOOK
+void cgrtos_set_idle_sleep_hook(cgrtos_hook_fn_t hook);
+#endif
+#endif
+
+/* --- 模块3 内存池 --- */
+typedef struct cgrtos_mempool cgrtos_mempool_t;
+cgrtos_mempool_t *cgrtos_mempool_create(void *storage, uint32_t block_size,
+                                        uint32_t block_count);
+void *cgrtos_mempool_alloc(cgrtos_mempool_t *pool);
+int cgrtos_mempool_free(cgrtos_mempool_t *pool, void *ptr);
+int cgrtos_mempool_delete(cgrtos_mempool_t *pool);
+uint32_t cgrtos_mempool_free_count(cgrtos_mempool_t *pool);
+
+/* --- 模块4 安全 --- */
+int cgrtos_reject_blocking_in_isr(void);
+void cgrtos_safety_on_crit_enter(uint8_t cpu);
+void cgrtos_safety_on_crit_exit(uint8_t cpu);
+uint32_t cgrtos_crit_overrun_count(void);
+uint64_t cgrtos_crit_max_cycles(uint8_t cpu);
+void cgrtos_fatal_error(const char *reason, int code);
+void cgrtos_watchdog_kick(void);
+
+/* --- 模块4 MPU 桩 --- */
+typedef struct {
+    uintptr_t base;
+    uint32_t  size;
+    uint32_t  attr; /* bit0=R bit1=W bit2=X */
+} cgrtos_mpu_region_t;
+int cgrtos_mpu_init(void);
+int cgrtos_mpu_configure_region(uint32_t idx, const cgrtos_mpu_region_t *r);
+int cgrtos_mpu_enable_task_isolation(task_id_t id);
+int cgrtos_mpu_disable_task_isolation(task_id_t id);
+
+/* --- 模块6 日志 / 任务导出 --- */
+void cgrtos_log_set_level(int level);
+int cgrtos_log_get_level(void);
+void cgrtos_log(int level, const char *tag, const char *msg);
+
+typedef struct {
+    task_id_t       id;
+    char            name[CGRTOS_TASK_NAME_MAX];
+    uint8_t         prio;
+    task_state_t    state;
+    sched_policy_t  policy;
+    tick_t          exec_ticks;
+    uint32_t        stack_hwm; /* words unused from bottom */
+} cgrtos_task_info_t;
+
+/**
+ * @brief 导出任务列表到缓冲区
+ * @return 写入条数；out 为 NULL 时返回当前任务数
+ */
+uint32_t cgrtos_task_list_export(cgrtos_task_info_t *out, uint32_t max);
+
 /** @brief 打印运行时统计到 UART */
 void cgrtos_stats_dump(void);
 /**
@@ -1107,6 +1378,12 @@ void cgrtos_stats_dump(void);
  * @param out 输出结构；NULL 则忽略
  */
 void cgrtos_stats_get(cgrtos_runtime_stats_t *out);
+#if CONFIG_SCHED_STATS
+int cgrtos_task_get_sched_stats(task_id_t id, cgrtos_task_sched_stats_t *out);
+void cgrtos_sched_stats_get(tick_t *max_latency_global, uint32_t *samples);
+void cgrtos_sched_stats_reset(void);
+#endif
+
 /** @brief 任务累计运行 tick（exec 字段） */
 tick_t cgrtos_task_get_runtime(task_id_t id);
 /**
@@ -1347,6 +1624,11 @@ void cgrtos_assert_failed(const char *file, int line);
 uint8_t cgrtos_sched_target_core(cgrtos_task_t *task);
 /** @brief 按策略插入就绪结构 */
 void cgrtos_sched_add_ready(cgrtos_task_t *task);
+/**
+ * @brief 刷新推迟的 MC-EDF 踢核（exit_critical 最外层调用）
+ * @note 持 g_klock 期间 EDF 入队只置 pending，出锁后再 IPI，避免死锁
+ */
+void cgrtos_sched_edf_kick_flush(void);
 /** @brief 从就绪结构移除 */
 void cgrtos_sched_remove_ready(cgrtos_task_t *task);
 /**

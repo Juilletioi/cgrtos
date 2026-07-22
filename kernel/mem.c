@@ -40,6 +40,10 @@
 #define TLSF_BLOCK_USED     0U
 /** @def TLSF_BLOCK_MAGIC 块魔数，用于校验 */
 #define TLSF_BLOCK_MAGIC    0xC0DECAFEU
+/** @def TLSF_REDZONE_MAGIC 用户区尾金丝雀 */
+#define TLSF_REDZONE_MAGIC  0xBEEFCAFEu
+/** @def TLSF_POISON_BYTE 释放后喷毒字节 */
+#define TLSF_POISON_BYTE    0xA5u
 
 /** @brief TLSF 内存块头 */
 typedef struct tlsf_block {
@@ -482,6 +486,20 @@ void *cgrtos_malloc(unsigned long size)
     heap_update_min_free();
 
     void *ptr = (void *)((uint8_t *)block + TLSF_BLOCK_HDR);
+#if CONFIG_HEAP_POISON
+    memset(ptr, 0xCD, req);
+#endif
+#if CONFIG_HEAP_REDZONE
+    /* 在用户请求 size 之后写 4 字节金丝雀（需块够大；req 已对齐） */
+    if (tlsf_block_size(block) >= req + 4U) {
+        uint32_t *rz = (uint32_t *)((uint8_t *)ptr + req);
+        *rz = TLSF_REDZONE_MAGIC;
+        /* 把实际请求长度藏在 magic 旁：用 prev_free 暂存 req（USED 块不用 free 链） */
+        block->prev_free = (tlsf_block_t *)(uintptr_t)req;
+    } else {
+        block->prev_free = 0;
+    }
+#endif
     cgrtos_exit_critical();
     return ptr;
 }
@@ -531,12 +549,31 @@ void cgrtos_free(void *ptr)
     tlsf_block_t *block = tlsf_block_from_ptr(ptr);
     if (block->magic != TLSF_BLOCK_MAGIC || tlsf_block_is_free(block)) {
         cgrtos_exit_critical();
+        CGRTOS_LOGE("heap", "double-free or bad magic");
         return;
     }
 
+#if CONFIG_HEAP_REDZONE
+    if (block->prev_free) {
+        uint32_t req = (uint32_t)(uintptr_t)block->prev_free;
+        if (tlsf_block_size(block) >= req + 4U) {
+            uint32_t *rz = (uint32_t *)((uint8_t *)ptr + req);
+            if (*rz != TLSF_REDZONE_MAGIC) {
+                cgrtos_exit_critical();
+                CGRTOS_LOGE("heap", "buffer overrun (redzone)");
+                return;
+            }
+        }
+    }
+#endif
+
     /* 3. 递减 g_heap_used，标记 FREE，tlsf_merge_block 与邻居合并 */
     g_heap_used -= TLSF_BLOCK_HDR + tlsf_block_size(block);
+#if CONFIG_HEAP_POISON
+    memset(ptr, TLSF_POISON_BYTE, tlsf_block_size(block));
+#endif
     tlsf_set_block_size(block, tlsf_block_size(block), 1);
+    block->prev_free = 0;
     tlsf_merge_block(block);
     /* 4. heap_update_min_free，退出临界区 */
     heap_update_min_free();

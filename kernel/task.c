@@ -26,6 +26,13 @@ extern char __global_pointer$;
 
 #if CONFIG_USE_HOOKS
 extern cgrtos_hook_fn_t g_idle_hook;
+#if CONFIG_IDLE_SLEEP_HOOK
+cgrtos_hook_fn_t g_idle_sleep_hook;
+void cgrtos_set_idle_sleep_hook(cgrtos_hook_fn_t hook)
+{
+    g_idle_sleep_hook = hook;
+}
+#endif
 #endif
 
 /**
@@ -41,6 +48,23 @@ extern cgrtos_hook_fn_t g_idle_hook;
  * 4. mstatus 设为 M 模式、MPIE=1、MIE=0，使 mret 进入任务时中断仍关闭直至调度器开启。
  * 5. 返回 sp 供 TCB->sp 保存，供 start_first_task / context_switch 使用。
  */
+
+/**
+ * @brief 任务入口 trampoline：调用用户函数后强制 exit，闭环 TERMINATED
+ * @details 步骤：1. 取本核 current；2. 调 entry_fn(entry_arg)；3. cgrtos_task_exit。
+ * @note mepc 指向本函数；禁止用户函数 return 后跑飞。
+ */
+static void task_bootstrap(void *arg)
+{
+    (void)arg;
+    uint8_t cpu = (uint8_t)read_csr(mhartid);
+    cgrtos_task_t *self = g_current[cpu];
+    if (self && self->entry_fn) {
+        self->entry_fn(self->entry_arg);
+    }
+    cgrtos_task_exit();
+}
+
 static uint64_t *task_init_stack(cgrtos_task_t *task, task_func_t fn, void *arg)
 {
     /* 1. 栈顶 16 字节对齐后向下分配 trap 帧 */
@@ -81,7 +105,8 @@ static cgrtos_task_t *task_alloc_slot(void)
     for (uint32_t i = 0; i < CONFIG_MAX_TASKS; i++) {
         cgrtos_task_t *t = &g_tasks[i];
         /* 1. 跳过仍被占用的有效任务槽 */
-        if (t->id != 0 && t->state != TASK_DELETED) {
+        if (t->id != 0 && t->state != TASK_DELETED &&
+            t->state != TASK_TERMINATED) {
             continue;
         }
         /* 2. 检查是否仍被任意核作为当前运行任务引用 */
@@ -133,6 +158,7 @@ static eTaskState_t task_state_to_enum(task_state_t state)
     case TASK_RUNNING:  return eRunning;
     case TASK_BLOCKED:  return eBlocked;
     case TASK_SUSPENDED: return eSuspended;
+    case TASK_TERMINATED: return eTerminated;
     case TASK_DELETED:  return eDeleted;
     default:            return eInvalid;
     }
@@ -163,6 +189,11 @@ task_id_t cgrtos_task_create(const char *name, task_func_t fn, void *arg,
     if (!fn) {
         return (task_id_t)-1;
     }
+#if !CONFIG_USE_EDF
+    if (policy == SCHED_EDF) {
+        return (task_id_t)-1;
+    }
+#endif
     if (prio > CONFIG_MAX_PRIORITY) {
         prio = CONFIG_MAX_PRIORITY;
     }
@@ -200,7 +231,12 @@ task_id_t cgrtos_task_create(const char *name, task_func_t fn, void *arg,
     task->name[CGRTOS_TASK_NAME_MAX - 1] = 0;
     task->prio = prio;
     task->base_prio = prio;
+#if CONFIG_USE_PREEMPT_THRESH
+    task->preempt_thresh = prio; /* 默认与 prio 相同 = 经典抢占 */
+#endif
     task->policy = policy;
+    task->entry_fn = fn;
+    task->entry_arg = arg;
     task->cpu_aff = 0xFF;
 #if CONFIG_SMP_INITIAL_PLACE
     task->run_cpu = cgrtos_sched_least_loaded_core();
@@ -208,13 +244,31 @@ task_id_t cgrtos_task_create(const char *name, task_func_t fn, void *arg,
     task->run_cpu = (uint8_t)read_csr(mhartid);
 #endif
     task->slice_remain = CONFIG_TIME_SLICE_TICKS;
-    /* 6. 构建 trap 帧并加入就绪队列 */
-    task->sp = task_init_stack(task, fn, arg);
+    /* 6. 构建 trap 帧（bootstrap）并加入就绪队列 */
+    task->sp = task_init_stack(task, task_bootstrap, 0);
     task->last_run = g_ticks;
+#if CONFIG_SCHED_STATS
+    task->ready_since = g_ticks;
+#endif
+#if CONFIG_USE_EDF
+    /* 创建时 deadline=now，首轮即可参与紧迫窗口；set_period 后再对齐周期 */
+    if (policy == SCHED_EDF) {
+        task->deadline = g_ticks;
+    }
+#endif
 
     cgrtos_sched_add_ready(task);
     g_task_create_count++;
     cgrtos_exit_critical();
+
+#if CONFIG_USE_HOOKS
+    {
+        extern cgrtos_hook_fn_t g_task_create_hook;
+        if (g_task_create_hook) {
+            g_task_create_hook();
+        }
+    }
+#endif
 
     /* 7. 对端核需 IPI 才能调度新就绪任务 */
 #if CONFIG_NUM_CORES > 1
@@ -317,6 +371,15 @@ int cgrtos_task_delete(task_id_t id)
         cgrtos_smp_send_ipi(run);
     }
     cgrtos_exit_critical();
+
+#if CONFIG_USE_HOOKS
+    {
+        extern cgrtos_hook_fn_t g_task_delete_hook;
+        if (g_task_delete_hook) {
+            g_task_delete_hook();
+        }
+    }
+#endif
 
     /* yield：自删或同核 RUNNING 时尽快切走 */
     cgrtos_sched_yield();
@@ -489,6 +552,11 @@ int cgrtos_task_set_priority(task_id_t id, uint8_t prio)
 
     task->prio = prio;
     task->base_prio = prio;
+#if CONFIG_USE_PREEMPT_THRESH
+    if (task->preempt_thresh < prio) {
+        task->preempt_thresh = prio;
+    }
+#endif
 
     if (task->state == TASK_READY) {
         cgrtos_sched_add_ready(task);
@@ -498,6 +566,103 @@ int cgrtos_task_set_priority(task_id_t id, uint8_t prio)
     cgrtos_sched_yield();
     return pdPASS;
 }
+
+#if CONFIG_USE_PREEMPT_THRESH
+/**
+ * @brief 设置抢占阈值
+ * @details 步骤：1. 查 TCB；2. thresh 须 >= base_prio 且 <= MAX；3. 写入字段；4. yield。
+ * @risk 阈值过高会推迟高优先级响应，仅用于短临界段降低抖动。
+ */
+int cgrtos_task_set_preempt_threshold(task_id_t id, uint8_t thresh)
+{
+    if (thresh > CONFIG_MAX_PRIORITY) {
+        return pdFAIL;
+    }
+    cgrtos_enter_critical();
+    cgrtos_task_t *task = task_find(id);
+    if (!task) {
+        cgrtos_exit_critical();
+        return pdFAIL;
+    }
+    if (thresh < task->base_prio) {
+        cgrtos_exit_critical();
+        return pdFAIL;
+    }
+    task->preempt_thresh = thresh;
+    cgrtos_exit_critical();
+    cgrtos_sched_yield();
+    return pdPASS;
+}
+
+uint8_t cgrtos_task_get_preempt_threshold(task_id_t id)
+{
+    cgrtos_enter_critical();
+    cgrtos_task_t *task = task_find(id);
+    uint8_t v = 0;
+    if (task) {
+        v = task->preempt_thresh;
+    }
+    cgrtos_exit_critical();
+    return v;
+}
+#endif /* CONFIG_USE_PREEMPT_THRESH */
+
+/**
+ * @brief 当前任务退出：TERMINATED → 复用 delete 路径
+ * @details 步骤：1. 取 current；2. 置 TERMINATED；3. 调 delete(self) 进入 DELETED/回收。
+ * @note 永不返回；idle 禁止。
+ */
+void cgrtos_task_exit(void)
+{
+    uint8_t cpu = (uint8_t)read_csr(mhartid);
+    cgrtos_task_t *cur = g_current[cpu];
+    if (!cur || cur->id == 0) {
+        /* 无效 current：不可空转占核；强制挂起本任务上下文 */
+        while (1) {
+            cgrtos_task_yield();
+        }
+    }
+    for (uint8_t c = 0; c < CONFIG_NUM_CORES; c++) {
+        if (cur == &g_idle[c]) {
+            while (1) {
+                cgrtos_task_yield();
+            }
+        }
+    }
+    cur->state = TASK_TERMINATED;
+    (void)cgrtos_task_delete(cur->id);
+    while (1) {
+        cgrtos_task_yield();
+    }
+}
+
+#if CONFIG_SCHED_STATS
+int cgrtos_task_get_sched_stats(task_id_t id, cgrtos_task_sched_stats_t *out)
+{
+    if (!out) {
+        return pdFAIL;
+    }
+    cgrtos_enter_critical();
+    cgrtos_task_t *task = task_find(id);
+    if (!task) {
+        cgrtos_exit_critical();
+        return pdFAIL;
+    }
+    out->max_latency = task->max_sched_latency;
+    out->last_latency = task->last_sched_latency;
+    out->latency_sum = task->sched_latency_sum;
+    out->latency_samples = task->sched_latency_samples;
+    out->exec_ticks = task->exec;
+    if (g_ticks > 0) {
+        out->cpu_util_permille =
+            (uint32_t)((task->exec * 1000ULL) / (uint64_t)g_ticks);
+    } else {
+        out->cpu_util_permille = 0;
+    }
+    cgrtos_exit_critical();
+    return pdPASS;
+}
+#endif
 
 /**
  * @brief 设置任务 CPU 亲和性（硬绑定或可迁移）
@@ -558,6 +723,11 @@ int cgrtos_task_set_affinity(task_id_t id, uint8_t cpu)
  */
 int cgrtos_task_set_period(task_id_t id, tick_t period)
 {
+#if !CONFIG_USE_EDF
+    (void)id;
+    (void)period;
+    return pdFAIL;
+#else
     cgrtos_enter_critical();
     cgrtos_task_t *task = task_find(id);
     if (!task) {
@@ -573,6 +743,7 @@ int cgrtos_task_set_period(task_id_t id, tick_t period)
     }
     cgrtos_exit_critical();
     return pdPASS;
+#endif
 }
 
 /**
@@ -1102,6 +1273,11 @@ void cgrtos_idle_task_entry(void *arg)
         if (g_idle_hook) {
             g_idle_hook();
         }
+#if CONFIG_IDLE_SLEEP_HOOK
+        if (g_idle_sleep_hook) {
+            g_idle_sleep_hook();
+        }
+#endif
 #endif
         /* 1. 睡眠/忙等前先尝试从过载核窃取就绪任务 */
         cgrtos_sched_idle_steal();
@@ -1121,7 +1297,7 @@ void cgrtos_idle_task_entry(void *arg)
             }
         }
 #else
-        /* 2. 非 busy 模式执行 WFI 等待中断 */
+        /* 2. 非 busy 模式：低功耗 WFI（真实硅片入口） */
         asm volatile("wfi" ::: "memory");
 #endif
 
@@ -1154,6 +1330,9 @@ void cgrtos_init_idle_tasks(void)
         cgrtos_snprintf(g_idle[i].name, CGRTOS_TASK_NAME_MAX, "idle_%d", i);
         g_idle[i].prio = 0;
         g_idle[i].base_prio = 0;
+#if CONFIG_USE_PREEMPT_THRESH
+        g_idle[i].preempt_thresh = 0;
+#endif
         g_idle[i].state = TASK_READY;
         g_idle[i].policy = SCHED_RR;
         g_idle[i].cpu_aff = (uint8_t)i;
@@ -1164,4 +1343,35 @@ void cgrtos_init_idle_tasks(void)
                                        (void *)(uintptr_t)i);
         g_current[i] = &g_idle[i];
     }
+}
+
+/**
+ * @brief 导出任务列表（模块6）
+ */
+uint32_t cgrtos_task_list_export(cgrtos_task_info_t *out, uint32_t max)
+{
+    uint32_t n = 0;
+    uint32_t i;
+
+    cgrtos_enter_critical();
+    for (i = 0; i < CONFIG_MAX_TASKS; i++) {
+        cgrtos_task_t *t = &g_tasks[i];
+        if (t->id == 0 || t->state == TASK_DELETED) {
+            continue;
+        }
+        if (out && n < max) {
+            out[n].id = t->id;
+            strncpy(out[n].name, t->name, CGRTOS_TASK_NAME_MAX - 1);
+            out[n].name[CGRTOS_TASK_NAME_MAX - 1] = 0;
+            out[n].prio = t->prio;
+            out[n].state = t->state;
+            out[n].policy = t->policy;
+            out[n].exec_ticks = t->exec;
+            out[n].stack_hwm = cgrtos_task_get_stack_high_water_mark(t->id);
+        }
+        n++;
+    }
+    cgrtos_exit_critical();
+    (void)max;
+    return n;
 }

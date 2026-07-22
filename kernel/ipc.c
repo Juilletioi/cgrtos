@@ -83,8 +83,39 @@ tick_t timeout)
  */
 static int wait_result(cgrtos_task_t *task)
 {
-    return (task && task->wake_ok) ? pdPASS : pdFAIL;
+    if (!task) {
+        return errPARAM;
+    }
+    return task->wake_ok ? pdPASS : errTIMEOUT;
 }
+
+#if CONFIG_DETECT_DEADLOCK
+/**
+ * @brief 检测 mutex 等待环：owner 链上若回到 self 则死锁
+ * @note 调用方已持 g_klock
+ */
+static int mutex_would_deadlock(cgrtos_mutex_t *mutex, cgrtos_task_t *self)
+{
+    cgrtos_task_t *t;
+    int depth = 0;
+    if (!mutex || !self) {
+        return 0;
+    }
+    t = mutex->owner;
+    while (t && depth < 16) {
+        if (t == self) {
+            return 1;
+        }
+        if (t->state != TASK_BLOCKED || t->block_reason != BLOCK_MUTEX ||
+            !t->block_obj) {
+            break;
+        }
+        t = ((cgrtos_mutex_t *)t->block_obj)->owner;
+        depth++;
+    }
+    return 0;
+}
+#endif
 
 /**
  * @brief 动态创建计数信号量
@@ -184,8 +215,13 @@ int cgrtos_sem_take(cgrtos_sem_t *sem, tick_t timeout)
 {
     /* 1. 参数校验 */
     if (!sem) {
-        return pdFAIL;
+        return errPARAM;
     }
+#if CONFIG_ISR_API_GUARD
+    if (cgrtos_reject_blocking_in_isr()) {
+        return errISR;
+    }
+#endif
 
     /* 2. 进入临界区 */
     cgrtos_enter_critical();
@@ -200,7 +236,7 @@ int cgrtos_sem_take(cgrtos_sem_t *sem, tick_t timeout)
     /* 4. 非阻塞模式立即失败 */
     if (timeout == 0) {
         cgrtos_exit_critical();
-        return pdFAIL;
+        return errTIMEOUT;
     }
 
     /* 5. 挂入等待队列并 yield */
@@ -421,6 +457,53 @@ cgrtos_mutex_t *cgrtos_mutex_create_static(cgrtos_mutex_t *mutex)
     return mutex;
 }
 
+#if CONFIG_USE_DPCP
+/**
+ * @brief 创建 DPCP 互斥量
+ * @details inherit=0；dpcp=1；写入天花板。
+ */
+cgrtos_mutex_t *cgrtos_mutex_create_dpcp(uint8_t ceiling_prio, tick_t ceiling_rel)
+{
+    if (ceiling_prio > CONFIG_MAX_PRIORITY) {
+        return 0;
+    }
+    cgrtos_mutex_t *m = cgrtos_mutex_create();
+    if (!m) {
+        return 0;
+    }
+    m->inherit = 0;
+    m->dpcp = 1;
+    m->ceiling_prio = ceiling_prio;
+    m->ceiling_rel = ceiling_rel;
+    m->ceiling_applied = 0;
+    return m;
+}
+
+/**
+ * @brief 更新天花板（须无 owner）
+ */
+int cgrtos_mutex_set_ceiling(cgrtos_mutex_t *mutex, uint8_t ceiling_prio,
+                             tick_t ceiling_rel)
+{
+    if (!mutex || ceiling_prio > CONFIG_MAX_PRIORITY) {
+        return pdFAIL;
+    }
+    cgrtos_enter_critical();
+    if (mutex->owner) {
+        cgrtos_exit_critical();
+        return pdFAIL;
+    }
+    mutex->dpcp = 1;
+    mutex->inherit = 0;
+    mutex->ceiling_prio = ceiling_prio;
+    mutex->ceiling_rel = ceiling_rel;
+    mutex->ceiling_applied = 0;
+    cgrtos_exit_critical();
+    return pdPASS;
+}
+#endif /* CONFIG_USE_DPCP */
+
+
 /**
  * @brief 对互斥量持有者应用优先级继承
  * 
@@ -434,12 +517,83 @@ cgrtos_mutex_t *cgrtos_mutex_create_static(cgrtos_mutex_t *mutex)
  * 4. 将 owner->prio 提升至 waiter->prio。
  * 5. 若 owner 正在其他核 RUNNING，发送 IPI 触发重调度。
  */
+
+#if CONFIG_USE_DPCP
+/**
+ * @brief DPCP：对 owner 应用天花板（优先级与/或 EDF deadline）
+ * @risk 必须在 g_klock 内；READY 时先出队再改字段再入队，避免队列乱序。
+ */
+static void mutex_apply_dpcp(cgrtos_mutex_t *mutex)
+{
+    cgrtos_task_t *owner;
+    if (!mutex || !mutex->dpcp || !mutex->owner || mutex->ceiling_applied) {
+        return;
+    }
+    owner = mutex->owner;
+    mutex->saved_prio = owner->prio;
+    mutex->saved_deadline = owner->deadline;
+
+    if (owner->state == TASK_READY) {
+        cgrtos_sched_remove_ready(owner);
+    }
+
+    if (mutex->ceiling_prio > owner->prio) {
+        owner->prio = mutex->ceiling_prio;
+    }
+#if CONFIG_USE_EDF
+    if (owner->policy == SCHED_EDF && mutex->ceiling_rel != 0) {
+        tick_t ceil_abs = g_ticks + mutex->ceiling_rel;
+        if (owner->deadline > ceil_abs) {
+            owner->deadline = ceil_abs;
+        }
+    }
+#endif
+
+    if (owner->state == TASK_READY) {
+        cgrtos_sched_add_ready(owner);
+    } else if (owner->state == TASK_RUNNING &&
+               owner->run_cpu != (uint8_t)read_csr(mhartid) &&
+               owner->run_cpu < CONFIG_NUM_CORES) {
+        cgrtos_smp_send_ipi(owner->run_cpu);
+    }
+    mutex->ceiling_applied = 1;
+}
+
+/**
+ * @brief DPCP：解锁时恢复 owner 的 prio/deadline
+ */
+static void mutex_restore_dpcp(cgrtos_mutex_t *mutex)
+{
+    cgrtos_task_t *owner;
+    if (!mutex || !mutex->dpcp || !mutex->owner || !mutex->ceiling_applied) {
+        return;
+    }
+    owner = mutex->owner;
+    if (owner->state == TASK_READY) {
+        cgrtos_sched_remove_ready(owner);
+    }
+    owner->prio = mutex->saved_prio;
+#if CONFIG_USE_EDF
+    owner->deadline = mutex->saved_deadline;
+#endif
+    if (owner->state == TASK_READY) {
+        cgrtos_sched_add_ready(owner);
+    }
+    mutex->ceiling_applied = 0;
+}
+#endif /* CONFIG_USE_DPCP */
+
 static void mutex_apply_inheritance(cgrtos_mutex_t *mutex, cgrtos_task_t *waiter)
 {
-    /* 1. 检查 PI 前置条件 */
+    /* 1. 检查 PI 前置条件（DPCP 用天花板，不做动态 PI） */
     if (!mutex->inherit || !mutex->owner || !waiter) {
         return;
     }
+#if CONFIG_USE_DPCP
+    if (mutex->dpcp) {
+        return;
+    }
+#endif
     if (waiter->prio <= mutex->owner->prio) {
         return;
     }
@@ -475,6 +629,11 @@ static void mutex_boost_from_waiters(cgrtos_mutex_t *mutex)
     if (!mutex->inherit || !mutex->owner || !mutex->wait_q) {
         return;
     }
+#if CONFIG_USE_DPCP
+    if (mutex->dpcp) {
+        return;
+    }
+#endif
     cgrtos_task_t *top = mutex->wait_q;
     if (top->prio > mutex->owner->prio) {
         mutex_apply_inheritance(mutex, top);
@@ -528,8 +687,13 @@ int cgrtos_mutex_lock(cgrtos_mutex_t *mutex, tick_t timeout)
 {
     /* 1. 参数校验 */
     if (!mutex) {
-        return pdFAIL;
+        return errPARAM;
     }
+#if CONFIG_ISR_API_GUARD
+    if (cgrtos_reject_blocking_in_isr()) {
+        return errISR;
+    }
+#endif
 
     /* 2. 进入临界区 */
     cgrtos_enter_critical();
@@ -537,7 +701,7 @@ int cgrtos_mutex_lock(cgrtos_mutex_t *mutex, tick_t timeout)
     cgrtos_task_t *cur = g_current[cpu];
     if (!cur) {
         cgrtos_exit_critical();
-        return pdFAIL;
+        return errPARAM;
     }
 
     /* 3. 递归加锁：同一 owner 递增 recursive（受 CONFIG_MUTEX_MAX_RECURSIVE 限制） */
@@ -545,7 +709,7 @@ int cgrtos_mutex_lock(cgrtos_mutex_t *mutex, tick_t timeout)
         if (mutex->recursive >= CONFIG_MUTEX_MAX_RECURSIVE) {
             cgrtos_exit_critical();
             CGRTOS_ASSERT(mutex->recursive < CONFIG_MUTEX_MAX_RECURSIVE);
-            return pdFAIL;
+            return errOVERFLOW;
         }
         mutex->recursive++;
         cgrtos_exit_critical();
@@ -556,6 +720,11 @@ int cgrtos_mutex_lock(cgrtos_mutex_t *mutex, tick_t timeout)
     if (!mutex->owner) {
         mutex->owner = cur;
         mutex->owner_prio = cur->prio;
+#if CONFIG_USE_DPCP
+        if (mutex->dpcp) {
+            mutex_apply_dpcp(mutex);
+        }
+#endif
         cgrtos_exit_critical();
         return pdPASS;
     }
@@ -563,8 +732,17 @@ int cgrtos_mutex_lock(cgrtos_mutex_t *mutex, tick_t timeout)
     /* 5. 非阻塞模式立即失败 */
     if (timeout == 0) {
         cgrtos_exit_critical();
-        return pdFAIL;
+        return errTIMEOUT;
     }
+
+#if CONFIG_DETECT_DEADLOCK
+    /* 5b. 等待环检测 */
+    if (mutex_would_deadlock(mutex, cur)) {
+        cgrtos_exit_critical();
+        CGRTOS_LOGE("mtx", "deadlock detected");
+        return errDEADLOCK;
+    }
+#endif
 
     /* 6. 应用 PI 并挂入等待队列 */
     mutex_apply_inheritance(mutex, cur);
@@ -614,8 +792,15 @@ int cgrtos_mutex_unlock(cgrtos_mutex_t *mutex)
         return pdPASS;
     }
 
-    /* 4. 恢复 PI 并释放所有权 */
-    mutex_restore_inheritance(mutex);
+    /* 4. 恢复 DPCP/PI 并释放所有权 */
+#if CONFIG_USE_DPCP
+    if (mutex->dpcp) {
+        mutex_restore_dpcp(mutex);
+    } else
+#endif
+    {
+        mutex_restore_inheritance(mutex);
+    }
     mutex->owner = 0;
 
     /* 5. 唤醒最高优先级等待者 */
@@ -623,8 +808,14 @@ int cgrtos_mutex_unlock(cgrtos_mutex_t *mutex)
     if (waiter) {
         mutex->owner = waiter;
         mutex->owner_prio = waiter->base_prio;
-        /* Remaining waiters may still require PI on the new owner. */
-        mutex_boost_from_waiters(mutex);
+#if CONFIG_USE_DPCP
+        if (mutex->dpcp) {
+            mutex_apply_dpcp(mutex);
+        } else
+#endif
+        {
+            mutex_boost_from_waiters(mutex);
+        }
         waiter->wake_ok = 1;
         cgrtos_sched_unblock(waiter);
         cgrtos_exit_critical();
@@ -925,8 +1116,13 @@ int cgrtos_queue_send(cgrtos_queue_t *q, const void *data, tick_t timeout)
 {
     /* 1. 参数校验 */
     if (!q || !data) {
-        return pdFAIL;
+        return errPARAM;
     }
+#if CONFIG_ISR_API_GUARD
+    if (timeout != 0 && cgrtos_reject_blocking_in_isr()) {
+        return errISR;
+    }
+#endif
 
     for (;;) {
         int need_yield = 0;
@@ -1017,8 +1213,13 @@ int cgrtos_queue_send_from_isr(cgrtos_queue_t *q, const void *data, BaseType_t *
 int cgrtos_queue_receive(cgrtos_queue_t *q, void *buf, tick_t timeout)
 {
     if (!q || !buf) {
-        return pdFAIL;
+        return errPARAM;
     }
+#if CONFIG_ISR_API_GUARD
+    if (timeout != 0 && cgrtos_reject_blocking_in_isr()) {
+        return errISR;
+    }
+#endif
 
     for (;;) {
         cgrtos_enter_critical();
@@ -1422,6 +1623,11 @@ tick_t timeout)
     if (!eg) {
         return 0;
     }
+#if CONFIG_ISR_API_GUARD
+    if (timeout != 0 && cgrtos_reject_blocking_in_isr()) {
+        return 0;
+    }
+#endif
 
     cgrtos_enter_critical();
     int matched = wait_all ? ((eg->flags & flags) == flags) :

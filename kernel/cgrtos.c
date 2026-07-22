@@ -212,6 +212,7 @@ void cgrtos_enter_critical(void)
     if (g_crit_nest[cpu] == 0) {
         g_crit_saved[cpu] = cgrtos_irq_save();
         cgrtos_spin_lock(&g_klock);
+        cgrtos_safety_on_crit_enter(cpu);
     }
     /* 3. g_crit_nest[cpu]++ 记录嵌套深度 */
     g_crit_nest[cpu]++;
@@ -235,8 +236,11 @@ void cgrtos_exit_critical(void)
     g_crit_nest[cpu]--;
     /* 3. 嵌套归零时 spin_unlock g_klock，irq_restore 恢复 MIE */
     if (g_crit_nest[cpu] == 0) {
+        cgrtos_safety_on_crit_exit(cpu);
         cgrtos_spin_unlock(&g_klock);
         cgrtos_irq_restore(g_crit_saved[cpu]);
+        /* EDF 入队若在临界区内被推迟，此处补发 kick */
+        cgrtos_sched_edf_kick_flush();
     }
 }
 
@@ -410,8 +414,11 @@ void cgrtos_init(void)
                   CONFIG_TICK_RATE_HZ, CONFIG_MAX_PRIORITY);
     cgrtos_printf("  HAL board: %s | devices=%d\n",
                   HAL_BOARD_NAME, hal_device_count());
-    cgrtos_printf("  Features: weighted LB + steal, MC-EDF, CFS/Hybrid, TLSF\n");
+    cgrtos_printf("  Features: M1-M6 EDF-heap DPCP klog mempool safety\n");
     cgrtos_fs_init();
+#if CONFIG_USE_MPU
+    (void)cgrtos_mpu_init();
+#endif
 }
 
 /**
@@ -555,7 +562,7 @@ void cgrtos_stats_dump(void)
             continue;
         }
         static const char *state_names[] = {
-            "READY", "RUN", "BLOCK", "SUSP", "DEL"
+            "READY", "RUN", "BLOCK", "SUSP", "TERM", "DEL"
         };
         static const char *pol_names[] = {
             "RR", "PRI", "CFS", "EDF", "HYB"
@@ -602,6 +609,15 @@ void cgrtos_stats_get(cgrtos_runtime_stats_t *out)
     out->asserts = g_assert_count;
     out->free_heap = cgrtos_get_free_heap();
     out->min_free_heap = cgrtos_get_min_free_heap();
+#if CONFIG_SCHED_STATS
+    {
+        tick_t ml = 0;
+        uint32_t ns = 0;
+        cgrtos_sched_stats_get(&ml, &ns);
+        out->max_sched_latency = ml;
+        out->sched_latency_samples = ns;
+    }
+#endif
 }
 
 /**

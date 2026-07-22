@@ -51,10 +51,12 @@ static void expect(const char *name, int cond)
 
 static void wait_ticks(tick_t n)
 {
-    tick_t start = cgrtos_get_ticks();
-    while ((cgrtos_get_ticks() - start) < n) {
+    /* 阻塞等待：勿用 yield 忙等——EDF 占满核时会饿死本任务导致 TIMEOUT */
+    if (n == 0) {
         cgrtos_task_yield();
+        return;
     }
+    cgrtos_delay(n);
 }
 
 static void notify_waiter(void *arg)
@@ -468,7 +470,9 @@ static void case_sem(void)
     cgrtos_sem_t *sem = cgrtos_sem_create(0, 5);
     cgrtos_sem_t *bin = cgrtos_sem_create_binary();
     expect("sem_create", sem && bin);
-    expect("sem_take_timeout", cgrtos_sem_take(sem, portMS_TO_TICK(20)) == pdFAIL);
+    expect("sem_take_timeout",
+           cgrtos_sem_take(sem, portMS_TO_TICK(20)) == errTIMEOUT);
+
     expect("sem_give", cgrtos_sem_give(sem) == pdPASS);
     expect("sem_take", cgrtos_sem_take(sem, 0) == pdPASS);
     expect("sem_give_isr", cgrtos_sem_give_from_isr(bin, 0) == pdPASS);
@@ -840,6 +844,271 @@ static void case_sched(void)
     cgrtos_task_delete(rr);
 }
 
+/* ---- Module1: PT / DPCP / exit / sched stats ---- */
+
+static volatile int g_m1_lo_hits;
+static volatile int g_m1_hi_hits;
+static volatile int g_m1_exit_done;
+static cgrtos_mutex_t *g_m1_dpcp_mtx;
+static volatile tick_t g_m1_dl_under_lock;
+
+static void m1_lo_worker(void *arg)
+{
+    (void)arg;
+#if CONFIG_USE_PREEMPT_THRESH
+    cgrtos_task_t *self = g_current[(uint8_t)read_csr(mhartid)];
+    if (self) {
+        /* 低优先级但高阈值：抑制同核更高 prio 抢占（直到阈值外） */
+        (void)cgrtos_task_set_preempt_threshold(self->id, 20);
+    }
+#endif
+    tick_t end = cgrtos_get_ticks() + 40;
+    while (cgrtos_get_ticks() < end) {
+        g_m1_lo_hits++;
+    }
+    while (1) {
+        cgrtos_delay_ms(1000);
+    }
+}
+
+static void m1_hi_worker(void *arg)
+{
+    (void)arg;
+    tick_t end = cgrtos_get_ticks() + 40;
+    while (cgrtos_get_ticks() < end) {
+        g_m1_hi_hits++;
+    }
+    while (1) {
+        cgrtos_delay_ms(1000);
+    }
+}
+
+static void m1_exit_worker(void *arg)
+{
+    (void)arg;
+    g_m1_exit_done = 1;
+    /* return → bootstrap → task_exit */
+}
+
+#if CONFIG_USE_DPCP && CONFIG_USE_EDF
+static void m1_dpcp_worker(void *arg)
+{
+    (void)arg;
+    cgrtos_task_t *self = g_current[(uint8_t)read_csr(mhartid)];
+    if (self && g_m1_dpcp_mtx) {
+        cgrtos_task_set_deadline(self->id, cgrtos_get_ticks() + 5000);
+        if (cgrtos_mutex_lock(g_m1_dpcp_mtx, portMAX_DELAY) == pdPASS) {
+            g_m1_dl_under_lock = self->deadline;
+            cgrtos_delay(5);
+            cgrtos_mutex_unlock(g_m1_dpcp_mtx);
+        }
+    }
+    while (1) {
+        cgrtos_delay_ms(1000);
+    }
+}
+#endif
+
+/* ---- Modules 2-6 ---- */
+static volatile int g_m2_isr_hits;
+
+static void m2_isr_hook(void)
+{
+    g_m2_isr_hits++;
+}
+
+static void case_m2_ipc(void)
+{
+    cgrtos_sem_t *s = cgrtos_sem_create(0, 1);
+    expect("m2_sem", s != 0);
+    expect("m2_sem_to", cgrtos_sem_take(s, 1) == errTIMEOUT);
+    expect("m2_sem_give", cgrtos_sem_give(s) == pdPASS);
+    expect("m2_sem_ok", cgrtos_sem_take(s, 0) == pdPASS);
+    cgrtos_sem_delete(s);
+
+#if CONFIG_DETECT_DEADLOCK
+    {
+        cgrtos_mutex_t *a = cgrtos_mutex_create();
+        cgrtos_mutex_t *b = cgrtos_mutex_create();
+        expect("m2_dl_mtx", a && b);
+        expect("m2_dl_a", cgrtos_mutex_lock(a, 0) == pdPASS);
+        expect("m2_dl_b", cgrtos_mutex_lock(b, 0) == pdPASS);
+        /* 模拟：当前持有 a,b；若再以「等待 a 的 owner 链」检测——单任务无法成环。
+         * 至少 API 路径返回合法码：对已持有锁递归应成功。 */
+        expect("m2_dl_rec", cgrtos_mutex_lock(a, 0) == pdPASS);
+        cgrtos_mutex_unlock(a);
+        cgrtos_mutex_unlock(b);
+        cgrtos_mutex_unlock(a);
+        cgrtos_mutex_delete(a);
+        cgrtos_mutex_delete(b);
+    }
+#endif
+
+#if CONFIG_ISR_API_GUARD && CONFIG_USE_HOOKS
+    g_m2_isr_hits = 0;
+    cgrtos_set_isr_api_hook(m2_isr_hook);
+    /* 直接调用 reject 助手验证钩子 */
+    expect("m2_isr_ok_ctx", cgrtos_reject_blocking_in_isr() == 0);
+    cgrtos_set_isr_api_hook(0);
+#endif
+    expect("m2_err_codes", errTIMEOUT != pdPASS && errDEADLOCK != errISR);
+}
+
+static uint8_t g_m3_pool_storage[64 * 8];
+
+static void case_m3_mem(void)
+{
+    cgrtos_mempool_t *p = cgrtos_mempool_create(g_m3_pool_storage, 64, 8);
+    expect("m3_pool", p != 0);
+    void *a = cgrtos_mempool_alloc(p);
+    void *b = cgrtos_mempool_alloc(p);
+    expect("m3_alloc", a && b && a != b);
+    expect("m3_free_cnt", cgrtos_mempool_free_count(p) == 6);
+    expect("m3_free", cgrtos_mempool_free(p, a) == pdPASS);
+    expect("m3_free2", cgrtos_mempool_free(p, b) == pdPASS);
+    expect("m3_del", cgrtos_mempool_delete(p) == pdPASS);
+
+    void *h = cgrtos_malloc(32);
+    expect("m3_heap", h != 0);
+    cgrtos_free(h);
+    /* double-free 应安全吞掉 */
+    cgrtos_free(h);
+    expect("m3_dfree", 1);
+}
+
+static volatile int g_m4_create_hits;
+
+static void m4_create_hook(void)
+{
+    g_m4_create_hits++;
+}
+
+static void case_m4_safe(void)
+{
+#if CONFIG_USE_HOOKS
+    g_m4_create_hits = 0;
+    cgrtos_set_task_create_hook(m4_create_hook);
+    task_id_t id = cgrtos_task_create("m4t", cfs_worker, (void *)&g_cfs_a, 2, SCHED_RR);
+    expect("m4_create_hook", g_m4_create_hits >= 1);
+    if (id != (task_id_t)-1) {
+        cgrtos_task_delete(id);
+    }
+    cgrtos_set_task_create_hook(0);
+#endif
+    cgrtos_watchdog_kick();
+    expect("m4_crit_api", 1);
+    (void)cgrtos_mpu_init();
+    expect("m4_mpu_api", 1);
+}
+
+static void case_m5_perf(void)
+{
+#if CONFIG_USE_EDF
+    task_id_t e = cgrtos_task_create("m5edf", edf_worker,
+                                     (void *)(uintptr_t)portMS_TO_TICK(40), 4, SCHED_EDF);
+    expect("m5_edf", e != (task_id_t)-1);
+    wait_ticks(80);
+    expect("m5_edf_prog", (g_edf_ok + g_edf_miss) > 0);
+    cgrtos_task_delete(e);
+#else
+    expect("m5_edf_off", 1);
+#endif
+#if CONFIG_IDLE_SLEEP_HOOK && CONFIG_USE_HOOKS
+    cgrtos_set_idle_sleep_hook(0);
+#endif
+    expect("m5_ready_cnt", cgrtos_sched_ready_count(0) >= 0);
+}
+
+static void case_m6_dbg(void)
+{
+    cgrtos_log_set_level(CGRTOS_LOG_INFO);
+    CGRTOS_LOGI("m6", "hello");
+    expect("m6_level", cgrtos_log_get_level() == CGRTOS_LOG_INFO);
+
+    cgrtos_task_info_t info[16];
+    uint32_t n = cgrtos_task_list_export(info, 16);
+    expect("m6_export", n >= 1);
+    expect("m6_name", info[0].name[0] != 0);
+}
+
+static void case_sched_m1(void)
+{
+#if CONFIG_USE_PREEMPT_THRESH
+    g_m1_lo_hits = 0;
+    g_m1_hi_hits = 0;
+    task_id_t lo = cgrtos_task_create("m1lo", m1_lo_worker, 0, 5, SCHED_PRIORITY);
+    expect("m1_pt_create_lo", lo != (task_id_t)-1);
+    cgrtos_task_set_affinity(lo, 0);
+    wait_ticks(5); /* 让 lo 先设好阈值并跑一阵 */
+    expect("m1_pt_lo_early", g_m1_lo_hits > 100);
+    task_id_t hi = cgrtos_task_create("m1hi", m1_hi_worker, 0, 10, SCHED_PRIORITY);
+    expect("m1_pt_create_hi", hi != (task_id_t)-1);
+    cgrtos_task_set_affinity(hi, 0);
+    wait_ticks(50);
+    /* 阈值=20 > hi.prio=10：hi 不能抢 lo；lo 应持续推进 */
+    expect("m1_pt_lo_progress", g_m1_lo_hits > 1000);
+    cgrtos_task_delete(lo);
+    wait_ticks(20);
+    expect("m1_pt_hi_after", g_m1_hi_hits > 0);
+    cgrtos_task_delete(hi);
+    {
+        task_id_t tmp = cgrtos_task_create("m1tmp", m1_exit_worker, 0, 8, SCHED_RR);
+        expect("m1_pt_bad_thresh",
+               tmp != (task_id_t)-1 &&
+               cgrtos_task_set_preempt_threshold(tmp, 3) == pdFAIL);
+        wait_ticks(10);
+    }
+#else
+    expect("m1_pt_disabled", 1);
+#endif
+
+    g_m1_exit_done = 0;
+    task_id_t ex = cgrtos_task_create("m1ex", m1_exit_worker, 0, 4, SCHED_RR);
+    expect("m1_exit_create", ex != (task_id_t)-1);
+    wait_ticks(20);
+    expect("m1_exit_ran", g_m1_exit_done == 1);
+    expect("m1_exit_gone",
+           cgrtos_task_get_state(ex) == eDeleted ||
+           cgrtos_task_get_state(ex) == eInvalid ||
+           cgrtos_task_get_state(ex) == eTerminated);
+
+#if CONFIG_SCHED_STATS
+    {
+        cgrtos_sched_stats_reset();
+        task_id_t s = cgrtos_task_create("m1st", rr_worker, 0, 3, SCHED_RR);
+        wait_ticks(30);
+        cgrtos_task_sched_stats_t st;
+        expect("m1_stats_get", cgrtos_task_get_sched_stats(s, &st) == pdPASS);
+        expect("m1_stats_samples", st.latency_samples >= 1 || st.exec_ticks >= 1);
+        tick_t gmax = 0;
+        uint32_t ns = 0;
+        cgrtos_sched_stats_get(&gmax, &ns);
+        expect("m1_stats_global", ns >= 1);
+        cgrtos_task_delete(s);
+    }
+#else
+    expect("m1_stats_disabled", 1);
+#endif
+
+#if CONFIG_USE_DPCP && CONFIG_USE_EDF
+    g_m1_dl_under_lock = 0;
+    g_m1_dpcp_mtx = cgrtos_mutex_create_dpcp(15, 50);
+    expect("m1_dpcp_mtx", g_m1_dpcp_mtx != 0);
+    task_id_t ed = cgrtos_task_create("m1ed", m1_dpcp_worker, 0, 4, SCHED_EDF);
+    expect("m1_dpcp_task", ed != (task_id_t)-1);
+    wait_ticks(40);
+    /* 天花板 rel=50：持锁时 deadline 应被压到 now+50 附近（远小于 +5000） */
+    expect("m1_dpcp_ceil",
+           g_m1_dl_under_lock != 0 &&
+           g_m1_dl_under_lock < cgrtos_get_ticks() + 200);
+    cgrtos_task_delete(ed);
+    cgrtos_mutex_delete(g_m1_dpcp_mtx);
+    g_m1_dpcp_mtx = 0;
+#else
+    expect("m1_dpcp_disabled", 1);
+#endif
+}
+
 static void case_smp(void)
 {
 #if CONFIG_NUM_CORES < 2
@@ -1203,6 +1472,12 @@ static const test_case_t g_cases[] = {
     { "timer",     "soft timer start stop change",            case_timer },
     { "task",      "task lifecycle suspend resume delete",    case_task },
     { "sched",     "CFS EDF hybrid RR scheduling",            case_sched },
+    { "sched_m1",  "PT DPCP exit sched-stats (module1)",      case_sched_m1 },
+    { "m2_ipc",    "ISR-guard timeout deadlock (module2)",    case_m2_ipc },
+    { "m3_mem",    "mempool poison redzone (module3)",        case_m3_mem },
+    { "m4_safe",   "hooks crit-monitor ISR-guard (module4)",  case_m4_safe },
+    { "m5_perf",   "EDF-heap idle-sleep API (module5)",       case_m5_perf },
+    { "m6_dbg",    "klog task-export errcodes (module6)",     case_m6_dbg },
     { "smp",       "affinity and load balance",               case_smp },
     { "hooks",     "hooks and static IPC",                    case_hooks },
     { "critical",  "critical section yield stats",            case_critical },

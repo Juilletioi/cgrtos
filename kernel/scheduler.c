@@ -58,6 +58,10 @@ static list_t       g_cfs_ready[CONFIG_NUM_CORES];
  * @note 非每核队列；sched_pick_edf 按 Global EDF 将前 m 个任务分配到 m 个在线核。
  */
 static list_t       g_edf_global;
+#if CONFIG_USE_EDF && CONFIG_USE_EDF_HEAP
+static cgrtos_task_t *g_edf_heap[CONFIG_MAX_TASKS];
+static uint32_t       g_edf_heap_n;
+#endif
 /** @brief 全局延迟唤醒链表（按 wake_tick 排序）。 */
 static list_t       g_delayed_list;
 /** @brief EDF 释放时间轮各槽位链表。 */
@@ -72,6 +76,14 @@ static spinlock_t   g_ready_lock;
 static uint32_t     g_lb_tick;
 /** @brief 每核强制让出标志（ecall yield 等）。 */
 static volatile uint8_t g_force_yield[CONFIG_NUM_CORES];
+#if CONFIG_SCHED_STATS
+static tick_t g_sched_max_latency;
+static uint32_t g_sched_latency_samples;
+#endif
+#if CONFIG_USE_EDF
+/** @brief 持 g_klock 时推迟 MC-EDF kick，避免 IPI 对端再争 g_klock 死锁 */
+static volatile uint8_t g_edf_kick_pending;
+#endif
 
 /**
  * @brief 从就绪位图取最高优先级数值。
@@ -155,7 +167,12 @@ static inline int sched_uses_cfs(cgrtos_task_t *task)
  */
 static inline int sched_uses_edf(cgrtos_task_t *task)
 {
+#if CONFIG_USE_EDF
     return task && task->policy == SCHED_EDF;
+#else
+    (void)task;
+    return 0;
+#endif
 }
 
 /**
@@ -200,6 +217,53 @@ static void sched_mcedf_kick_all(void)
 }
 
 /**
+ * @brief 请求 MC-EDF 重评估：临界区内仅置 pending，出临界区再 kick
+ * @risk 持 g_klock 时同步 IPI 可能导致对端 enter_critical 自旋死锁。
+ */
+static void sched_edf_kick_request(void)
+{
+#if CONFIG_USE_EDF
+    if (cgrtos_in_critical() || cgrtos_in_isr()) {
+        /* 临界区/ISR：只记 pending 与本核 yield；出临界区或任务态再 flush */
+        g_edf_kick_pending = 1;
+        g_yield_pending[(uint8_t)read_csr(mhartid)] = 1;
+        return;
+    }
+    g_edf_kick_pending = 0;
+    sched_mcedf_kick_all();
+#else
+    (void)0;
+#endif
+}
+
+/**
+ * @brief 刷新推迟的 MC-EDF kick（由 exit_critical 最外层调用）
+ */
+void cgrtos_sched_edf_kick_flush(void)
+{
+#if CONFIG_USE_EDF
+    if (!g_edf_kick_pending) {
+        return;
+    }
+    g_edf_kick_pending = 0;
+    /* tick/ISR 里已在 exit_critical：只置 yield，避免在 ISR 尾再打全员 IPI 放大抖动 */
+    if (cgrtos_in_isr()) {
+        uint8_t here = (uint8_t)read_csr(mhartid);
+        g_yield_pending[here] = 1;
+#if CONFIG_NUM_CORES > 1
+        for (uint8_t c = 0; c < CONFIG_NUM_CORES; c++) {
+            if (c != here && (c == 0 || CGRTOS_CORE_ONLINE(c))) {
+                g_yield_pending[c] = 1;
+            }
+        }
+#endif
+        return;
+    }
+    sched_mcedf_kick_all();
+#endif
+}
+
+/**
  * @brief 从全局 MC-EDF 就绪链移除任务（调用方已持锁）
  * @param task EDF 任务
  * @details 步骤：1. 若节点在链上则 list_remove；2. 否则无操作。
@@ -209,10 +273,86 @@ static void sched_edf_global_remove(cgrtos_task_t *task)
     if (!task) {
         return;
     }
+#if CONFIG_USE_EDF && CONFIG_USE_EDF_HEAP
+    {
+        uint32_t i, j;
+        for (i = 0; i < g_edf_heap_n; i++) {
+            if (g_edf_heap[i] == task) {
+                g_edf_heap_n--;
+                g_edf_heap[i] = g_edf_heap[g_edf_heap_n];
+                g_edf_heap[g_edf_heap_n] = 0;
+                /* sift down/up */
+                j = i;
+                while (1) {
+                    uint32_t l = j * 2 + 1, r = l + 1, best = j;
+                    if (l < g_edf_heap_n &&
+                        g_edf_heap[l]->deadline < g_edf_heap[best]->deadline) {
+                        best = l;
+                    }
+                    if (r < g_edf_heap_n &&
+                        g_edf_heap[r]->deadline < g_edf_heap[best]->deadline) {
+                        best = r;
+                    }
+                    if (best == j) {
+                        break;
+                    }
+                    {
+                        cgrtos_task_t *tmp = g_edf_heap[j];
+                        g_edf_heap[j] = g_edf_heap[best];
+                        g_edf_heap[best] = tmp;
+                    }
+                    j = best;
+                }
+                while (j > 0) {
+                    uint32_t p = (j - 1) / 2;
+                    if (g_edf_heap[j]->deadline >= g_edf_heap[p]->deadline) {
+                        break;
+                    }
+                    {
+                        cgrtos_task_t *tmp = g_edf_heap[j];
+                        g_edf_heap[j] = g_edf_heap[p];
+                        g_edf_heap[p] = tmp;
+                    }
+                    j = p;
+                }
+                return;
+            }
+        }
+    }
+#else
     if (task->edf_item.next || task->edf_item.prev ||
         g_edf_global.head == &task->edf_item) {
         list_remove(&g_edf_global, &task->edf_item);
     }
+#endif
+}
+
+static void sched_add_edf_ready(cgrtos_task_t *task)
+{
+    sched_edf_global_remove(task);
+#if CONFIG_USE_EDF && CONFIG_USE_EDF_HEAP
+    if (g_edf_heap_n >= CONFIG_MAX_TASKS) {
+        return;
+    }
+    {
+        uint32_t i = g_edf_heap_n++;
+        g_edf_heap[i] = task;
+        while (i > 0) {
+            uint32_t p = (i - 1) / 2;
+            if (g_edf_heap[i]->deadline >= g_edf_heap[p]->deadline) {
+                break;
+            }
+            {
+                cgrtos_task_t *tmp = g_edf_heap[i];
+                g_edf_heap[i] = g_edf_heap[p];
+                g_edf_heap[p] = tmp;
+            }
+            i = p;
+        }
+    }
+#else
+    list_insert_sorted_asc(&g_edf_global, &task->edf_item, task->deadline);
+#endif
 }
 
 /**
@@ -398,9 +538,9 @@ static void sched_process_edf_releases(void)
     for (uint32_t i = 0; i < n; i++) {
         sched_edf_release(to_release[i]);
     }
-    /* 6. 有释放则踢所有核做 MC-EDF 重选 */
+    /* 6. 有释放则请求 MC-EDF 重选（ISR 内不持 g_klock，可立即 kick） */
     if (n > 0) {
-        sched_mcedf_kick_all();
+        sched_edf_kick_request();
     }
 }
 
@@ -492,20 +632,8 @@ static void sched_add_cfs_ready(cgrtos_task_t *task)
 }
 
 /**
- * @brief 将任务按 deadline 插入全局 MC-EDF 就绪队列。
- *
- * @param task 任务指针。
- *
- * @details 步骤：
- * 1. 按 deadline 升序插入 g_edf_global（全局，不分核）。
- * 2. run_cpu 仅作软放置提示，真正占核由 sched_pick_edf 分配。
- * @note 调用方已持 g_ready_lock。
+ * @brief 将任务按 deadline 插入全局 MC-EDF 就绪队列（见上方 sched_add_edf_ready）。
  */
-static void sched_add_edf_ready(cgrtos_task_t *task)
-{
-    list_insert_sorted_asc(&g_edf_global, &task->edf_item, task->deadline);
-}
-
 static void sched_remove_priority_ready(cgrtos_task_t *task);
 
 /**
@@ -545,6 +673,9 @@ static void sched_add_ready_locked(cgrtos_task_t *task)
     }
     /* 4. 将 task->state 置为 TASK_READY */
     task->state = TASK_READY;
+#if CONFIG_SCHED_STATS
+    task->ready_since = g_ticks;
+#endif
 }
 
 /**
@@ -603,9 +734,9 @@ void cgrtos_sched_add_ready(cgrtos_task_t *task)
     /* 4. 解锁并恢复 IRQ */
     cgrtos_spin_unlock(&g_ready_lock);
     cgrtos_irq_restore(flags);
-    /* 5. EDF 入队后踢核，使全局更早 deadline 可立即占核 */
+    /* 5. EDF 入队后请求踢核；持 g_klock 时推迟到 exit_critical */
     if (is_edf) {
-        sched_mcedf_kick_all();
+        sched_edf_kick_request();
     }
 }
 
@@ -751,12 +882,18 @@ static cgrtos_task_t *sched_pick_cfs(uint8_t cpu)
  */
 static cgrtos_task_t *sched_pick_edf(uint8_t cpu)
 {
+#if !CONFIG_USE_EDF
+    (void)cpu;
+    return 0;
+#else
     uint8_t cores[CONFIG_MAX_CORES];
     cgrtos_task_t *assigned[CONFIG_MAX_CORES];
     int n = 0;
     int filled = 0;
     int i;
+#if !CONFIG_USE_EDF_HEAP
     list_item_t *it;
+#endif
 
     if (cpu >= CONFIG_NUM_CORES) {
         return 0;
@@ -778,6 +915,61 @@ static cgrtos_task_t *sched_pick_edf(uint8_t cpu)
 #endif
 
     /* 2-5. 按 deadline 填充至多 n 席 */
+#if CONFIG_USE_EDF_HEAP
+    /* 从堆中按 deadline 选前 n（选择排序式扫描，n<=cores 很小） */
+    {
+        uint8_t taken[CONFIG_MAX_TASKS];
+        uint32_t k;
+        memset(taken, 0, sizeof(taken));
+        while (filled < n) {
+            cgrtos_task_t *best = 0;
+            uint32_t best_i = 0;
+            for (k = 0; k < g_edf_heap_n; k++) {
+                if (taken[k]) {
+                    continue;
+                }
+                if (!best || g_edf_heap[k]->deadline < best->deadline) {
+                    best = g_edf_heap[k];
+                    best_i = k;
+                }
+            }
+            if (!best) {
+                break;
+            }
+            taken[best_i] = 1;
+            {
+                cgrtos_task_t *t = best;
+                if (t->cpu_aff != 0xFF) {
+                    uint8_t a = t->cpu_aff;
+                    if (a < CONFIG_NUM_CORES && !assigned[a] &&
+                        sched_edf_affinity_ok(t, a) &&
+                        (a == 0 || CGRTOS_CORE_ONLINE(a))) {
+                        assigned[a] = t;
+                        filled++;
+                    }
+                    continue;
+                }
+                {
+                    uint8_t prefer = t->run_cpu;
+                    if (prefer < CONFIG_NUM_CORES && !assigned[prefer] &&
+                        (prefer == 0 || CGRTOS_CORE_ONLINE(prefer))) {
+                        assigned[prefer] = t;
+                        filled++;
+                        continue;
+                    }
+                }
+                for (i = 0; i < n; i++) {
+                    uint8_t c = cores[i];
+                    if (!assigned[c]) {
+                        assigned[c] = t;
+                        filled++;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+#else
     for (it = g_edf_global.head; it && filled < n; it = it->next) {
         cgrtos_task_t *t = (cgrtos_task_t *)((uint8_t *)it -
                                              offsetof(cgrtos_task_t, edf_item));
@@ -811,9 +1003,11 @@ static cgrtos_task_t *sched_pick_edf(uint8_t cpu)
             }
         }
     }
+#endif /* CONFIG_USE_EDF_HEAP */
 
     /* 6. */
     return assigned[cpu];
+#endif /* CONFIG_USE_EDF */
 }
 
 /**
@@ -1056,7 +1250,8 @@ static void sched_delayed_insert(cgrtos_task_t *task, tick_t wake_tick)
 {
     /* 1. 设置 task->wake_tick = wake_tick */
     task->wake_tick = wake_tick;
-    /* 2. 按 wake_tick 升序插入 g_delayed_list */
+    /* 2. 先摘旧节点再按 wake_tick 升序插入（防双链成环） */
+    sched_delayed_remove(task);
     list_insert_sorted(&g_delayed_list, &task->delayed_item, wake_tick);
 }
 
@@ -1317,14 +1512,20 @@ uint64_t *cgrtos_sched_switch_from_trap(uint64_t *sp)
             (cur->policy == SCHED_PRIORITY ||
              (cur->policy == SCHED_HYBRID &&
               cur->prio >= CONFIG_RT_PRIO_THRESHOLD))) {
+#if CONFIG_USE_PREEMPT_THRESH
+            uint8_t pt = cur->preempt_thresh;
+#else
+            uint8_t pt = cur->prio;
+#endif
             if (!next || next == &g_idle[cpu]) {
                 stick = 1;
             } else if (sched_uses_cfs(next) && !sched_uses_edf(next)) {
                 /* CFS 不能抢占纯 RT 优先级任务 */
                 stick = 1;
-            } else if (sched_uses_priority(next) && next->prio <= cur->prio &&
+            } else if (sched_uses_priority(next) && next->prio <= pt &&
                        !(sched_uses_edf(next) &&
                          next->deadline <= g_ticks + CONFIG_MCEDF_PRIO_SLACK_TICKS)) {
+                /* 抢占阈值：仅 next->prio > pt 才真正抢占 */
                 stick = 1;
             } else if (sched_uses_edf(next) &&
                        next->deadline > g_ticks + CONFIG_MCEDF_PRIO_SLACK_TICKS) {
@@ -1358,6 +1559,21 @@ uint64_t *cgrtos_sched_switch_from_trap(uint64_t *sp)
         next->state = TASK_RUNNING;
         next->run_cpu = cpu;
         next->last_run = g_ticks;
+#if CONFIG_SCHED_STATS
+        if (next->id > 0) {
+            tick_t lat = g_ticks - next->ready_since;
+            next->last_sched_latency = lat;
+            next->sched_latency_sum += lat;
+            next->sched_latency_samples++;
+            if (lat > next->max_sched_latency) {
+                next->max_sched_latency = lat;
+            }
+            if (lat > g_sched_max_latency) {
+                g_sched_max_latency = lat;
+            }
+            g_sched_latency_samples++;
+        }
+#endif
         g_cs_count++;
         g_cs_count_core[cpu]++;
 
@@ -1515,8 +1731,10 @@ void cgrtos_tick_handler(void)
         __atomic_fetch_add(&g_ticks, 1, __ATOMIC_SEQ_CST);
         /* 2b. 处理延迟超时唤醒 */
         sched_process_delayed_tasks();
+#if CONFIG_USE_EDF
         /* 2c. 处理 EDF 释放轮 */
         sched_process_edf_releases();
+#endif
         /* 2d. 软件定时器 tick */
         cgrtos_timer_process_tick();
 #if CONFIG_USE_HOOKS
@@ -1568,8 +1786,17 @@ uint32_t cgrtos_sched_ready_count(uint8_t cpu)
         n += g_ready[cpu][p].count;
     }
     n += list_count(&g_cfs_ready[cpu]);
-    /* MC-EDF：全局链上存在可在本核运行的任务则计 1（无锁近似，供 steal/统计） */
+    /* MC-EDF：全局链/堆上存在可在本核运行的任务则计 1（无锁近似，供 steal/统计） */
     {
+#if CONFIG_USE_EDF && CONFIG_USE_EDF_HEAP
+        uint32_t k;
+        for (k = 0; k < g_edf_heap_n; k++) {
+            if (sched_edf_affinity_ok(g_edf_heap[k], cpu)) {
+                n += 1;
+                break;
+            }
+        }
+#else
         list_item_t *it = g_edf_global.head;
         while (it) {
             cgrtos_task_t *t = (cgrtos_task_t *)((uint8_t *)it -
@@ -1580,6 +1807,7 @@ uint32_t cgrtos_sched_ready_count(uint8_t cpu)
             }
             it = it->next;
         }
+#endif
     }
     return n;
 }
@@ -1883,6 +2111,10 @@ void cgrtos_sched_init(void)
         list_init(&g_cfs_ready[i]);
     }
     list_init(&g_edf_global);
+#if CONFIG_USE_EDF && CONFIG_USE_EDF_HEAP
+    g_edf_heap_n = 0;
+    memset(g_edf_heap, 0, sizeof(g_edf_heap));
+#endif
     for (int i = 0; i < CONFIG_EDF_RELEASE_SLOTS; i++) {
         list_init(&g_edf_rel[i]);
     }
@@ -1893,3 +2125,35 @@ void cgrtos_sched_init(void)
     g_lb_tick = 0;
     memset((void *)g_force_yield, 0, sizeof(g_force_yield));
 }
+
+#if CONFIG_SCHED_STATS
+void cgrtos_sched_stats_get(tick_t *max_latency_global, uint32_t *samples)
+{
+    uint64_t flags = cgrtos_irq_save();
+    cgrtos_spin_lock(&g_ready_lock);
+    if (max_latency_global) {
+        *max_latency_global = g_sched_max_latency;
+    }
+    if (samples) {
+        *samples = g_sched_latency_samples;
+    }
+    cgrtos_spin_unlock(&g_ready_lock);
+    cgrtos_irq_restore(flags);
+}
+
+void cgrtos_sched_stats_reset(void)
+{
+    uint64_t flags = cgrtos_irq_save();
+    cgrtos_spin_lock(&g_ready_lock);
+    g_sched_max_latency = 0;
+    g_sched_latency_samples = 0;
+    for (uint32_t i = 0; i < CONFIG_MAX_TASKS; i++) {
+        g_tasks[i].max_sched_latency = 0;
+        g_tasks[i].last_sched_latency = 0;
+        g_tasks[i].sched_latency_sum = 0;
+        g_tasks[i].sched_latency_samples = 0;
+    }
+    cgrtos_spin_unlock(&g_ready_lock);
+    cgrtos_irq_restore(flags);
+}
+#endif
