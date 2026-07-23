@@ -167,6 +167,63 @@ char* strncpy(char* d,const char* s,size_t n){
 }
 
 /**
+ * @brief 全串比较
+ * @details 等价于 strncmp(s1,s2,SIZE_MAX) 语义至双 NUL。
+ * @param[in] s1 串 1
+ * @param[in] s2 串 2
+ * @return 首个不等字符之差；相等为 0
+ * @retval 0 相等
+ * @retval !=0 差值
+ * @note 无
+ * @warning 无
+ * @attention ✅ ISR；❌ 不阻塞
+ */
+int strcmp(const char* s1,const char* s2){
+    while(*s1&&*s1==*s2){s1++;s2++;}
+    return(unsigned char)*s1-(unsigned char)*s2;
+}
+
+/**
+ * @brief 从右查找字符
+ * @param[in] s 串
+ * @param[in] c 目标字符（转 unsigned char）
+ * @return 最后一次出现的指针；未找到 NULL
+ * @retval 非 NULL 命中
+ * @retval NULL 未命中
+ * @note 含查找 '\\0' 时返回指向终止符的指针
+ * @warning 无
+ * @attention ✅ ISR；❌ 不阻塞
+ */
+char* strrchr(const char* s,int c){
+    const char* last=0;
+    unsigned char ch=(unsigned char)c;
+    do{
+        if((unsigned char)*s==ch)last=s;
+    }while(*s++);
+    return(char*)last;
+}
+
+/**
+ * @brief 有界追加
+ * @details 向 d 末尾追加至多 n 个来自 s 的字符，并保证 NUL（若空间允许）。
+ * @param[out] d 目标（须已 NUL 结尾且有足够空间）
+ * @param[in]  s 源
+ * @param[in]  n 最多追加字符数（不含强制 NUL 的约定依 POSIX）
+ * @return d
+ * @retval d 目标
+ * @note 若 d 长度 + n 空间不足，调用方须保证缓冲
+ * @warning 无
+ * @attention ✅ ISR；❌ 不阻塞
+ */
+char* strncat(char* d,const char* s,size_t n){
+    char* p=d;
+    while(*p)p++;
+    while(n&&*s){*p++=*s++;n--;}
+    *p=0;
+    return d;
+}
+
+/**
  * @brief 受限格式化输出（子集：%s %d %i %u %x %lu %c %%）
  * @details 解析 fmt 并将结果写入 buf，保留至少 1 字节给 NUL。纯栈上格式化，不阻塞、不切换（不含浮点/宽度/精度）。
  * @param[out] buf 输出缓冲区

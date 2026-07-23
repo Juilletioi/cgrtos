@@ -2,29 +2,24 @@
  * @file cli_main.c
  * @brief CG-RTOS 交互式 CLI：跑测试 case、读写内存、命令历史上翻
  * @author Cong Zhou / Juilletioi
- * @version 5.0.0
- * @date 2026-07-22
+ * @version 5.1.0
+ * @date 2026-07-23
  * @copyright CG-RTOS
  *
  * @details
  * 启动：`./scripts/cgrtos.sh cli`。
  * 常用：help / list / run \<case\> / md|mw / stats / heap / ticks / cores。
- * 编辑：Backspace、Ctrl-C、↑ 上一条、↓ 下一条。
+ * 行编辑：Backspace、左右光标、Ctrl-C、↑↓ 历史、Tab 路径补全；vi/vim/edit 见 MODULE_CLI_VIM.md。
  */
 #include "../kernel/cgrtos.h"
-#include "test_cases.h"
+#include "../tests/test_cases.h"
 #include "cli_fs.h"
+#include "cli_line.h"
+#include "cli_vim.h"
 
-#define CLI_LINE_MAX  96
-#define CLI_HIST_MAX  16
 #define CLI_PROMPT    "cgrtos> "
 #define CLI_MD_MAX    256   /* max units per dump */
 
-static char g_hist[CLI_HIST_MAX][CLI_LINE_MAX];
-static int  g_hist_len;          /* entries stored (0..CLI_HIST_MAX) */
-static int  g_hist_head;         /* next write slot (ring) */
-static char g_draft[CLI_LINE_MAX]; /* line being edited before ↑ */
-static int  g_hist_view = -1;    /* -1 = draft; 0 = newest recalled */
 
 /**
  * @brief 就地去除字符串首尾空白
@@ -116,52 +111,6 @@ static int cli_startswith(const char *s, const char *prefix, const char **rest)
 }
 
 /**
- * @brief 有界字符串拷贝
- * @details 最多拷贝 max-1 字节并保证 dst 以 NUL 结尾。
- * @param[out] dst 目标缓冲
- * @param[in]  src 源串
- * @param[in]  max 目标容量（含 NUL）
- * @return 无
- * @retval 无
- * @note max <= 0 时直接返回
- * @warning 不报告截断
- * @attention ✅ ISR；❌ 不阻塞
- * @internal
- */
-static void cli_strcpy(char *dst, const char *src, int max)
-{
-    int i = 0;
-    if (max <= 0) {
-        return;
-    }
-    while (src[i] && i < max - 1) {
-        dst[i] = src[i];
-        i++;
-    }
-    dst[i] = 0;
-}
-
-/**
- * @brief 计算 C 字符串长度
- * @details 不含终止 NUL。
- * @param[in] s 源串
- * @return 字节数
- * @retval >=0 长度
- * @note 与 strlen 语义相同
- * @warning s 须有效
- * @attention ✅ ISR；❌ 不阻塞
- * @internal
- */
-static int cli_strlen(const char *s)
-{
-    int n = 0;
-    while (s[n]) {
-        n++;
-    }
-    return n;
-}
-
-/**
  * @brief 解析无符号整数（十进制或 0x 十六进制）
  * @details 支持 0x/0X 前缀；成功时写入 *out，可选 *endp 指向首个非数字字符。
  * @param[in]  s    输入串
@@ -235,80 +184,6 @@ static const char *cli_skip_ws(const char *s)
         s++;
     }
     return s;
-}
-
-/**
- * @brief 将一行命令压入环形历史
- * @details 忽略空行；与上一条相同时不重复存储。
- * @param[in] line 已提交的命令行
- * @return 无
- * @retval 无
- * @note 最多 CLI_HIST_MAX 条，满则覆盖最旧
- * @warning line 内容会被拷贝到内部缓冲
- * @attention ❌ ISR；✅ 任务上下文
- * @internal
- */
-static void cli_hist_push(const char *line)
-{
-    if (!line || !line[0]) {
-        return;
-    }
-    /* Skip duplicate consecutive entry. */
-    if (g_hist_len > 0) {
-        int last = (g_hist_head + CLI_HIST_MAX - 1) % CLI_HIST_MAX;
-        if (cli_streq(g_hist[last], line)) {
-            return;
-        }
-    }
-    cli_strcpy(g_hist[g_hist_head], line, CLI_LINE_MAX);
-    g_hist_head = (g_hist_head + 1) % CLI_HIST_MAX;
-    if (g_hist_len < CLI_HIST_MAX) {
-        g_hist_len++;
-    }
-}
-
-/**
- * @brief 按视图索引读取历史命令
- * @details view 0 为最新，1 为上一条，依此类推。
- * @param[in] view 历史视图索引（0 = 最新）
- * @return 历史串指针；越界返回 NULL
- * @retval 非 NULL 有效历史项
- * @retval NULL  view 非法或历史为空
- * @note 指针指向内部环缓冲，勿 free
- * @warning 历史被 push 覆盖后指针可能失效
- * @attention ✅ ISR 可读；❌ 不阻塞
- * @internal
- */
-static const char *cli_hist_get(int view)
-{
-    /* view 0 = newest, 1 = previous, ... */
-    if (view < 0 || view >= g_hist_len) {
-        return 0;
-    }
-    int idx = (g_hist_head + CLI_HIST_MAX - 1 - view) % CLI_HIST_MAX;
-    return g_hist[idx];
-}
-
-/**
- * @brief 重绘当前输入行（提示符 + 清除至行尾 + 文本）
- * @details 发送 `\r`、提示符、ANSI `\033[K` 再输出 len 字节。
- * @param[in] text 行内容
- * @param[in] len  有效字符数
- * @return 无
- * @retval 无
- * @note 用于 ↑/↓ 历史浏览
- * @warning 依赖 UART 与终端 ANSI 支持
- * @attention ❌ ISR；✅ 可阻塞 UART
- * @internal
- */
-static void cli_redraw(const char *text, int len)
-{
-    cgrtos_uart_putc('\r');
-    cgrtos_uart_puts(CLI_PROMPT);
-    cgrtos_uart_puts("\033[K");
-    for (int i = 0; i < len; i++) {
-        cgrtos_uart_putc(text[i]);
-    }
 }
 
 /**
@@ -568,19 +443,17 @@ static void cli_help(void)
     cgrtos_printf("  yield             yield CPU once\n");
     cgrtos_printf("  clear             clear screen (ANSI)\n");
     cli_fs_help();
-    cgrtos_printf("\nKeys: ↑ previous command  ↓ next  Backspace  Ctrl-C\n");
+    cli_vim_help();
+    cgrtos_printf("\nKeys: ←→ cursor  ↑↓ history  Tab path complete  Backspace  Ctrl-C\n");
     cgrtos_printf("Widths: .b=1 .h=2 .w=4(default) .d=8  addr/val: 0x.. or decimal\n");
+    cgrtos_printf("Editor: vi|vim|edit <file>  (see docs/MODULE_CLI_VIM.md)\n");
     cgrtos_printf("\nExamples:\n");
     cgrtos_printf("  list\n");
     cgrtos_printf("  run mem\n");
-    cgrtos_printf("  run sched\n");
-    cgrtos_printf("  run streambuf\n");
-    cgrtos_printf("  run all\n");
-    cgrtos_printf("  run stress\n");
+    cgrtos_printf("  mkdir /tmp ; touch /tmp/a.txt ; vi /tmp/a.txt\n");
+    cgrtos_printf("  cat /tmp/a  <Tab>\n");
     cgrtos_printf("  md 0xA0000000 8\n");
-    cgrtos_printf("  md.b 0xA0000000 32\n");
-    cgrtos_printf("  mw.w 0x80000000 0xdeadbeef\n");
-    cgrtos_printf("  write 0x80000000 1 2 3\n\n");
+    cgrtos_printf("  mw.w 0x80000000 0xdeadbeef\n\n");
 }
 
 /**
@@ -654,21 +527,19 @@ static void cli_handle(char *line)
 }
 
 /**
- * @brief CLI 主循环任务：UART 行编辑与命令执行
- * @details 轮询 UART，处理 Enter/Backspace/Ctrl-C 及 ↑/↓ 历史，提交行后调用 cli_handle。
+ * @brief CLI 主循环任务：行编辑与命令执行
+ * @details 使用 cli_line_read（历史/光标/Tab）；提交后 cli_handle。
  * @param[in] arg 未使用
  * @return 无（永不返回）
  * @retval 无
- * @note 优先级 12；启动前清空 RX 缓冲
- * @warning 单任务独占交互；无行内编辑除 Backspace
- * @attention ❌ ISR；✅ 阻塞 yield/UART
+ * @note 优先级 12；启动前清空 RX；FS/vim 状态仅本任务访问
+ * @warning 单任务独占交互
+ * @attention ❌ ISR；✅ 阻塞 yield/UART/FS
  */
 static void cli_task(void *arg)
 {
     (void)arg;
     char line[CLI_LINE_MAX];
-    int len = 0;
-    int esc = 0; /* 0=normal 1=got ESC 2=got ESC[ */
 
     while (cgrtos_uart_pollc() >= 0) {
     }
@@ -676,108 +547,20 @@ static void cli_task(void *arg)
     cli_fs_session_init();
 
     cgrtos_printf("\n======== CG-RTOS Interactive CLI ========\n");
-    cgrtos_printf("Type 'help' / 'list' / 'run <case>' / FS cmds. ↑ recalls last.\n");
-    cgrtos_uart_puts(CLI_PROMPT);
+    cgrtos_printf("Type 'help'. Tab completes paths. vi <file> edits.\n");
 
     while (1) {
-        int ch = cgrtos_uart_pollc();
-        if (ch < 0) {
-            cgrtos_task_yield();
+        int rc = cli_line_read(line, CLI_LINE_MAX, CLI_PROMPT);
+        if (rc < 0) {
+            cgrtos_printf("cli: readline error\n");
             continue;
         }
-
-        /* ANSI CSI: ESC [ A/B (up/down) */
-        if (esc == 1) {
-            if (ch == '[') {
-                esc = 2;
-                continue;
-            }
-            esc = 0;
-            /* fall through — orphan ESC byte ignored */
+        if (rc == 1) {
+            /* Ctrl-C → empty line already printed */
             continue;
         }
-        if (esc == 2) {
-            esc = 0;
-            if (ch == 'A') {
-                /* Up */
-                if (g_hist_view < 0) {
-                    line[len] = 0;
-                    cli_strcpy(g_draft, line, CLI_LINE_MAX);
-                }
-                if (g_hist_view + 1 < g_hist_len) {
-                    g_hist_view++;
-                    const char *h = cli_hist_get(g_hist_view);
-                    if (h) {
-                        cli_strcpy(line, h, CLI_LINE_MAX);
-                        len = cli_strlen(line);
-                        cli_redraw(line, len);
-                    }
-                }
-                continue;
-            }
-            if (ch == 'B') {
-                /* Down */
-                if (g_hist_view < 0) {
-                    continue;
-                }
-                g_hist_view--;
-                if (g_hist_view < 0) {
-                    cli_strcpy(line, g_draft, CLI_LINE_MAX);
-                    len = cli_strlen(line);
-                } else {
-                    const char *h = cli_hist_get(g_hist_view);
-                    if (h) {
-                        cli_strcpy(line, h, CLI_LINE_MAX);
-                        len = cli_strlen(line);
-                    }
-                }
-                cli_redraw(line, len);
-                continue;
-            }
-            /* Other CSI sequences: ignore */
-            continue;
-        }
-
-        if (ch == 0x1B) {
-            esc = 1;
-            continue;
-        }
-
-        if (ch == '\r' || ch == '\n') {
-            cgrtos_uart_putc('\n');
-            line[len] = 0;
-            cli_hist_push(line);
-            g_hist_view = -1;
-            g_draft[0] = 0;
-            cli_handle(line);
-            len = 0;
-            cgrtos_uart_puts(CLI_PROMPT);
-            continue;
-        }
-
-        if (ch == 0x7F || ch == 0x08) {
-            if (len > 0) {
-                len--;
-                cgrtos_uart_puts("\b \b");
-            }
-            g_hist_view = -1;
-            continue;
-        }
-
-        if (ch == 0x03) {
-            cgrtos_printf("^C\n");
-            len = 0;
-            g_hist_view = -1;
-            g_draft[0] = 0;
-            cgrtos_uart_puts(CLI_PROMPT);
-            continue;
-        }
-
-        if (ch >= 32 && ch < 127 && len < CLI_LINE_MAX - 1) {
-            line[len++] = (char)ch;
-            cgrtos_uart_putc((char)ch);
-            g_hist_view = -1;
-        }
+        cli_line_hist_push(line);
+        cli_handle(line);
     }
 }
 

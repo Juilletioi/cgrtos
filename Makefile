@@ -32,7 +32,9 @@ endif
 ifeq ($(APP),test)
   APP_SRCS := tests/test_all.c tests/test_cases.c tests/stress_cases.c
 else ifeq ($(APP),cli)
-  APP_SRCS := tests/cli_main.c tests/cli_fs.c tests/test_cases.c tests/stress_cases.c
+  APP_SRCS := cli/cli_main.c cli/cli_fs.c cli/cli_path.c \
+              cli/cli_line.c cli/cli_vim.c \
+              tests/test_cases.c tests/stress_cases.c
 else ifeq ($(APP),bench)
   APP_SRCS := tests/bench_all.c
 else ifeq ($(APP),stress)
@@ -118,7 +120,7 @@ sdk:
 debug: gdb
 
 clean:
-	rm -f $(OBJS) kernel/*.o arch/riscv/*.o hal/*.o demo/*.o tests/*.o \
+	rm -f $(OBJS) kernel/*.o arch/riscv/*.o hal/*.o demo/*.o tests/*.o cli/*.o \
 	      startup.o cgrtos.elf cgrtos.bin cgrtos.map
 	rm -rf sdk
 

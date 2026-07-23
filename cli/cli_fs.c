@@ -33,26 +33,18 @@
  * @endcode
  */
 #include "cli_fs.h"
+#include "cli_path.h"
+#include "cli_vim.h"
 
 #if CONFIG_CLI_FS
 
 #include "../kernel/vfs.h"
 #include <string.h>
 
-/** @brief 规范化绝对路径最大长度（含 NUL） */
-#define CLI_FS_PATH_MAX   192
 /** @brief 大文件 IO 堆缓冲大小 */
 #define CLI_FS_IO_CHUNK   512
-/** @brief 每任务会话表容量（允许多 CLI 任务） */
-#define CLI_FS_SESS_MAX   4
 /** @brief CLI 跟踪的打开句柄数 */
 #define CLI_FS_FH_MAX     8
-
-typedef struct {
-    uint8_t   used;
-    task_id_t tid;
-    char      cwd[CLI_FS_PATH_MAX];
-} cli_fs_sess_t;
 
 typedef struct {
     uint8_t used;
@@ -60,8 +52,7 @@ typedef struct {
     char    path[CLI_FS_PATH_MAX];
 } cli_fs_fh_t;
 
-static cli_fs_sess_t g_sess[CLI_FS_SESS_MAX];
-static cli_fs_fh_t   g_fh[CLI_FS_FH_MAX];
+static cli_fs_fh_t g_fh[CLI_FS_FH_MAX];
 
 /**
  * @brief 本地字符串相等比较
@@ -137,42 +128,6 @@ static const char *fs_skip_ws(const char *s)
         s++;
     }
     return s;
-}
-
-/**
- * @brief 取当前任务的 FS 会话（必要时分配）
- * @details 线性查找 tid；无则占用空槽，CWD 初始化为 `/`。
- * @return 会话指针；表满返回 NULL
- * @retval 非 NULL 会话
- * @retval NULL    表满
- * @note 无
- * @warning 无
- * @attention ❌ ISR；❌ 不阻塞
- * @internal
- */
-static cli_fs_sess_t *fs_sess_get(void)
-{
-    task_id_t tid = 0;
-    int cpu = (int)(read_csr(mhartid) & 0xFF);
-    cgrtos_task_t *cur = (cpu >= 0 && cpu < CONFIG_NUM_CORES) ? g_current[cpu] : 0;
-    if (cur) {
-        tid = cur->id;
-    }
-    for (int i = 0; i < CLI_FS_SESS_MAX; i++) {
-        if (g_sess[i].used && g_sess[i].tid == tid) {
-            return &g_sess[i];
-        }
-    }
-    for (int i = 0; i < CLI_FS_SESS_MAX; i++) {
-        if (!g_sess[i].used) {
-            g_sess[i].used = 1;
-            g_sess[i].tid = tid;
-            g_sess[i].cwd[0] = '/';
-            g_sess[i].cwd[1] = 0;
-            return &g_sess[i];
-        }
-    }
-    return 0;
 }
 
 /**
@@ -280,138 +235,12 @@ static int fs_confirm(const char *prompt)
 }
 
 /**
- * @brief 规范化绝对路径并防御穿越
- * @details 折叠多余 `/`、`.`、`..`；禁止空组件非法字符；结果始终以 `/` 开头且不越出根。
- * @param[in]  in  输入绝对路径
- * @param[out] out 输出缓冲
- * @param[in]  out_sz 容量
- * @return 0 成功；-1 非法
- * @retval 0  合法
- * @retval -1 非法/过长/空指针
- * @note `..` 在根上保持为 `/`
- * @warning 拒绝嵌入 `\\0`（C 串天然）与超长组件
- * @attention ✅ ISR；❌ 不阻塞
- * @internal
- */
-static int fs_normalize(const char *in, char *out, size_t out_sz)
-{
-    const char *p;
-    char stack[16][CGRTOS_FS_MAX_NAME];
-    int sp = 0;
-
-    if (!in || !out || out_sz < 2 || in[0] != '/') {
-        return -1;
-    }
-    p = in;
-    while (*p) {
-        while (*p == '/') {
-            p++;
-        }
-        if (*p == 0) {
-            break;
-        }
-        {
-            size_t n = 0;
-            char comp[CGRTOS_FS_MAX_NAME];
-            while (p[n] && p[n] != '/') {
-                if (p[n] < 32 || p[n] == 127) {
-                    return -1;
-                }
-                if (n + 1 >= sizeof(comp)) {
-                    return -1;
-                }
-                comp[n] = p[n];
-                n++;
-            }
-            comp[n] = 0;
-            p += n;
-            if (comp[0] == 0 || (comp[0] == '.' && comp[1] == 0)) {
-                continue;
-            }
-            if (comp[0] == '.' && comp[1] == '.' && comp[2] == 0) {
-                if (sp > 0) {
-                    sp--;
-                }
-                continue;
-            }
-            if (sp >= 16) {
-                return -1;
-            }
-            strncpy(stack[sp], comp, CGRTOS_FS_MAX_NAME);
-            stack[sp][CGRTOS_FS_MAX_NAME - 1] = 0;
-            sp++;
-        }
-    }
-    if (sp == 0) {
-        out[0] = '/';
-        out[1] = 0;
-        return 0;
-    }
-    {
-        size_t o = 0;
-        for (int i = 0; i < sp; i++) {
-            size_t cl = strlen(stack[i]);
-            if (o + 1 + cl + 1 > out_sz) {
-                return -1;
-            }
-            out[o++] = '/';
-            memcpy(out + o, stack[i], cl);
-            o += cl;
-        }
-        out[o] = 0;
-    }
-    return 0;
-}
-
-/**
- * @brief 将用户路径解析为规范化绝对路径（相对则拼接 CWD）
- * @details 校验合法性；失败打印原因。
- * @param[in]  user 用户输入路径；空则表示 CWD
- * @param[out] abs  输出绝对路径
- * @param[in]  abs_sz 容量
- * @return 0 成功；-1 失败
- * @retval 0  成功
- * @retval -1 失败
- * @note 无
- * @warning 无
- * @attention ❌ ISR；❌ 不阻塞
+ * @brief 将用户路径解析为绝对路径（包装 cli_path_resolve，失败打印）
  * @internal
  */
 static int fs_resolve(const char *user, char *abs, size_t abs_sz)
 {
-    cli_fs_sess_t *s = fs_sess_get();
-    char joined[CLI_FS_PATH_MAX];
-
-    if (!s || !abs) {
-        return -1;
-    }
-    if (!user || user[0] == 0) {
-        strncpy(abs, s->cwd, abs_sz);
-        abs[abs_sz - 1] = 0;
-        return 0;
-    }
-    if (user[0] == '/') {
-        if (fs_normalize(user, abs, abs_sz) != 0) {
-            cgrtos_printf("fs: invalid path '%s'\n", user);
-            return -1;
-        }
-        return 0;
-    }
-    /* relative: cwd + "/" + user */
-    if (fs_streq(s->cwd, "/")) {
-        if (cgrtos_snprintf(joined, sizeof(joined), "/%s", user) < 0) {
-            return -1;
-        }
-    } else {
-        if (cgrtos_snprintf(joined, sizeof(joined), "%s/%s", s->cwd, user) < 0) {
-            return -1;
-        }
-    }
-    if (fs_normalize(joined, abs, abs_sz) != 0) {
-        cgrtos_printf("fs: path traversal/invalid '%s'\n", user);
-        return -1;
-    }
-    return 0;
+    return cli_path_resolve(user, abs, abs_sz, 0);
 }
 
 /**
@@ -564,13 +393,13 @@ static int fs_close_tracked(int fd)
  */
 static void cmd_pwd(const char *arg)
 {
-    cli_fs_sess_t *s = fs_sess_get();
+    char cwd[CLI_FS_PATH_MAX];
     (void)arg;
-    if (!s) {
+    if (cli_path_getcwd(cwd, sizeof(cwd)) != 0) {
         cgrtos_printf("fs: no session\n");
         return;
     }
-    cgrtos_printf("%s\n", s->cwd);
+    cgrtos_printf("%s\n", cwd);
 }
 
 /**
@@ -585,14 +414,10 @@ static void cmd_pwd(const char *arg)
  */
 static void cmd_cd(const char *arg)
 {
-    cli_fs_sess_t *s = fs_sess_get();
     char abs[CLI_FS_PATH_MAX];
     cgrtos_stat_t st;
     const char *p = fs_skip_ws(arg ? arg : "");
 
-    if (!s) {
-        return;
-    }
     if (*p == 0) {
         p = "/";
     }
@@ -603,8 +428,9 @@ static void cmd_cd(const char *arg)
         cgrtos_printf("cd: not a directory: %s\n", abs);
         return;
     }
-    strncpy(s->cwd, abs, sizeof(s->cwd));
-    s->cwd[sizeof(s->cwd) - 1] = 0;
+    if (cli_path_setcwd(abs) != 0) {
+        cgrtos_printf("cd: setcwd failed\n");
+    }
 }
 
 /**
@@ -1256,12 +1082,8 @@ static void cmd_mkfs(const char *arg)
     if (vfs_mkfs(mp, 0) != 0) {
         cgrtos_printf("mkfs: failed\n");
     } else {
-        cli_fs_sess_t *s = fs_sess_get();
         cgrtos_printf("mkfs: ok on %s\n", mp);
-        if (s) {
-            s->cwd[0] = '/';
-            s->cwd[1] = 0;
-        }
+        (void)cli_path_setcwd("/");
     }
     cgrtos_free(work);
 }
@@ -1392,11 +1214,7 @@ static void cmd_fbench(const char *arg)
  */
 void cli_fs_session_init(void)
 {
-    cli_fs_sess_t *s = fs_sess_get();
-    if (s) {
-        s->cwd[0] = '/';
-        s->cwd[1] = 0;
-    }
+    cli_path_session_init();
     vfs_init();
 }
 
@@ -1418,10 +1236,11 @@ void cli_fs_help(void)
     cgrtos_printf("  stat <path> | hexdump <file>\n");
     cgrtos_printf("  mount [<fstype> <mp>] | umount <mp> | df [mp]\n");
     cgrtos_printf("  sync [mp] | mkfs [ram] [/] | fhandle | fbench [sz] [n]\n");
-    cgrtos_printf("  (Ctrl-C aborts long IO; mkfs/rm -r ask confirm)\n");
+    cgrtos_printf("  vi|vim|edit <file>   (CONFIG_CLI_VIM; see docs/MODULE_CLI_VIM.md)\n");
+    cgrtos_printf("  Tab completes paths; Ctrl-C aborts long IO; mkfs/rm -r ask confirm\n");
     cgrtos_printf("Examples:\n");
     cgrtos_printf("  mkdir /tmp && cd /tmp && touch a.txt\n");
-    cgrtos_printf("  ls -l / ; cat /tmp/a.txt ; cp a.txt b.txt\n");
+    cgrtos_printf("  vi a.txt ; ls -l / ; cat /tmp/a.txt\n");
     cgrtos_printf("  df ; mount ; sync ; fbench 512 30\n\n");
 }
 
@@ -1513,6 +1332,9 @@ int cli_fs_try_handle(char *line)
     }
     if (fs_streq(line, "fbench") || fs_startswith(line, "fbench", &arg)) {
         cmd_fbench(arg ? arg : "");
+        return 1;
+    }
+    if (cli_vim_try_handle(line)) {
         return 1;
     }
     return 0;

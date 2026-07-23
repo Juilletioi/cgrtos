@@ -58,6 +58,9 @@
 #ifndef CONFIG_CLI_FS
 #define CONFIG_CLI_FS               0
 #endif
+#ifndef CONFIG_CLI_VIM
+#define CONFIG_CLI_VIM              0
+#endif
 #ifndef CONFIG_USE_TIMERS
 #define CONFIG_USE_TIMERS           0
 #endif
@@ -252,10 +255,22 @@
 
 /**
  * @brief CLI 文件系统命令集（pwd/cd/ls/cat/…）
- * @details 仅影响 `APP=cli`；0=裁剪 `tests/cli_fs.c` 注册与帮助。
+ * @details 仅影响 `APP=cli`；0=裁剪 `cli/cli_fs.c` 注册与帮助。
  */
 #ifndef CONFIG_CLI_FS
 #define CONFIG_CLI_FS               1
+#endif
+
+/**
+ * @brief CLI 内嵌 vim 风格编辑器（vi/vim/edit）与路径补全
+ * @details 依赖 CONFIG_CLI_FS=1；0=cli/cli_vim 为空实现。
+ *          最小配置下默认关闭。调参见 CGRTOS_VIM_*。
+ */
+#ifndef CONFIG_CLI_VIM
+#define CONFIG_CLI_VIM              1
+#endif
+#if CONFIG_CLI_VIM && !CONFIG_CLI_FS
+#error "CONFIG_CLI_VIM requires CONFIG_CLI_FS=1"
 #endif
 
 /** @brief 堆喷毒（调试）；0=关 */
@@ -415,6 +430,22 @@
 #define CGRTOS_FS_MAX_FILE_BYTES    (32 * 1024)
 #endif
 
+/** @brief CLI vim undo 栈深度（环形） */
+#ifndef CGRTOS_VIM_UNDO_MAX
+#define CGRTOS_VIM_UNDO_MAX         64
+#endif
+/** @brief CLI vim 匿名剪贴板最大字节 */
+#ifndef CGRTOS_VIM_CLIP_MAX
+#define CGRTOS_VIM_CLIP_MAX         4096
+#endif
+/** @brief CLI vim 搜索 pattern 最大长度 */
+#ifndef CGRTOS_VIM_PAT_MAX
+#define CGRTOS_VIM_PAT_MAX          64
+#endif
+/** @brief CLI vim Ex/搜索命令行最大长度 */
+#ifndef CGRTOS_VIM_CMDLINE_MAX
+#define CGRTOS_VIM_CMDLINE_MAX      96
+#endif
 
 /** @brief 简易内核 Trace 环形缓冲 */
 #ifndef CONFIG_USE_TRACE
