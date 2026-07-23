@@ -14,7 +14,7 @@
 
 #include "../kernel/cgrtos.h"
 #include "../kernel/vfs.h"
-#include "../hal/hal_board.h"
+#include "hal_board.h"
 #include "test_cases.h"
 #include "stress_cases.h"
 
@@ -169,7 +169,7 @@ static void edf_worker(void *arg)
     tick_t period = (tick_t)(uintptr_t)arg;
     tick_t wake = cgrtos_get_ticks();
     cgrtos_task_t *self = 0;
-    uint8_t cpu = (uint8_t)read_csr(mhartid);
+    uint8_t cpu = arch_cpu_id();
     self = g_current[cpu];
     if (self) {
         cgrtos_task_set_period(self->id, period);
@@ -277,7 +277,7 @@ static void rr_worker(void *arg)
 
 /**
  * @brief SMP 亲和性测试：检测是否在 hart 1 上运行
- * @details read_csr(mhartid)==1 时置 g_smp_core1=1。
+ * @details arch_cpu_id()==1 时置 g_smp_core1=1。
  * @param[in] arg 未使用
  * @return 无（永不返回）
  * @retval 无
@@ -290,7 +290,7 @@ static void aff_worker(void *arg)
 {
     (void)arg;
     while (1) {
-        uint8_t h = (uint8_t)read_csr(mhartid);
+        uint8_t h = arch_cpu_id();
         if (h == 1) {
             g_smp_core1 = 1;
         }
@@ -313,7 +313,7 @@ static void lb_worker(void *arg)
     (void)arg;
     tick_t end = cgrtos_get_ticks() + portMS_TO_TICK(80);
     while (cgrtos_get_ticks() < end) {
-        if ((uint8_t)read_csr(mhartid) == 1) {
+        if (arch_cpu_id() == 1) {
             g_lb_seen_core1++;
         }
         for (volatile int i = 0; i < 30; i++) {
@@ -474,13 +474,19 @@ static void case_delay(void)
     md = m1 - m0;
     expect("delay_us_short", md >= 400 && md < 50000);
 
-    /* Hybrid path (several ms via us) */
+    /* Hybrid path (several ms via us); bounds scale with timer Hz */
     m0 = cgrtos_mtime_read();
     cgrtos_delay_us(5000);
     m1 = cgrtos_mtime_read();
     md = m1 - m0;
-    /* 5ms @ 1MHz = 5000 cycles; allow QEMU slack */
-    expect("delay_us_hybrid", md >= 4000 && md < 200000);
+    {
+        uint64_t lo = (CONFIG_TIMER_CLOCK_HZ * 4ULL) / 1000ULL;   /* ~4ms */
+        uint64_t hi = (CONFIG_TIMER_CLOCK_HZ * 200ULL) / 1000ULL; /* ~200ms QEMU slack */
+        if (lo < 4000ULL) {
+            lo = 4000ULL;
+        }
+        expect("delay_us_hybrid", md >= lo && md < hi);
+    }
 }
 
 /**
@@ -771,7 +777,7 @@ static void case_safety(void)
     expect("no_del_zero", cgrtos_task_delete(0) == pdFAIL);
     expect("no_del_bogus", cgrtos_task_delete((task_id_t)0xFFFFFFFFull) == pdFAIL);
 
-    uint8_t cpu = (uint8_t)read_csr(mhartid);
+    uint8_t cpu = arch_cpu_id();
     cgrtos_task_t *cur = g_current[cpu];
     expect("stack_ok", cur && cgrtos_task_check_stack(cur->id) == pdPASS);
     expect("stack_hwm_pos", cgrtos_task_get_stack_high_water_mark(cur->id) > 0);
@@ -1236,7 +1242,7 @@ static void m1_lo_worker(void *arg)
 {
     (void)arg;
 #if CONFIG_USE_PREEMPT_THRESH
-    cgrtos_task_t *self = g_current[(uint8_t)read_csr(mhartid)];
+    cgrtos_task_t *self = g_current[arch_cpu_id()];
     if (self) {
         /* 低优先级但高阈值：抑制同核更高 prio 抢占（直到阈值外） */
         (void)cgrtos_task_set_preempt_threshold(self->id, 20);
@@ -1303,7 +1309,7 @@ static void m1_exit_worker(void *arg)
 static void m1_dpcp_worker(void *arg)
 {
     (void)arg;
-    cgrtos_task_t *self = g_current[(uint8_t)read_csr(mhartid)];
+    cgrtos_task_t *self = g_current[arch_cpu_id()];
     if (self && g_m1_dpcp_mtx) {
         cgrtos_task_set_deadline(self->id, cgrtos_get_ticks() + 5000);
         if (cgrtos_mutex_lock(g_m1_dpcp_mtx, portMAX_DELAY) == pdPASS) {
@@ -1929,7 +1935,8 @@ static void case_hal(void)
            (hal_device_find(HAL_DEV_TIMER)->flags & HAL_DEV_F_READY) != 0);
     expect("hal_irqc",
            hal_device_find(HAL_DEV_IRQC) != 0 &&
-           hal_device_find_by_name("plic0") != 0);
+           (hal_device_find_by_name("plic0") != 0 ||
+            hal_device_find_by_name("gic0") != 0));
     expect("hal_ipi", hal_device_find(HAL_DEV_IPI) != 0);
     expect("hal_get0", hal_device_get(0) != 0);
     expect("hal_get_oob", hal_device_get(9999) == 0);

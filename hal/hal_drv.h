@@ -16,7 +16,7 @@
  *         |
  *         |  调用 ops / 注册 device
  *         v
- *   板级 Driver（arch/riscv 下各 .c：只碰 MMIO）
+ *   板级 Driver（arch/<ARCH> 下各 .c：只碰 MMIO）
  * @endcode
  *
  * - Driver **不得** 调用任何 `hal_*` 用户 API。
@@ -24,6 +24,9 @@
  * - HAL 的 `hal_board_init()` 负责 `hal_device_register()` 与按序 init。
  * - Trap / 极底层 ISR 入口应直接调用本文件对应驱动内部例程（或同编译单元 static），
  *   **禁止** 为图省事再绕回 `hal_irqc_claim()` 等用户 API。
+ *
+ * 中性设备名：`drv_timer_device` / `drv_irqc_device`；
+ * 兼容旧名：`drv_clint_device` / `drv_plic_device`（宏别名）。
  */
 #ifndef CGRTOS_HAL_DRV_H
 #define CGRTOS_HAL_DRV_H
@@ -49,35 +52,31 @@ extern "C" {
 hal_device_t *drv_uart_device(void);
 
 /**
- * @brief 取得 CLINT/SysTimer 设备描述符
- * @details
- * 1. 返回 arch/riscv/clint.c 中静态 s_clint_dev 指针。
- * 2. 注册由 hal_board_init 完成。
- * @return 非 NULL 静态设备指针；生命周期 = 系统寿命
- * @retval 非 NULL 成功
- * @note 应用应使用 hal_timer_init / hal_mtime_read
- * @warning 驱动不得自行注册或释放
+ * @brief 取得系统定时器设备描述符（CLINT/SysTimer 或 CNTV 等）
+ * @details 注册由 hal_board_init 完成；应用用 hal_timer_init / hal_mtime_read。
+ * @return 非 NULL 静态设备指针
  * @attention ✅ ISR；❌ 不阻塞
  */
-hal_device_t *drv_clint_device(void);
+hal_device_t *drv_timer_device(void);
+
+/** @brief 兼容旧名（RISC-V CLINT 时代） */
+#define drv_clint_device drv_timer_device
 
 /**
- * @brief 取得 PLIC 外部中断控制器设备描述符
- * @details
- * 1. 返回 arch/riscv/plic.c 中静态 s_plic_dev 指针。
- * 2. 注册由 hal_board_init 完成。
- * @return 非 NULL 静态设备指针；生命周期 = 系统寿命
- * @retval 非 NULL 成功
- * @note 应用应使用 hal_irqc_*；trap 路径直调驱动 static 例程
- * @warning 驱动不得自行注册或释放
+ * @brief 取得外部中断控制器设备描述符（PLIC 或 GIC 等）
+ * @details 应用应使用 hal_irqc_*；trap 路径直调驱动 static 例程。
+ * @return 非 NULL 静态设备指针
  * @attention ✅ ISR；❌ 不阻塞
  */
-hal_device_t *drv_plic_device(void);
+hal_device_t *drv_irqc_device(void);
+
+/** @brief 兼容旧名（RISC-V PLIC 时代） */
+#define drv_plic_device drv_irqc_device
 
 /**
- * @brief 取得 IPI（MSIP）设备描述符
+ * @brief 取得 IPI 设备描述符（MSIP / SGI 等）
  * @details
- * 1. 返回 arch/riscv/ipic.c 中静态 s_ipi_dev 指针。
+ * 1. 返回静态 IPI 设备指针。
  * 2. 注册由 hal_board_init 完成。
  * @return 非 NULL 静态设备指针；生命周期 = 系统寿命
  * @retval 非 NULL 成功
@@ -90,8 +89,8 @@ hal_device_t *drv_ipi_device(void);
 /**
  * @brief 取得 CPU 早期初始化设备描述符
  * @details
- * 1. 返回 arch/riscv/arch.c 中静态 s_cpu_dev 指针。
- * 2. 注册由 hal_board_init 完成；ops->init 打开 MSIE|MTIE|MEIE。
+ * 1. 返回静态 CPU 设备指针。
+ * 2. 注册由 hal_board_init 完成；ops->init 打开架构相关中断使能。
  * @return 非 NULL 静态设备指针；生命周期 = 系统寿命
  * @retval 非 NULL 成功
  * @note 应用应使用 hal_cpu_init

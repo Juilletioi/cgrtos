@@ -27,8 +27,6 @@ uint32_t g_task_create_count;
 /** @brief 累计任务删除次数（统计） */
 uint32_t g_task_delete_count;
 
-extern char __global_pointer$;
-
 #if CONFIG_USE_HOOKS
 extern cgrtos_hook_fn_t g_idle_hook;
 #if CONFIG_IDLE_SLEEP_HOOK
@@ -63,7 +61,7 @@ void cgrtos_set_idle_sleep_hook(cgrtos_hook_fn_t hook)
 static void task_bootstrap(void *arg)
 {
     (void)arg;
-    uint8_t cpu = (uint8_t)read_csr(mhartid);
+    uint8_t cpu = arch_cpu_id();
     cgrtos_task_t *self = g_current[cpu];
     if (self && self->entry_fn) {
         self->entry_fn(self->entry_arg);
@@ -73,41 +71,18 @@ static void task_bootstrap(void *arg)
 
 /**
  * @brief 初始化任务栈帧，使其可从 context_switch 首次启动
- * @details 栈顶向下预留 16 字节对齐区并分配 34 字 trap 帧；可选整栈 0xA5 填充与金丝雀；
- *          按 trap_vector 布局写入 gp/a0/mcause/mepc/mstatus/mscratch。
- * @param[in] task 目标任务 TCB，其内嵌 stack[] 将被填充
- * @param[in] fn   任务入口函数，写入 trap 帧 mepc
- * @param[in] arg  传递给入口的 a0 参数
- * @return 初始栈指针，指向 trap 帧底部
- * @retval 非 NULL trap 帧底 sp
- * @note mstatus 设为 M 模式、MPIE=1、MIE=0
- * @warning 栈布局须与 trap_vector / context_switch 约定一致
+ * @details 委托 arch_task_stack_init（RISC-V trap 帧 / ARM64 异常帧）。
+ * @param[in] task 目标任务 TCB
+ * @param[in] fn   任务入口
+ * @param[in] arg  入口参数
+ * @return 初始栈指针
+ * @retval 非 NULL
  * @attention @internal
  */
 static uint64_t *task_init_stack(cgrtos_task_t *task, task_func_t fn, void *arg)
 {
-    /* 1. 栈顶 16 字节对齐后向下分配 trap 帧 */
-    uint64_t *sp = (uint64_t *)((uint8_t *)task->stack +
-                                sizeof(task->stack) - 16);
-    sp -= 34;
-
-#if CONFIG_CHECK_STACK_OVERFLOW
-    /* 2a. 整栈填充模式字并写入栈底金丝雀 */
-    memset(task->stack, 0xA5, sizeof(task->stack));
-    task->stack[0] = STACK_CANARY;
-#else
-    /* 2b. 仅清零即将使用的 trap 帧区域 */
-    memset(sp, 0, 34 * sizeof(uint64_t));
-#endif
-
-    /* 3. 按 trap 帧布局填充关键寄存器（与 trap_vector 约定一致） */
-    sp[1]  = (uint64_t)(uintptr_t)&__global_pointer$; /* gp — medany 代码段必需 */
-    sp[8]  = (uint64_t)arg;    /* a0：任务入口参数 */
-    sp[30] = 0;                /* mcause（首次启动未使用） */
-    sp[31] = (uint64_t)fn;     /* mepc：mret 跳转至任务入口 */
-    sp[32] = 0x1880;           /* mstatus: MPP=M, MPIE=1, MIE=0 */
-    sp[33] = 0;                /* mscratch */
-    return sp;
+    arch_task_stack_init(task, fn, arg);
+    return task->sp;
 }
 
 /**
@@ -264,7 +239,7 @@ task_id_t cgrtos_task_create(const char *name, task_func_t fn, void *arg,
 #if CONFIG_SMP_INITIAL_PLACE
     task->run_cpu = cgrtos_sched_least_loaded_core();
 #else
-    task->run_cpu = (uint8_t)read_csr(mhartid);
+    task->run_cpu = arch_cpu_id();
 #endif
     task->slice_remain = CONFIG_TIME_SLICE_TICKS;
     /* 6. 构建 trap 帧（bootstrap）并加入就绪队列 */
@@ -296,7 +271,7 @@ task_id_t cgrtos_task_create(const char *name, task_func_t fn, void *arg,
     /* 7. 对端核需 IPI 才能调度新就绪任务 */
 #if CONFIG_NUM_CORES > 1
     if (CGRTOS_CORE_ONLINE(task->run_cpu) &&
-        task->run_cpu != (uint8_t)read_csr(mhartid)) {
+        task->run_cpu != arch_cpu_id()) {
         cgrtos_smp_send_ipi(task->run_cpu);
     }
 #endif
@@ -339,7 +314,7 @@ int cgrtos_task_delete(task_id_t id)
         }
     }
 
-    uint8_t self = (uint8_t)read_csr(mhartid);
+    uint8_t self = arch_cpu_id();
     uint8_t run = task->run_cpu;
 
     /* 3. 释放该任务持有的互斥量（避免等待者死锁）
@@ -670,7 +645,7 @@ uint8_t cgrtos_task_get_preempt_threshold(task_id_t id)
  */
 void cgrtos_task_exit(void)
 {
-    uint8_t cpu = (uint8_t)read_csr(mhartid);
+    uint8_t cpu = arch_cpu_id();
     cgrtos_task_t *cur = g_current[cpu];
     if (!cur || cur->id == 0) {
         /* 无效 current：不可空转占核；强制挂起本任务上下文 */
@@ -772,7 +747,7 @@ int cgrtos_task_set_affinity(task_id_t id, uint8_t cpu)
     }
     cgrtos_exit_critical();
 
-    if (cpu != 0xFF && cpu != (uint8_t)read_csr(mhartid)) {
+    if (cpu != 0xFF && cpu != arch_cpu_id()) {
         cgrtos_smp_send_ipi(cpu);
     }
     cgrtos_sched_yield();
@@ -1083,7 +1058,7 @@ uint32_t cgrtos_task_notify_wait(uint32_t clear_on_entry, uint32_t clear_on_exit
                                  uint32_t *value, tick_t timeout)
 {
     /* 1. 获取当前核 running 任务 */
-    uint8_t cpu = (uint8_t)read_csr(mhartid);
+    uint8_t cpu = arch_cpu_id();
     cgrtos_task_t *cur = g_current[cpu];
     if (!cur || cur->id == 0) {
         return 0;
@@ -1171,7 +1146,7 @@ void cgrtos_delay(tick_t ticks)
         return;
     }
 
-    cpu = (uint8_t)read_csr(mhartid);
+    cpu = arch_cpu_id();
     cur = g_current[cpu];
     if (!cur || cur->id == 0) {
         return;
@@ -1209,7 +1184,7 @@ void cgrtos_delay_until_tick(tick_t wake)
         return;
     }
 
-    cpu = (uint8_t)read_csr(mhartid);
+    cpu = arch_cpu_id();
     cur = g_current[cpu];
     if (!cur || cur->id == 0) {
         return;
@@ -1298,6 +1273,11 @@ void cgrtos_delay_ms(uint32_t ms)
         cgrtos_delay(0);
         return;
     }
+#if !CONFIG_DELAY_BUSY_US
+    /* 板级关闭亚 tick 忙等：纯 tick 延时（如 AArch64 QEMU） */
+    cgrtos_delay(portMS_TO_TICK(ms));
+    return;
+#else
     /* 2. 乘法溢出则退化为纯 tick 路径 */
     if (ms > (0xFFFFFFFFU / 1000U)) {
         cgrtos_delay(portMS_TO_TICK(ms));
@@ -1305,6 +1285,7 @@ void cgrtos_delay_ms(uint32_t ms)
     }
     /* 3. 常规模围转 us 委托 delay_us */
     cgrtos_delay_us(ms * 1000U);
+#endif
 }
 
 /**
@@ -1340,7 +1321,7 @@ void cgrtos_delay_until(tick_t *prev_wake, tick_t increment)
 
 /**
  * @brief 各 CPU 核 idle 任务入口（最低优先级后台循环）
- * @param arg 未使用（核号通过 read_csr(mhartid) 获取）
+ * @param arg 未使用（核号通过 arch_cpu_id() 获取）
  * @details
  * 1. 无限循环：可选 idle 钩子 → sched_idle_steal 工作窃取。
  * 2. QEMU busy 泵模式：hart0 自旋推进 mtime；hart1 短自旋（禁止 WFI 以免时间基冻结）。
@@ -1350,7 +1331,7 @@ void cgrtos_delay_until(tick_t *prev_wake, tick_t increment)
 void cgrtos_idle_task_entry(void *arg)
 {
     (void)arg;
-    uint8_t cpu = (uint8_t)read_csr(mhartid);
+    uint8_t cpu = arch_cpu_id();
 
 #if CONFIG_IDLE_BUSY_PUMP
     const uint64_t tpi = CONFIG_TIMER_CLOCK_HZ / CONFIG_TICK_RATE_HZ;
@@ -1385,8 +1366,8 @@ void cgrtos_idle_task_entry(void *arg)
             }
         }
 #else
-        /* 2. 非 busy 模式：低功耗 WFI（真实硅片入口） */
-        asm volatile("wfi" ::: "memory");
+        /* 2. 非 busy 模式：低功耗等待中断（真实硅片入口） */
+        arch_cpu_wait();
 #endif
 
         /* 3. 跨核唤醒 pending 则 yield 处理切换 */

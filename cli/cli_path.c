@@ -61,7 +61,7 @@ static int path_streq(const char *a, const char *b)
 static cli_path_sess_t *path_sess_get(void)
 {
     task_id_t tid = 0;
-    int cpu = (int)(read_csr(mhartid) & 0xFF);
+    int cpu = (int)arch_cpu_id();
     cgrtos_task_t *cur = (cpu >= 0 && cpu < CONFIG_NUM_CORES) ? g_current[cpu] : 0;
     if (cur) {
         tid = cur->id;

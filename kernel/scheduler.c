@@ -210,7 +210,7 @@ static int sched_edf_affinity_ok(cgrtos_task_t *task, uint8_t cpu)
  */
 static void sched_mcedf_kick_all(void)
 {
-    uint8_t here = (uint8_t)read_csr(mhartid);
+    uint8_t here = arch_cpu_id();
     g_yield_pending[here] = 1;
 #if CONFIG_NUM_CORES > 1
     for (uint8_t c = 0; c < CONFIG_NUM_CORES; c++) {
@@ -241,7 +241,7 @@ static void sched_edf_kick_request(void)
     if (cgrtos_in_critical() || cgrtos_in_isr()) {
         /* 临界区/ISR：只记 pending 与本核 yield；出临界区或任务态再 flush */
         g_edf_kick_pending = 1;
-        g_yield_pending[(uint8_t)read_csr(mhartid)] = 1;
+        g_yield_pending[arch_cpu_id()] = 1;
         return;
     }
     g_edf_kick_pending = 0;
@@ -269,7 +269,7 @@ void cgrtos_sched_edf_kick_flush(void)
     g_edf_kick_pending = 0;
     /* tick/ISR 里已在 exit_critical：只置 yield，避免在 ISR 尾再打全员 IPI 放大抖动 */
     if (cgrtos_in_isr()) {
-        uint8_t here = (uint8_t)read_csr(mhartid);
+        uint8_t here = arch_cpu_id();
         g_yield_pending[here] = 1;
 #if CONFIG_NUM_CORES > 1
         for (uint8_t c = 0; c < CONFIG_NUM_CORES; c++) {
@@ -1369,7 +1369,7 @@ int cgrtos_sched_unblock(cgrtos_task_t *task)
     {
         /* 4. SMP：若目标核 != 本核且目标核已上线，向其发 IPI */
         uint8_t dst = cgrtos_sched_target_core(task);
-        uint8_t here = (uint8_t)read_csr(mhartid);
+        uint8_t here = arch_cpu_id();
         if (dst != here && CGRTOS_CORE_ONLINE(dst)) {
             cgrtos_smp_send_ipi(dst);
         }
@@ -1417,11 +1417,11 @@ void cgrtos_sched_resume(void)
 }
 
 /**
- * @brief 主动让出 CPU（任务上下文 ecall 进入 trap 切换）
- * @details 调度挂起或未运行则返回；置 yield_pending 与 force_yield；ISR 内仅置标志；否则 ecall。
+ * @brief 主动让出 CPU（任务上下文陷入后完成切换）
+ * @details 调度挂起或未运行则返回；置 yield_pending 与 force_yield；ISR 内仅置标志；否则 arch_yield_trap。
  * @return 无
  * @retval 无
- * @note noinline 保证 ecall 返回路径正确
+ * @note noinline 保证陷阱返回路径正确
  * @warning ISR 请用 yield_from_isr
  * @attention ❌ ISR；✅ block/switch
  */
@@ -1431,7 +1431,7 @@ void __attribute__((noinline)) cgrtos_sched_yield(void)
         return;
     }
 
-    uint8_t cpu = (uint8_t)read_csr(mhartid);
+    uint8_t cpu = arch_cpu_id();
     g_yield_pending[cpu] = 1;
     g_force_yield[cpu] = 1;
 
@@ -1439,7 +1439,7 @@ void __attribute__((noinline)) cgrtos_sched_yield(void)
         return;
     }
 
-    asm volatile("ecall" ::: "memory");
+    arch_yield_trap();
 }
 
 /**
@@ -1453,7 +1453,7 @@ void __attribute__((noinline)) cgrtos_sched_yield(void)
  */
 void cgrtos_sched_yield_from_isr(void)
 {
-    uint8_t cpu = (uint8_t)read_csr(mhartid);
+    uint8_t cpu = arch_cpu_id();
     g_yield_pending[cpu] = 1;
 }
 
@@ -1470,7 +1470,7 @@ void cgrtos_sched_yield_from_isr(void)
  */
 uint64_t *cgrtos_sched_switch_from_trap(uint64_t *sp)
 {
-    uint8_t cpu = (uint8_t)read_csr(mhartid);
+    uint8_t cpu = arch_cpu_id();
     cgrtos_task_t *cur = g_current[cpu];
     cgrtos_task_t *next;
 
@@ -1649,7 +1649,7 @@ static void sched_process_delayed_tasks(void)
  */
 void cgrtos_tick_local(void)
 {
-    uint8_t cpu = (uint8_t)read_csr(mhartid);
+    uint8_t cpu = arch_cpu_id();
     cgrtos_task_t *cur = g_current[cpu];
 
     if (cur && cur->id > 0) {
@@ -1706,7 +1706,7 @@ void cgrtos_tick_local(void)
 void cgrtos_tick_handler(void)
 {
     /* 1. 读取本核 cpu 编号 */
-    uint8_t cpu = (uint8_t)read_csr(mhartid);
+    uint8_t cpu = arch_cpu_id();
 
     if (cpu == 0) {
         /* 2a. 原子递增 g_ticks */
@@ -2039,7 +2039,7 @@ void cgrtos_sched_idle_steal(void)
         return;
     }
 
-    uint8_t cpu = (uint8_t)read_csr(mhartid);
+    uint8_t cpu = arch_cpu_id();
     uint8_t other = (cpu == 0) ? 1 : 0;
 
     /* 3. 本核已有就绪任务则返回（不窃取） */

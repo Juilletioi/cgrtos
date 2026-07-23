@@ -345,7 +345,7 @@ void *cgrtos_queue_set_select(cgrtos_queue_set_t *set, tick_t timeout)
 
     for (;;) {
         cgrtos_enter_critical();
-        uint8_t cpu = (uint8_t)read_csr(mhartid);
+        uint8_t cpu = arch_cpu_id();
         cgrtos_task_t *cur = g_current[cpu];
         /* 2. 尝试弹出就绪成员 */
         void *obj = qs_pop_ready(set);

@@ -14,7 +14,7 @@
 
 #include "../../kernel/cgrtos.h"
 #include "../../hal/hal_drv.h"
-#include "../../hal/hal_board.h"
+#include "hal_board.h"
 
 /**
  * @brief 打开三类 M 模式中断使能位

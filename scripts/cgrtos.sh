@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # =============================================================================
-# CG-RTOS — 编译 / 运行 / clangd / 文档 统一入口
+# CG-RTOS — 编译 / 运行 / clangd / 文档 统一入口（多架构）
 # =============================================================================
 # 设计原则：编译与运行分离。
 #   build   → 只编译（可选生成 compile_commands.json）
-#   run     → 只运行已有 cgrtos.bin（不自动 make）
+#   run     → 只运行已有镜像（不自动 make）
 #   test/…  → 先 build 再 run（可用 --no-build）
 #
 # 详细说明见：docs/SCRIPTS.md
@@ -14,10 +14,14 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
+# RISC-V 默认工具链根；ARM64 使用 cgrtos-tools 或系统 aarch64-linux-gnu-*
 SYSROOT="${SYSROOT:-/home/cong/nuclei-ux900fd-linux/nuclei-linux-sdk/work/evalsoc/buildroot_initramfs/host/opt/ext-toolchain}"
-QEMU="${QEMU:-/home/cong/nuclei-ux900fd-linux/tools/nuclei-qemu/bin/qemu-system-riscv64}"
-GDB="${GDB:-${SYSROOT}/bin/riscv64-unknown-linux-gnu-gdb}"
-export PATH="${SYSROOT}/bin:${PATH}"
+TOOLS_ROOT="${TOOLS_ROOT:-/home/cong/cgrtos-tools/root}"
+GDB="${GDB:-}"
+QEMU_OVERRIDE="${QEMU:-}"
+QEMU=""
+BOARD_ARCH="riscv"
+CROSS_PREFIX="riscv64-unknown-linux-gnu-"
 
 CMD="${1:-help}"
 shift || true
@@ -31,6 +35,7 @@ GDB_PORT=1234
 WITH_GDB=0
 CORES="${CORES:-2}"
 BOARD="${BOARD:-nuclei_evalsoc}"
+CPU="${CPU:-}"
 PROFILE="${PROFILE:-}"
 
 while [[ $# -gt 0 ]]; do
@@ -43,6 +48,7 @@ while [[ $# -gt 0 ]]; do
     --cli) APP=cli; shift ;;
     --cores) CORES="$2"; shift 2 ;;
     --board) BOARD="$2"; shift 2 ;;
+    --cpu) CPU="$2"; shift 2 ;;
     --profile) PROFILE="$2"; shift 2 ;;
     --no-build) NO_BUILD=1; shift ;;
     --clean) DO_CLEAN=1; shift ;;
@@ -61,23 +67,89 @@ case "${CORES}" in
   *) echo "ERROR: --cores must be 1, 2, or 4 (got '${CORES}')"; exit 2 ;;
 esac
 
-QEMU_MACHINE=(
-  -M nuclei_evalsoc,download=ddr
-  -smp "${CORES}" -m 512M
-  -cpu nuclei-ux900fd,ext=svpbmt_zicbom_sstc_sscofpmf_zba_zbb_zbc_zbs_zicond
-  -nographic -serial mon:stdio
-)
-if [[ "${CORES}" -ge 2 ]]; then
-  QEMU_MACHINE+=(-device loader,addr=0xA0000000,cpu-num=1)
-fi
-if [[ "${CORES}" -ge 4 ]]; then
-  QEMU_MACHINE+=(-device loader,addr=0xA0000000,cpu-num=2)
-  QEMU_MACHINE+=(-device loader,addr=0xA0000000,cpu-num=3)
-fi
+# Board QEMU profile (from boards/*/board.mk via make qemu-cmd)
+QEMU_LOAD="bios_bin"
+QEMU_MACHINE=()
+
+load_board_qemu() {
+  local line qflags
+  if [[ ! -f "boards/${BOARD}/board.mk" ]]; then
+    echo "ERROR: unknown board '${BOARD}' (boards/${BOARD}/board.mk missing)"
+    exit 2
+  fi
+  while IFS= read -r line; do
+    case "${line}" in
+      QEMU=*) QEMU="${line#QEMU=}" ;;
+      QEMU_LOAD=*) QEMU_LOAD="${line#QEMU_LOAD=}" ;;
+      QEMU_ARCH=*) BOARD_ARCH="${line#QEMU_ARCH=}" ;;
+      QEMU_CROSS=*) CROSS_PREFIX="${line#QEMU_CROSS=}" ;;
+      QEMU_FLAGS=*)
+        qflags="${line#QEMU_FLAGS=}"
+        # shellcheck disable=SC2206
+        QEMU_MACHINE=( ${qflags} )
+        ;;
+    esac
+  done < <(make -s qemu-cmd BOARD="${BOARD}" CORES="${CORES}" CPU="${CPU}" 2>/dev/null)
+  if [[ -n "${QEMU_OVERRIDE}" ]]; then
+    QEMU="${QEMU_OVERRIDE}"
+  fi
+  if [[ -z "${QEMU}" || ${#QEMU_MACHINE[@]} -eq 0 ]]; then
+    echo "ERROR: make qemu-cmd failed for BOARD=${BOARD}"
+    make qemu-cmd BOARD="${BOARD}" CORES="${CORES}" CPU="${CPU}" || true
+    exit 1
+  fi
+}
+
+# Setup PATH / GDB for current BOARD_ARCH after load_board_qemu.
+setup_arch_env() {
+  if [[ "${BOARD_ARCH}" == "arm64" ]]; then
+    if [[ -d "${TOOLS_ROOT}/usr/bin" ]]; then
+      export PATH="${TOOLS_ROOT}/usr/bin:${PATH}"
+      if [[ -d "${TOOLS_ROOT}/usr/lib/x86_64-linux-gnu" ]]; then
+        export LD_LIBRARY_PATH="${TOOLS_ROOT}/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH:-}"
+      fi
+    fi
+    CROSS_PREFIX="${CROSS_PREFIX:-aarch64-linux-gnu-}"
+    if [[ -z "${GDB}" ]]; then
+      GDB="$(command -v aarch64-linux-gnu-gdb || true)"
+      [[ -n "${GDB}" ]] || GDB="$(command -v gdb-multiarch || true)"
+    fi
+  else
+    export PATH="${SYSROOT}/bin:${PATH}"
+    CROSS_PREFIX="${CROSS_PREFIX:-riscv64-unknown-linux-gnu-}"
+    if [[ -z "${GDB}" ]]; then
+      if [[ -x "${SYSROOT}/bin/riscv64-unknown-linux-gnu-gdb" ]]; then
+        GDB="${SYSROOT}/bin/riscv64-unknown-linux-gnu-gdb"
+      else
+        GDB="$(command -v riscv64-unknown-linux-gnu-gdb || true)"
+      fi
+    fi
+  fi
+}
+
+load_board_qemu
+setup_arch_env
+
+qemu_image_args() {
+  if [[ "${QEMU_LOAD}" == "elf" ]]; then
+    echo -bios none -kernel cgrtos.elf
+  elif [[ "${QEMU_LOAD}" == "kernel" ]]; then
+    echo -kernel cgrtos.elf
+  else
+    echo -bios cgrtos.bin
+  fi
+}
 
 need_toolchain() {
-  if [[ ! -x "${SYSROOT}/bin/riscv64-unknown-linux-gnu-gcc" ]]; then
-    echo "ERROR: toolchain not found at ${SYSROOT}/bin"
+  local gcc_bin
+  gcc_bin="$(command -v "${CROSS_PREFIX}gcc" || true)"
+  if [[ -z "${gcc_bin}" ]]; then
+    echo "ERROR: ${CROSS_PREFIX}gcc not found (BOARD=${BOARD} ARCH=${BOARD_ARCH})"
+    if [[ "${BOARD_ARCH}" == "arm64" ]]; then
+      echo "  Hint: export PATH=${TOOLS_ROOT}/usr/bin:\$PATH"
+    else
+      echo "  Hint: SYSROOT=${SYSROOT}"
+    fi
     exit 1
   fi
 }
@@ -90,11 +162,8 @@ need_qemu() {
 }
 
 need_gdb() {
-  if [[ ! -x "${GDB}" ]]; then
-    GDB="$(command -v riscv64-unknown-linux-gnu-gdb || true)"
-  fi
   if [[ -z "${GDB}" || ! -x "${GDB}" ]]; then
-    echo "ERROR: GDB not found (set GDB=...)"
+    echo "ERROR: GDB not found for ARCH=${BOARD_ARCH} (set GDB=...)"
     exit 1
   fi
 }
@@ -108,29 +177,26 @@ make_vars() {
 # ---------------------------------------------------------------------------
 do_compdb() {
   need_toolchain
-  echo "==> Generating compile_commands.json (APP=${APP} CORES=${CORES} BOARD=${BOARD})"
-  # Touch a stamp so make rebuilds enough entries; bear wraps the real compile.
+  local cc_path
+  cc_path="$(command -v "${CROSS_PREFIX}gcc")"
+  echo "==> Generating compile_commands.json (APP=${APP} CORES=${CORES} BOARD=${BOARD} ARCH=${BOARD_ARCH})"
   if command -v bear >/dev/null 2>&1; then
-    # Rebuild objects under bear to refresh the DB (no link required for clangd)
-    make clean APP="${APP}" CORES="${CORES}" BOARD="${BOARD}" PROFILE="${PROFILE}" >/dev/null
+    make clean APP="${APP}" CORES="${CORES}" BOARD="${BOARD}" CPU="${CPU}" PROFILE="${PROFILE}" >/dev/null
     bear --output compile_commands.json -- \
-      make all APP="${APP}" CORES="${CORES}" BOARD="${BOARD}" PROFILE="${PROFILE}"
+      make all APP="${APP}" CORES="${CORES}" BOARD="${BOARD}" CPU="${CPU}" PROFILE="${PROFILE}"
   else
     echo "WARN: bear not found — writing a minimal compile_commands.json via make -n"
-    python3 - "${APP}" "${CORES}" "${BOARD}" "${PROFILE}" "${SYSROOT}" "${ROOT}" <<'PY'
+    python3 - "${APP}" "${CORES}" "${BOARD}" "${PROFILE}" "${cc_path}" "${ROOT}" <<'PY'
 import json, os, subprocess, sys
-app, cores, board, profile, sysroot, root = sys.argv[1:7]
+app, cores, board, profile, cc, root = sys.argv[1:7]
 env = os.environ.copy()
-env["PATH"] = f"{sysroot}/bin:" + env.get("PATH", "")
 cmd = ["make", "-n", "all", f"APP={app}", f"CORES={cores}", f"BOARD={board}", f"PROFILE={profile}"]
 out = subprocess.check_output(cmd, cwd=root, env=env, text=True, stderr=subprocess.STDOUT)
 entries = []
-cc = f"{sysroot}/bin/riscv64-unknown-linux-gnu-gcc"
 for line in out.splitlines():
     line = line.strip()
-    if " -c " not in line or ".c" not in line:
+    if " -c " not in line:
         continue
-    # last token ending with .c is the source
     parts = line.split()
     src = None
     for p in reversed(parts):
@@ -139,26 +205,22 @@ for line in out.splitlines():
             break
     if not src:
         continue
+    cmd_line = line
+    if not any(x.endswith("gcc") or "gcc" in x for x in parts[:1]):
+        cmd_line = cc + " " + line
+    elif parts[0].endswith("gcc") and not os.path.isabs(parts[0]):
+        cmd_line = cc + " " + " ".join(parts[1:])
     entries.append({
         "directory": root,
-        "command": line if line.startswith("/") or "gcc" in line else f"{cc} " + " ".join(parts[1:]) if parts[0].endswith("gcc") else line,
+        "command": cmd_line,
         "file": os.path.join(root, src) if not os.path.isabs(src) else src,
     })
-# Fix relative gcc in command
-for e in entries:
-    c = e["command"]
-    if c.startswith("riscv64-") or c.startswith("$(CROSS)"):
-        e["command"] = cc + " " + " ".join(c.split()[1:])
-    elif not c.startswith("/"):
-        # "gcc ..." from make uses $(CC) expanded
-        pass
 with open(os.path.join(root, "compile_commands.json"), "w") as f:
     json.dump(entries, f, indent=2)
     f.write("\n")
-print(f"wrote {len(entries)} entries")
+print(f"wrote {len(entries)} entries using {cc}")
 PY
   fi
-  # Ensure .clangd points at the DB
   if [[ ! -f .clangd ]]; then
     cat > .clangd <<'EOF'
 CompileFlags:
@@ -170,34 +232,45 @@ Index:
 EOF
   fi
   echo "==> clangd: open the workspace root; compile_commands.json ready"
-  echo "    (Cursor/VS Code: reload window if index is stale)"
 }
 
 do_build() {
   need_toolchain
-  echo "==> Building APP=${APP} CORES=${CORES} BOARD=${BOARD} PROFILE=${PROFILE:-default}"
-  if [[ "${DO_CLEAN}" -eq 1 ]]; then
-    make clean APP="${APP}" CORES="${CORES}" BOARD="${BOARD}" PROFILE="${PROFILE}"
+  echo "==> Building APP=${APP} CORES=${CORES} BOARD=${BOARD} ARCH=${BOARD_ARCH} CPU=${CPU:-default} PROFILE=${PROFILE:-default}"
+  # APP/CORES/CPU/PROFILE stamp；对象已按 BOARD 分目录，仍用 stamp 避免错链旧 elf
+  local stamp=".build_stamp"
+  local want="${BOARD}|${CPU}|${CORES}|${APP}|${PROFILE}"
+  local have=""
+  [[ -f "${stamp}" ]] && have="$(cat "${stamp}")"
+  if [[ "${DO_CLEAN}" -eq 1 || "${have}" != "${want}" ]]; then
+    echo "==> clean (board/config stamp changed)"
+    make clean APP="${APP}" CORES="${CORES}" BOARD="${BOARD}" CPU="${CPU}" PROFILE="${PROFILE}"
   fi
   if [[ "${DO_COMPDB}" -eq 1 ]] && command -v bear >/dev/null 2>&1; then
-    # Force-rebuild under bear so compile_commands.json covers every TU (clangd)
     echo "==> clangd: refreshing compile_commands.json via bear"
     bear --output compile_commands.json -- \
-      make -B all APP="${APP}" CORES="${CORES}" BOARD="${BOARD}" PROFILE="${PROFILE}"
+      make -B all APP="${APP}" CORES="${CORES}" BOARD="${BOARD}" CPU="${CPU}" PROFILE="${PROFILE}"
   else
-    make all APP="${APP}" CORES="${CORES}" BOARD="${BOARD}" PROFILE="${PROFILE}"
+    make all APP="${APP}" CORES="${CORES}" BOARD="${BOARD}" CPU="${CPU}" PROFILE="${PROFILE}"
     if [[ "${DO_COMPDB}" -eq 1 ]]; then
       do_compdb || true
     fi
   fi
+  echo "${want}" >"${stamp}"
   echo "==> Built: cgrtos.elf / cgrtos.bin"
   ls -la cgrtos.elf cgrtos.bin 2>/dev/null || true
 }
 
 require_binary() {
-  if [[ ! -f cgrtos.bin ]]; then
+  if [[ "${QEMU_LOAD}" == "elf" || "${QEMU_LOAD}" == "kernel" ]]; then
+    if [[ ! -f cgrtos.elf ]]; then
+      echo "ERROR: cgrtos.elf missing — compile first:"
+      echo "  ./scripts/cgrtos.sh build --app ${APP} --cores ${CORES} --board ${BOARD}"
+      exit 1
+    fi
+  elif [[ ! -f cgrtos.bin ]]; then
     echo "ERROR: cgrtos.bin missing — compile first:"
-    echo "  ./scripts/cgrtos.sh build --app ${APP} --cores ${CORES}"
+    echo "  ./scripts/cgrtos.sh build --app ${APP} --cores ${CORES} --board ${BOARD}"
     exit 1
   fi
   if [[ "${WITH_GDB}" -eq 1 && ! -f cgrtos.elf ]]; then
@@ -305,19 +378,22 @@ do_run_qemu() {
   need_qemu
   require_binary
   local LOG
+  local -a IMG_ARGS
   LOG="$(mktemp /tmp/cgrtos-qemu.XXXXXX.log)"
   # shellcheck disable=SC2064
   trap "rm -f '${LOG}'" EXIT
-  echo "==> QEMU APP=${APP} CORES=${CORES} timeout=${TIMEOUT_SEC}s (no rebuild)"
+  # shellcheck disable=SC2207
+  IMG_ARGS=( $(qemu_image_args) )
+  echo "==> QEMU BOARD=${BOARD} APP=${APP} CORES=${CORES} timeout=${TIMEOUT_SEC}s load=${QEMU_LOAD}"
   if [[ "${WITH_GDB}" -eq 1 ]]; then
     open_gdb_window
     echo "==> QEMU + gdbstub :${GDB_PORT} (UART here; GDB elsewhere)"
-    "${QEMU}" "${QEMU_MACHINE[@]}" -bios cgrtos.bin -S -gdb "tcp::${GDB_PORT}" \
+    "${QEMU}" "${QEMU_MACHINE[@]}" "${IMG_ARGS[@]}" -S -gdb "tcp::${GDB_PORT}" \
       2>&1 | tee "${LOG}"
     return "${PIPESTATUS[0]}"
   fi
   set +e
-  timeout "${TIMEOUT_SEC}" "${QEMU}" "${QEMU_MACHINE[@]}" -bios cgrtos.bin \
+  timeout "${TIMEOUT_SEC}" "${QEMU}" "${QEMU_MACHINE[@]}" "${IMG_ARGS[@]}" \
     >"${LOG}" 2>&1
   local QEMU_RC=$?
   set -e
@@ -355,7 +431,7 @@ do_run_qemu() {
       echo "RESULT: STRESS_INCOMPLETE (qemu rc=${QEMU_RC})"; return 1
       ;;
     demo)
-      if printf '%s\n' "${OUT}" | grep -q '\[T1\] LED OFF'; then
+      if printf '%s\n' "${OUT}" | grep -qE '\[DEMO\] (produce|consume|heartbeat)|HAL board:|\[T1\] LED OFF'; then
         echo "RESULT: DEMO_OK"; return 0
       fi
       echo "RESULT: DEMO_INCOMPLETE"; return 1
@@ -388,12 +464,15 @@ do_cli() {
   ensure_built
   need_qemu
   require_binary
-  echo "==> CLI (interactive). Exit QEMU: Ctrl-A then X"
+  local -a IMG_ARGS
+  # shellcheck disable=SC2207
+  IMG_ARGS=( $(qemu_image_args) )
+  echo "==> CLI BOARD=${BOARD} (interactive). Exit QEMU: Ctrl-A then X"
   if [[ "${WITH_GDB}" -eq 1 ]]; then
     open_gdb_window
-    exec "${QEMU}" "${QEMU_MACHINE[@]}" -bios cgrtos.bin -S -gdb "tcp::${GDB_PORT}"
+    exec "${QEMU}" "${QEMU_MACHINE[@]}" "${IMG_ARGS[@]}" -S -gdb "tcp::${GDB_PORT}"
   fi
-  exec "${QEMU}" "${QEMU_MACHINE[@]}" -bios cgrtos.bin
+  exec "${QEMU}" "${QEMU_MACHINE[@]}" "${IMG_ARGS[@]}"
 }
 
 do_gdb() {
@@ -439,36 +518,37 @@ EOF
 
 print_help() {
   cat <<'EOF'
-CG-RTOS — build and run are separate
+CG-RTOS — multi-arch build and run (build ≠ run)
 
 Usage:
   ./scripts/cgrtos.sh <command> [options]
 
 ── Compile only ──────────────────────────────────────────
   build       Compile APP → cgrtos.elf / cgrtos.bin
-              Also refreshes compile_commands.json (clangd) unless --no-compdb
+              Objects under build/<BOARD>/; also refresh clangd DB unless --no-compdb
   compdb      Only regenerate compile_commands.json for clangd
 
 ── Run only (requires prior build) ───────────────────────
-  run         Boot existing cgrtos.bin in QEMU (never runs make)
+  run         Boot existing image in QEMU (never runs make)
 
 ── Convenience (build then run) ──────────────────────────
-  test        build --app test  && run
+  test        build --app test  && run   (timeout default 120s)
   demo        build --app demo  && run
   bench       build --app bench && run   (timeout default 30s)
   stress      build --app stress&& run   (timeout default 60s)
   cli         build --app cli   && interactive QEMU
   gdb         build + QEMU(-S) + GDB TUI
 
-── Docs ──────────────────────────────────────────────────
+── Docs / port check ─────────────────────────────────────
   docs        Doxygen → docs/doxygen/html/
   sdk         docs + package sdk/
   help        This message
 
 Options:
   --app NAME       demo | test | bench | stress | cli
-  --cores N        1 | 2 | 4 (default 2)
-  --board NAME     BSP under boards/ (default nuclei_evalsoc)
+  --cores N        1 | 2 | 4 (default 2; ARM64 virt max 1)
+  --board NAME     nuclei_evalsoc | riscv_virt | sifive_u | qemu_virt_a64
+  --cpu NAME       e.g. nuclei-nx900fd | rv64 | sifive-u54 | cortex-a53 | cortex-a72
   --profile NAME   e.g. minimal → -DCGRTOS_CONFIG_MINIMAL=1
   --clean          make clean before build
   --no-compdb      skip compile_commands.json on build
@@ -478,24 +558,22 @@ Options:
   --port N         GDB port (default 1234)
 
 Examples:
-  # 1) Compile for clangd + tests
-  ./scripts/cgrtos.sh build --app test --cores 2 --clean
+  ./scripts/cgrtos.sh test --board riscv_virt --cores 2 --clean
+  ./scripts/cgrtos.sh stress --board riscv_virt --cores 2
+  ./scripts/cgrtos.sh demo --board nuclei_evalsoc --cpu nuclei-nx900fd --cores 1
+  ./scripts/cgrtos.sh demo --board sifive_u --cores 2
+  # ARM64 (A55/A75 class stand-ins on QEMU 6.2)
+  export PATH=/home/cong/cgrtos-tools/root/usr/bin:$PATH
+  export LD_LIBRARY_PATH=/home/cong/cgrtos-tools/root/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
+  ./scripts/cgrtos.sh test --board qemu_virt_a64 --cores 1 --cpu cortex-a53 --clean
+  ./scripts/cgrtos.sh demo --board qemu_virt_a64 --cores 1 --cpu cortex-a72
 
-  # 2) Run without rebuilding
-  ./scripts/cgrtos.sh run --app test --cores 2 --timeout 180
+  # One-shot port gate:
+  ./scripts/port-check.sh
 
-  # 3) One-shot suite
-  ./scripts/cgrtos.sh test --cores 2
+Environment: SYSROOT, TOOLS_ROOT, QEMU, GDB, CORES, BOARD, PROFILE, CGRTOS_GDB_TERM
 
-  # 4) Minimal trim compile
-  ./scripts/cgrtos.sh build --app demo --cores 1 --profile minimal
-
-  # 5) Refresh clangd DB only
-  ./scripts/cgrtos.sh compdb --app test --cores 2
-
-Environment: SYSROOT, QEMU, GDB, CORES, BOARD, PROFILE, CGRTOS_GDB_TERM
-
-Full guide: docs/SCRIPTS.md
+Full guide: docs/SCRIPTS.md | Porting: docs/PORTING.md
 EOF
 }
 

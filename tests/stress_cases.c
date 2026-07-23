@@ -94,7 +94,7 @@ static void expect(const char *name, int cond)
  */
 static void bump_core(void)
 {
-    if ((uint8_t)read_csr(mhartid) == 0) {
+    if (arch_cpu_id() == 0) {
         __atomic_fetch_add(&g_core0_hits, 1, __ATOMIC_RELAXED);
     } else {
         __atomic_fetch_add(&g_core1_hits, 1, __ATOMIC_RELAXED);
@@ -190,7 +190,7 @@ static void edf_worker(void *arg)
     if (period < 5) {
         period = 5;
     }
-    uint8_t cpu = (uint8_t)read_csr(mhartid);
+    uint8_t cpu = arch_cpu_id();
     cgrtos_task_t *self = g_current[cpu];
     tick_t wake = cgrtos_get_ticks();
     if (self) {
@@ -700,7 +700,7 @@ int stress_run(void)
     task_id_t ids[48];
     int nid = 0;
     char name[CGRTOS_TASK_NAME_MAX];
-    uint8_t cpu = (uint8_t)read_csr(mhartid);
+    uint8_t cpu = arch_cpu_id();
     cgrtos_task_t *self = g_current[cpu];
     task_id_t self_id = (self && self->id) ? self->id : 0;
     uint8_t saved_prio = self ? self->prio : 0;

@@ -137,9 +137,17 @@
 #ifndef CONFIG_TICK_RATE_HZ
 #define CONFIG_TICK_RATE_HZ         1000
 #endif
-/** @brief SysTimer / mtime 时钟频率 (Hz) */
+/** @brief SysTimer / 自由运行计数器时钟频率 (Hz) */
 #ifndef CONFIG_TIMER_CLOCK_HZ
 #define CONFIG_TIMER_CLOCK_HZ       1000000ULL
+#endif
+/**
+ * @brief delay_ms/us 是否允许 mtime 亚 tick 忙等
+ * @details 0：纯 tick 延时（推荐 AArch64 QEMU，避免 PRIORITY 粘性饿死）。
+ *          1：tick + mtime 忙等（默认 RISC-V）。
+ */
+#ifndef CONFIG_DELAY_BUSY_US
+#define CONFIG_DELAY_BUSY_US        1
 #endif
 /** @brief RR/部分策略默认时间片（tick） */
 #ifndef CONFIG_TIME_SLICE_TICKS

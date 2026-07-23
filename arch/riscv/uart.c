@@ -20,7 +20,7 @@
 
 #include "../../kernel/cgrtos.h"
 #include "../../hal/hal_drv.h"
-#include "../../hal/hal_board.h"
+#include "hal_board.h"
 
 #define UART_BASE   HAL_BOARD_UART_BASE
 #define UART_TXDATA HAL_BOARD_UART_TXDATA

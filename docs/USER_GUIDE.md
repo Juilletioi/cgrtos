@@ -8,6 +8,7 @@ Freestanding RISC-V64 **可配置核数 SMP** 实时内核（Nuclei UX900 / `nuc
 | 本文 | 编译、运行、CLI、常用 API、GDB |
 | [SCRIPTS.md](SCRIPTS.md) | **编译/运行脚本详细说明**、clangd、选项表 |
 | [MODULE_CLI_VIM.md](MODULE_CLI_VIM.md) | **POSIX vi / Tab 补全**、并发与死锁 |
+| [PORTING.md](PORTING.md) | **多板级 / Nuclei·virt·SiFive / ARM 脚手架** |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | 启动 / 调度 / 陷阱流程图 |
 | [HAL.md](HAL.md) | 外设驱动框架 / 用户 HAL / 多核安全契约 |
 | `./scripts/cgrtos.sh sdk` | 公开头 + API HTML（`sdk/`） |

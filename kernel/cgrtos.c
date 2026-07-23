@@ -16,7 +16,7 @@
  * 临界区：每核可嵌套 IRQ 关闭 + 全局自旋锁 g_klock。
  */
 #include "cgrtos.h"
-#include "hal/hal_board.h"
+#include "hal_board.h"
 #include <string.h>
 #if CONFIG_USE_VFS
 #include "vfs.h"
@@ -203,24 +203,20 @@ void cgrtos_spin_unlock(spinlock_t *lock)
 }
 
 /**
- * @brief 保存 mstatus 并关闭全局 M 模式中断（MIE）
- * @details read_csr(mstatus) 保存；clear MIE 位；返回 flags 供 restore。
- * @return 进入前的完整 mstatus
- * @retval 完整 mstatus 快照
+ * @brief 保存并屏蔽可屏蔽 IRQ（委托 arch_irq_save）
+ * @details 架构细节见 kernel/arch_port.h。
+ * @return 架构相关 flags
  * @note 与 irq_restore 配对
- * @warning 无
  * @attention ✅ ISR；❌ block/switch
  */
 uint64_t cgrtos_irq_save(void)
 {
-    uint64_t flags = read_csr(mstatus);
-    clear_csr_bits(mstatus, 0x8); /* 清除 MIE */
-    return flags;
+    return arch_irq_save();
 }
 
 /**
- * @brief 恢复 mstatus（含 MIE 等全部位）
- * @details write_csr(mstatus, flags) 一次性恢复。
+ * @brief 恢复中断屏蔽状态（委托 arch_irq_restore）
+ * @details 写回 flags。
  * @param[in] flags cgrtos_irq_save 返回值
  * @return 无
  * @retval 无
@@ -230,7 +226,7 @@ uint64_t cgrtos_irq_save(void)
  */
 void cgrtos_irq_restore(uint64_t flags)
 {
-    write_csr(mstatus, flags);
+    arch_irq_restore(flags);
 }
 
 /**
@@ -245,7 +241,7 @@ void cgrtos_irq_restore(uint64_t flags)
 void cgrtos_enter_critical(void)
 {
     /* 1. 读取当前 hartid 作为 cpu 索引 */
-    uint8_t cpu = (uint8_t)read_csr(mhartid);
+    uint8_t cpu = arch_cpu_id();
     /* 2. 若 g_crit_nest[cpu]==0（最外层），irq_save 关中断并 spin_lock g_klock */
     if (g_crit_nest[cpu] == 0) {
         g_crit_saved[cpu] = cgrtos_irq_save();
@@ -268,7 +264,7 @@ void cgrtos_enter_critical(void)
 void cgrtos_exit_critical(void)
 {
     /* 1. 若 nest 已为 0 则直接返回（防御性） */
-    uint8_t cpu = (uint8_t)read_csr(mhartid);
+    uint8_t cpu = arch_cpu_id();
     if (g_crit_nest[cpu] == 0) {
         return;
     }
@@ -296,7 +292,7 @@ void cgrtos_exit_critical(void)
  */
 int cgrtos_in_critical(void)
 {
-    uint8_t cpu = (uint8_t)read_csr(mhartid);
+    uint8_t cpu = arch_cpu_id();
     return g_crit_nest[cpu] > 0;
 }
 
@@ -312,7 +308,7 @@ int cgrtos_in_critical(void)
  */
 int cgrtos_in_isr(void)
 {
-    uint8_t cpu = (uint8_t)read_csr(mhartid);
+    uint8_t cpu = arch_cpu_id();
     if (cpu >= CONFIG_NUM_CORES) {
         return 0;
     }
@@ -343,7 +339,7 @@ void cgrtos_assert_failed(const char *file, int line)
     cgrtos_printf("\n[ASSERT FAILED] %s:%d\n", file ? file : "?", line);
     cgrtos_uart_puts("System halted.\n");
     while (1) {
-        asm volatile("wfi");
+        arch_cpu_wait();
     }
 }
 
@@ -538,7 +534,7 @@ void cgrtos_start_secondary(int hartid)
     /* 1. 越界 hart：镜像可拉起 MAX_CORES 个 hart，但本构建未启用 */
     if (hartid <= 0 || hartid >= CONFIG_NUM_CORES) {
         while (1) {
-            asm volatile("wfi");
+            arch_cpu_wait();
         }
     }
 
@@ -547,9 +543,9 @@ void cgrtos_start_secondary(int hartid)
         __sync_synchronize();
     }
 
-    /* 3. 本地 clint_init 启用片内时间片；set_csr MSIE 允许 IPI */
+    /* 3. 本地 timer init；使能本核 IPI 接收 */
     cgrtos_clint_init(CONFIG_TICK_RATE_HZ);
-    set_csr_bits(mie, 0x8); /* MSIE */
+    arch_cpu_enable_ipi();
 
     /* 4. g_current[hartid]=idle[hartid]，idle state=RUNNING */
     g_current[hartid] = &g_idle[hartid];
@@ -687,7 +683,7 @@ void cgrtos_stats_get(cgrtos_runtime_stats_t *out)
  */
 void cgrtos_isr_enter(void)
 {
-    uint8_t cpu = (uint8_t)read_csr(mhartid);
+    uint8_t cpu = arch_cpu_id();
     if (cpu < CONFIG_NUM_CORES) {
         g_in_isr[cpu]++;
         CGRTOS_TRACE(CGRTOS_TRACE_ISR_ENTER, g_in_isr[cpu], 0);
@@ -705,7 +701,7 @@ void cgrtos_isr_enter(void)
  */
 void cgrtos_isr_exit(void)
 {
-    uint8_t cpu = (uint8_t)read_csr(mhartid);
+    uint8_t cpu = arch_cpu_id();
     if (cpu < CONFIG_NUM_CORES && g_in_isr[cpu] > 0) {
         g_in_isr[cpu]--;
         CGRTOS_TRACE(CGRTOS_TRACE_ISR_EXIT, g_in_isr[cpu], 0);

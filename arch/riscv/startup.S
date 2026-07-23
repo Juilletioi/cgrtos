@@ -48,12 +48,13 @@ _start:
     sw zero,0(t0)
     fence
     /*
-     * Enable I-cache only. D-cache must stay off for MMIO (SysTimer/UART/CLINT);
-     * otherwise mtimecmp stores are absorbed by cache and timer IRQs never fire.
-     * Nuclei MCACHE_CTL: bit0=DC_EN, bit1=IC_EN.
+     * Nuclei only: enable I-cache via MCACHE_CTL (0x7CA).
+     * Generic virt / SiFive: skip (CSR may trap).
      */
+#if CONFIG_NUCLEI_MCACHE
     li t0,0x2
     csrw CSR_MCACHE_CTL,t0
+#endif
     la gp,__global_pointer$
     /* Wipe .bss and .sbss (linker merges both under _sbss.._ebss). */
     la t0,_sbss
@@ -91,8 +92,10 @@ _start_secondary:
     li t4,1
     sw t4,0(t3)
     fence
+#if CONFIG_NUCLEI_MCACHE
     li t0,0x2
     csrw CSR_MCACHE_CTL,t0
+#endif
     fence
     la gp,__global_pointer$
     /* sp = _stack_top + hartid * 0x4000 */
@@ -194,17 +197,17 @@ handle_ipi:
     csrr a0,mhartid
     jal board_ipi_clear
     mv a0,sp
-    jal riscv_handle_ipi
+    jal arch_handle_ipi
     j trap_done
 
 handle_timer:
     mv a0,sp
-    jal riscv_handle_timer
+    jal arch_handle_timer
     j trap_done
 
 handle_external:
     mv a0,sp
-    jal riscv_handle_external
+    jal arch_handle_external
     j trap_done
 
 is_exception:
@@ -214,7 +217,7 @@ is_exception:
     mv a0,sp
     csrr a1,mcause
     csrr a2,mepc
-    jal riscv_handle_exception
+    jal arch_handle_exception
     j _deadloop
 
 /* Voluntary yield: ecall from M-mode */

@@ -13,7 +13,7 @@
 
 #include "../../kernel/cgrtos.h"
 #include "../../hal/hal_drv.h"
-#include "../../hal/hal_board.h"
+#include "hal_board.h"
 
 #ifndef CONFIG_TIMER_CLOCK_HZ
 #define CONFIG_TIMER_CLOCK_HZ  1000000ULL
@@ -106,7 +106,7 @@ static hal_status_t clint_hw_init(hal_device_t *dev, uint32_t tick_hz)
 {
     (void)dev;
     (void)tick_hz;
-    clint_schedule_next(read_csr(mhartid));
+    clint_schedule_next(arch_cpu_id());
     set_csr_bits(mie, 0x80);
     return HAL_OK;
 }
@@ -136,7 +136,7 @@ static hal_device_t s_clint_dev = {
  * @warning 驱动不得自行调用 hal_device_register
  * @attention ✅ ISR；❌ 不阻塞
  */
-hal_device_t *drv_clint_device(void)
+hal_device_t *drv_timer_device(void)
 {
     return &s_clint_dev;
 }
@@ -154,11 +154,11 @@ hal_device_t *drv_clint_device(void)
  * @warning 须在中断上下文调用；不可从任务直接调用
  * @attention ✅ ISR；❌ 不阻塞
  */
-void riscv_handle_timer(uint64_t *f)
+void arch_handle_timer(uint64_t *f)
 {
     (void)f;
     cgrtos_isr_enter();
-    clint_schedule_next(read_csr(mhartid));
+    clint_schedule_next(arch_cpu_id());
     cgrtos_tick_handler();
     cgrtos_isr_exit();
 }

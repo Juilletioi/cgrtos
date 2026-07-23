@@ -54,7 +54,7 @@ block_reason_t reason, void *obj,
 tick_t timeout)
 {
     /* 1. 获取当前 CPU 与 running 任务 */
-    uint8_t cpu = (uint8_t)read_csr(mhartid);
+    uint8_t cpu = arch_cpu_id();
     cgrtos_task_t *cur = g_current[cpu];
     if (!cur || cur->id == 0) {
         return pdFAIL;
@@ -246,7 +246,7 @@ int cgrtos_sem_take(cgrtos_sem_t *sem, tick_t timeout)
     }
 
     /* 5. 挂入等待队列并 yield */
-    uint8_t cpu = (uint8_t)read_csr(mhartid);
+    uint8_t cpu = arch_cpu_id();
     cgrtos_task_t *cur = g_current[cpu];
     block_current_on_waitq(&sem->wait_q, BLOCK_SEM, sem, timeout);
     cgrtos_exit_critical();
@@ -575,7 +575,7 @@ static void mutex_apply_dpcp(cgrtos_mutex_t *mutex)
     if (owner->state == TASK_READY) {
         cgrtos_sched_add_ready(owner);
     } else if (owner->state == TASK_RUNNING &&
-               owner->run_cpu != (uint8_t)read_csr(mhartid) &&
+               owner->run_cpu != arch_cpu_id() &&
                owner->run_cpu < CONFIG_NUM_CORES) {
         cgrtos_smp_send_ipi(owner->run_cpu);
     }
@@ -650,7 +650,7 @@ static void mutex_apply_inheritance(cgrtos_mutex_t *mutex, cgrtos_task_t *waiter
     if (owner->state == TASK_READY) {
         cgrtos_sched_add_ready(owner);
     } else if (owner->state == TASK_RUNNING &&
-    owner->run_cpu != (uint8_t)read_csr(mhartid) &&
+    owner->run_cpu != arch_cpu_id() &&
     owner->run_cpu < CONFIG_NUM_CORES) {
         /* 3. 跨核运行中则 IPI 通知重调度 */
         cgrtos_smp_send_ipi(owner->run_cpu);
@@ -743,7 +743,7 @@ int cgrtos_mutex_lock(cgrtos_mutex_t *mutex, tick_t timeout)
 
     /* 2. 进入临界区 */
     cgrtos_enter_critical();
-    uint8_t cpu = (uint8_t)read_csr(mhartid);
+    uint8_t cpu = arch_cpu_id();
     cgrtos_task_t *cur = g_current[cpu];
     if (!cur) {
         cgrtos_exit_critical();
@@ -819,7 +819,7 @@ int cgrtos_mutex_unlock(cgrtos_mutex_t *mutex)
 
     /* 2. 进入临界区，校验 owner */
     cgrtos_enter_critical();
-    uint8_t cpu = (uint8_t)read_csr(mhartid);
+    uint8_t cpu = arch_cpu_id();
     cgrtos_task_t *cur = g_current[cpu];
 
     if (mutex->owner != cur) {
@@ -1168,7 +1168,7 @@ int cgrtos_queue_send(cgrtos_queue_t *q, const void *data, tick_t timeout)
 
         /* 2. 进入临界区 */
         cgrtos_enter_critical();
-        uint8_t cpu = (uint8_t)read_csr(mhartid);
+        uint8_t cpu = arch_cpu_id();
         cgrtos_task_t *cur = g_current[cpu];
 
         /* 3. 有空间则直接发送 */
@@ -1262,7 +1262,7 @@ int cgrtos_queue_receive(cgrtos_queue_t *q, void *buf, tick_t timeout)
 
     for (;;) {
         cgrtos_enter_critical();
-        uint8_t cpu = (uint8_t)read_csr(mhartid);
+        uint8_t cpu = arch_cpu_id();
         cgrtos_task_t *cur = g_current[cpu];
 
         if (q->cnt > 0) {
@@ -1668,7 +1668,7 @@ tick_t timeout)
         return 0;
     }
 
-    uint8_t cpu = (uint8_t)read_csr(mhartid);
+    uint8_t cpu = arch_cpu_id();
     cgrtos_task_t *cur = g_current[cpu];
     cur->block_obj = eg;
     cur->event_wait_mask = flags;

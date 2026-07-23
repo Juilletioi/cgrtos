@@ -385,8 +385,8 @@ hal_status_t hal_board_init(void)
     hal_device_t *list[] = {
             drv_cpu_device(),
             drv_uart_device(),
-            drv_plic_device(),
-            drv_clint_device(),
+            drv_irqc_device(),
+            drv_timer_device(),
             drv_ipi_device(),
         };
         unsigned i;
@@ -460,7 +460,7 @@ hal_status_t hal_board_init(void)
  */
 void hal_console_lock(void)
 {
-    uint8_t cpu = (uint8_t)read_csr(mhartid);
+    uint8_t cpu = arch_cpu_id();
     if (cpu >= CONFIG_MAX_CORES) {
         cpu = 0;
     }
@@ -484,7 +484,7 @@ void hal_console_lock(void)
  */
 void hal_console_unlock(void)
 {
-    uint8_t cpu = (uint8_t)read_csr(mhartid);
+    uint8_t cpu = arch_cpu_id();
     if (cpu >= CONFIG_MAX_CORES) {
         cpu = 0;
     }
@@ -507,7 +507,7 @@ void hal_console_unlock(void)
  */
 static void irqc_cfg_lock(uint8_t *cpu_out, uint64_t *flags_out)
 {
-    uint8_t cpu = (uint8_t)read_csr(mhartid);
+    uint8_t cpu = arch_cpu_id();
     if (cpu >= CONFIG_MAX_CORES) {
         cpu = 0;
     }

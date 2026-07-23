@@ -43,7 +43,7 @@ static int sb_block(cgrtos_stream_buffer_t *sb, cgrtos_task_t *volatile *wq,
                     block_reason_t reason, tick_t timeout)
 {
     /* 1. 获取当前 CPU 与 running 任务 */
-    uint8_t cpu = (uint8_t)read_csr(mhartid);
+    uint8_t cpu = arch_cpu_id();
     cgrtos_task_t *cur = g_current[cpu];
     if (!cur || cur->id == 0) {
         return pdFAIL;
@@ -274,7 +274,7 @@ size_t cgrtos_stream_buffer_send(cgrtos_stream_buffer_t *sb, const void *data,
     for (;;) {
         int need_yield = 0;
         cgrtos_enter_critical();
-        uint8_t cpu = (uint8_t)read_csr(mhartid);
+        uint8_t cpu = arch_cpu_id();
         cgrtos_task_t *cur = g_current[cpu];
         /* 2. 计算本次可写字节数 */
         uint32_t space = sb_spaces(sb);
@@ -382,7 +382,7 @@ size_t cgrtos_stream_buffer_recv(cgrtos_stream_buffer_t *sb, void *buf, size_t l
     for (;;) {
         int need_yield = 0;
         cgrtos_enter_critical();
-        uint8_t cpu = (uint8_t)read_csr(mhartid);
+        uint8_t cpu = arch_cpu_id();
         cgrtos_task_t *cur = g_current[cpu];
 
         /* 2. 数据达到唤醒水位或非阻塞且有数据 */
@@ -581,7 +581,7 @@ size_t cgrtos_message_buffer_send(cgrtos_message_buffer_t *mb, const void *data,
     for (;;) {
         int need_yield = 0;
         cgrtos_enter_critical();
-        uint8_t cpu = (uint8_t)read_csr(mhartid);
+        uint8_t cpu = arch_cpu_id();
         cgrtos_task_t *cur = g_current[cpu];
 
         /* 2. 空间足够：写入长度前缀 + 载荷 */
@@ -727,7 +727,7 @@ size_t cgrtos_message_buffer_recv(cgrtos_message_buffer_t *mb, void *buf, size_t
     for (;;) {
         int need_yield = 0;
         cgrtos_enter_critical();
-        uint8_t cpu = (uint8_t)read_csr(mhartid);
+        uint8_t cpu = arch_cpu_id();
         cgrtos_task_t *cur = g_current[cpu];
 
         if (mb->avail >= sizeof(uint32_t)) {

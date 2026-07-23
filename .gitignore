@@ -1,9 +1,11 @@
 # Build
+build/
 *.o
 cgrtos.elf
 cgrtos.bin
 cgrtos.map
 *.bin
+.build_stamp
 
 # Generated SDK / docs (regenerate: ./scripts/cgrtos.sh sdk)
 sdk/

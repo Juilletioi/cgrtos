@@ -48,11 +48,14 @@ flowchart TB
 
 | 层级 | 路径 | 职责 |
 |------|------|------|
-| 引导 | `startup.S` | BSS、多核同步、trap、首次 `mret` |
+| 引导 | `arch/<ARCH>/startup.S` | BSS、多核同步、trap、首次返回任务 |
+| CPU 移植 | `kernel/arch_port.h` | 核号、关中断、yield trap、WFI、IPI |
 | 内核核 | `kernel/cgrtos.c` | 初始化、临界区、统计、SMP kick |
 | 调度 | `kernel/scheduler.c` | 就绪队列、tick、切换、均衡 |
 | 任务 | `kernel/task.c` | 创建/删除/延时/通知/idle |
 | IPC | `kernel/ipc.c` | 信号量/互斥/队列/事件 |
+| 板级 | `boards/<BOARD>/` | MMIO、QEMU、链接脚本 |
+| 驱动 | `arch/<ARCH>/*.c` | timer / irqc / uart / ipi（`drv_*_device`） |
 | 流缓冲 | `kernel/stream_buffer.c` | StreamBuffer / MessageBuffer |
 | QueueSet | `kernel/queue_set.c` | 多对象 select |
 | RAM FS | `kernel/fs.c` | `/` 纯内存文件/目录 |

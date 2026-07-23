@@ -17,7 +17,7 @@
 
 #include "../../kernel/cgrtos.h"
 #include "../../hal/hal_drv.h"
-#include "../../hal/hal_board.h"
+#include "hal_board.h"
 
 /**
  * @brief PLIC 本 hart 硬件初始化
@@ -42,7 +42,7 @@ static hal_status_t plic_hw_init(hal_device_t *dev)
         cgrtos_irq_init();
         irq_inited = 1;
     }
-    uint64_t h = read_csr(mhartid);
+    uint64_t h = arch_cpu_id();
     *(volatile uint32_t *)HAL_BOARD_PLIC_THRESHOLD(h) = 0;
     set_csr_bits(mie, 0x800);
     return HAL_OK;
@@ -66,7 +66,7 @@ static hal_status_t plic_hw_init(hal_device_t *dev)
 static uint32_t plic_hw_claim(hal_device_t *dev)
 {
     (void)dev;
-    uint64_t h = read_csr(mhartid);
+    uint64_t h = arch_cpu_id();
     return *(volatile uint32_t *)HAL_BOARD_PLIC_CLAIM(h);
 }
 
@@ -86,7 +86,7 @@ static uint32_t plic_hw_claim(hal_device_t *dev)
 static void plic_hw_complete(hal_device_t *dev, uint32_t irq)
 {
     (void)dev;
-    uint64_t h = read_csr(mhartid);
+    uint64_t h = arch_cpu_id();
     *(volatile uint32_t *)HAL_BOARD_PLIC_CLAIM(h) = irq;
 }
 
@@ -106,7 +106,7 @@ static void plic_hw_complete(hal_device_t *dev, uint32_t irq)
 static void plic_hw_set_threshold(hal_device_t *dev, uint32_t thr)
 {
     (void)dev;
-    uint64_t h = read_csr(mhartid);
+    uint64_t h = arch_cpu_id();
     *(volatile uint32_t *)HAL_BOARD_PLIC_THRESHOLD(h) = thr;
 }
 
@@ -126,7 +126,7 @@ static void plic_hw_set_threshold(hal_device_t *dev, uint32_t thr)
 static uint32_t plic_hw_get_threshold(hal_device_t *dev)
 {
     (void)dev;
-    uint64_t h = read_csr(mhartid);
+    uint64_t h = arch_cpu_id();
     return *(volatile uint32_t *)HAL_BOARD_PLIC_THRESHOLD(h);
 }
 
@@ -206,7 +206,7 @@ static hal_status_t plic_hw_enable(hal_device_t *dev, uint32_t irq)
     if (irq == 0 || irq > CONFIG_IRQ_MAX_SOURCES) {
         return HAL_ERR_PARAM;
     }
-    uint64_t h = read_csr(mhartid);
+    uint64_t h = arch_cpu_id();
     uint32_t word = irq / 32U;
     uint32_t bit = irq % 32U;
     volatile uint32_t *en =
@@ -237,7 +237,7 @@ static hal_status_t plic_hw_disable(hal_device_t *dev, uint32_t irq)
     if (irq == 0 || irq > CONFIG_IRQ_MAX_SOURCES) {
         return HAL_ERR_PARAM;
     }
-    uint64_t h = read_csr(mhartid);
+    uint64_t h = arch_cpu_id();
     uint32_t word = irq / 32U;
     uint32_t bit = irq % 32U;
     volatile uint32_t *en =
@@ -278,13 +278,13 @@ static hal_device_t s_plic_dev = {
  * @warning 驱动不得自行调用 hal_device_register
  * @attention ✅ ISR；❌ 不阻塞
  */
-hal_device_t *drv_plic_device(void)
+hal_device_t *drv_irqc_device(void)
 {
     return &s_plic_dev;
 }
 
 /**
- * @brief 机器外部中断 C 入口（底层直调驱动，不经 HAL）
+ * @brief 外部中断 C 入口（底层直调驱动，不经 HAL）
  * @details
  * 1. cgrtos_isr_enter 标记 ISR 上下文。
  * 2. plic_hw_claim 取最高优先级 pending 源；0 则跳到步骤 6。
@@ -298,7 +298,7 @@ hal_device_t *drv_plic_device(void)
  * @warning 须在中断上下文调用；不可从任务直接调用
  * @attention ✅ ISR；❌ 不阻塞
  */
-void riscv_handle_external(uint64_t *f)
+void arch_handle_external(uint64_t *f)
 {
     (void)f;
     cgrtos_isr_enter();
@@ -367,7 +367,7 @@ static void early_put_hex(unsigned long v)
  * @warning 输出后通常进入挂起；勿依赖完整格式化库
  * @attention ✅ ISR；✅ 阻塞（轮询 TX FIFO）
  */
-void riscv_handle_exception(uint64_t *f, uint64_t cause, uint64_t epc)
+void arch_handle_exception(uint64_t *f, uint64_t cause, uint64_t epc)
 {
     (void)f;
     drv_uart_early_puts("[EXC] cause=");

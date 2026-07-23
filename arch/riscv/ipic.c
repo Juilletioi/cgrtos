@@ -14,7 +14,7 @@
 
 #include "../../kernel/cgrtos.h"
 #include "../../hal/hal_drv.h"
-#include "../../hal/hal_board.h"
+#include "hal_board.h"
 
 extern void cgrtos_isr_enter(void);
 extern void cgrtos_isr_exit(void);
@@ -153,12 +153,12 @@ hal_device_t *drv_ipi_device(void)
  * @warning 须在中断上下文调用；不可从任务直接调用
  * @attention ✅ ISR；❌ 不阻塞
  */
-void riscv_handle_ipi(uint64_t *f)
+void arch_handle_ipi(uint64_t *f)
 {
     (void)f;
     cgrtos_isr_enter();
 
-    uint64_t h = read_csr(mhartid);
+    uint64_t h = arch_cpu_id();
     ipi_hw_clear(&s_ipi_dev, (uint8_t)h);
 
     if (h < CONFIG_NUM_CORES && g_remote_tick[h]) {

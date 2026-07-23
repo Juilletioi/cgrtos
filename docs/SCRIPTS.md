@@ -5,11 +5,15 @@
 | 脚本 | 作用 |
 |------|------|
 | `./scripts/build.sh …` | **只编译**（等价 `cgrtos.sh build`） |
-| `./scripts/run.sh …` | **只运行**已有 `cgrtos.bin`（等价 `cgrtos.sh run`） |
+| `./scripts/run.sh …` | **只运行**已有镜像（等价 `cgrtos.sh run`） |
 | `./scripts/cgrtos.sh …` | 完整命令集（build / run / test / clangd / docs） |
+| `./scripts/port-check.sh` | 多架构 test+stress 门禁（可选 smoke） |
 | `./scripts/run_qemu.sh` | 已废弃，转发到 `run` |
 
-**原则：编译与运行分离。** `build` 永不启动 QEMU；`run` 永不调用 `make`。
+**原则：编译与运行分离。** `build` 永不启动 QEMU；`run` 永不调用 `make`。  
+对象在 `build/<BOARD>/`；`cgrtos.elf` / `cgrtos.bin` 仍在仓库根。ARM64 用 `BOARD_QEMU_LOAD=kernel`（`-kernel cgrtos.elf`），不必依赖 `.bin` 作为启动镜像。
+
+换板请带 `--board` / `--cpu` / `--cores`；ARM64 需 `PATH`/`LD_LIBRARY_PATH` 指向 `cgrtos-tools`（见 `docs/PORTING.md`）。
 
 ---
 

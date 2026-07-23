@@ -48,7 +48,7 @@ void cgrtos_trace_event(uint16_t type, uint32_t a0, uint32_t a1)
     uint64_t flags = cgrtos_irq_save();
     uint32_t idx = g_trace_head++;
     uint32_t slot = idx & (CONFIG_TRACE_ENTRIES - 1U);
-    uint8_t cpu = (uint8_t)read_csr(mhartid);
+    uint8_t cpu = arch_cpu_id();
     cgrtos_trace_rec_t *r = &g_trace[slot];
 
     if (idx >= CONFIG_TRACE_ENTRIES) {

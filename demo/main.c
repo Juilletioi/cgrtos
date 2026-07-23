@@ -97,14 +97,6 @@ static void consumer(void *arg)
 
 /**
  * @brief 心跳任务：每秒打印一次系统 tick
- * @details SCHED_RR 低优先级后台任务。
- * @param[in] arg 未使用
- * @return 无（永不返回）
- * @retval 无
- * @note 仅用于演示存活
- * @warning 无
- * @attention ❌ ISR；✅ delay_ms 会阻塞
- * @internal
  */
 static void ticker(void *arg)
 {
@@ -130,7 +122,7 @@ static void ticker(void *arg)
 static void edf_beat(void *arg)
 {
     (void)arg;
-    uint8_t cpu = (uint8_t)read_csr(mhartid);
+    uint8_t cpu = arch_cpu_id();
     cgrtos_task_t *self = g_current[cpu];
     tick_t period = portMS_TO_TICK(100);
     tick_t wake = cgrtos_get_ticks() + period;
@@ -150,7 +142,7 @@ static void edf_beat(void *arg)
                 cgrtos_task_set_deadline(self->id, wake);
             }
         }
-        cpu = (uint8_t)read_csr(mhartid);
+        cpu = arch_cpu_id();
         self = g_current[cpu];
         cgrtos_printf("  [DEMO][MC-EDF] beat @%lu dl=%lu cpu=%u\n",
                       (unsigned long)cgrtos_get_ticks(),
@@ -177,7 +169,7 @@ int main(int hartid, void *fdt, void *end)
     (void)end;
 
     cgrtos_init();
-    cgrtos_printf("  [BOOT] Hart %d — CG-RTOS demo (DDR end %p)\n", hartid, end);
+    cgrtos_printf("  [BOOT] Hart %d - CG-RTOS demo (DDR end %p)\n", hartid, end);
 
     sem = cgrtos_sem_create(0, 8);
     q = cgrtos_queue_create(4, sizeof(uint32_t));

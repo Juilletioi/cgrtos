@@ -25,6 +25,7 @@
 /* Version & configuration — see cgrtos_config.h                              */
 /* -------------------------------------------------------------------------- */
 #include "cgrtos_config.h"
+#include "arch_port.h"
 
 /** @brief 成功（FreeRTOS 兼容） */
 #define pdPASS                      0
@@ -558,57 +559,42 @@ extern void context_switch(uint64_t **cur, uint64_t *nxt);
  */
 extern void start_first_task(uint64_t *sp);
 /**
- * @brief 处理软件中断（MSIP / IPI）
- * @details
- * 1. cgrtos_isr_enter 标记 ISR 上下文。
- * 2. 清本核 MSIP；处理远程 tick 与 yield 挂起。
- * 3. cgrtos_isr_exit 退出 ISR 上下文。
+ * @brief 处理软件中断 / IPI（架构 trap 入口）
+ * @details 清本核 IPI；处理远程 tick 与 yield 挂起。
  * @param[in] f 陷阱栈帧指针；实现可未使用
- * @return 无
- * @note 由 trap 向量调用；实现见 arch/riscv/ipic.c
- * @warning 禁止从任务上下文直接调用
+ * @note 实现见 arch 目录下 ipic 等；禁止从任务上下文直接调用
  * @attention ✅ ISR；❌ 不阻塞
  */
-extern void riscv_handle_ipi(uint64_t *f);
+extern void arch_handle_ipi(uint64_t *f);
 /**
- * @brief 处理定时器中断（MTIP）
- * @details
- * 1. cgrtos_isr_enter 标记 ISR 上下文。
- * 2. 重载 mtimecmp 并调用 cgrtos_tick_handler。
- * 3. cgrtos_isr_exit 退出 ISR 上下文。
+ * @brief 处理定时器中断（架构 trap 入口）
+ * @details 重载比较寄存器并调用 cgrtos_tick_handler。
  * @param[in] f 陷阱栈帧指针；实现可未使用
- * @return 无
- * @note 由 trap 向量调用；实现见 arch/riscv/clint.c
- * @warning 禁止从任务上下文直接调用
  * @attention ✅ ISR；❌ 不阻塞
  */
-extern void riscv_handle_timer(uint64_t *f);
+extern void arch_handle_timer(uint64_t *f);
 /**
- * @brief 处理外部中断（MEIP / PLIC）
- * @details
- * 1. claim → 抬 threshold → 可选嵌套窗口 → cgrtos_irq_dispatch → complete。
- * 2. 底层直调 plic_hw_*，不经 hal_irqc_*。
+ * @brief 处理外部中断（IRQC claim → dispatch）
  * @param[in] f 陷阱栈帧指针；实现可未使用
- * @return 无
- * @note 由 trap 向量调用；实现见 arch/riscv/plic.c
- * @warning 禁止从任务上下文直接调用
  * @attention ✅ ISR；❌ 不阻塞
  */
-extern void riscv_handle_external(uint64_t *f);
+extern void arch_handle_external(uint64_t *f);
 /**
  * @brief 处理同步异常并输出早期诊断信息
- * @details
- * 1. 经 drv_uart_early_puts 粗打 cause / epc 十六进制。
- * 2. 不依赖 HAL 或 printf 格式化库。
- * @param[in] f     陷阱栈帧指针；实现可未使用
- * @param[in] cause mcause 异常码
- * @param[in] epc   mepc 异常 PC
- * @return 无
- * @note 由 trap 向量在同步异常路径调用；实现见 arch/riscv/plic.c
- * @warning 输出后轮询阻塞；通常随后挂起
- * @attention ✅ ISR；✅ 阻塞（轮询 TX FIFO）
+ * @param[in] f     陷阱栈帧指针
+ * @param[in] cause 异常码
+ * @param[in] epc   异常 PC
+ * @attention ✅ ISR；✅ 可能轮询 UART
  */
-extern void riscv_handle_exception(uint64_t *f, uint64_t cause, uint64_t epc);
+extern void arch_handle_exception(uint64_t *f, uint64_t cause, uint64_t epc);
+
+/** @name 兼容旧 RISC-V 符号名 */
+/**@{*/
+#define riscv_handle_ipi       arch_handle_ipi
+#define riscv_handle_timer     arch_handle_timer
+#define riscv_handle_external  arch_handle_external
+#define riscv_handle_exception arch_handle_exception
+/**@}*/
 
 /**
  * @brief 致命挂起循环（反复 WFI）
@@ -3785,29 +3771,8 @@ void cgrtos_task_purge_waits(cgrtos_task_t *task);
 /** @def vApplicationTickHook 空钩子占位；请用 cgrtos_set_tick_hook */
 #define vApplicationTickHook()      /* app override via cgrtos_set_tick_hook */
 
-/** @def read_csr 读 CSR，例如 read_csr(mhartid) */
-#define read_csr(reg) ({ \
-    uint64_t __v; \
-    asm volatile("csrr %0, " #reg : "=r"(__v)); \
-    __v; \
-})
-
-/** @def write_csr 写 CSR */
-#define write_csr(reg, val) \
-    asm volatile("csrw " #reg ", %0" :: "r"((uint64_t)(val)))
-
-/** @def set_csr_bits 置位 CSR 中若干 bit */
-#define set_csr_bits(reg, bits) ({ \
-    uint64_t __v = read_csr(reg); \
-    __v |= (bits); \
-    write_csr(reg, __v); \
-})
-
-/** @def clear_csr_bits 清除 CSR 中若干 bit */
-#define clear_csr_bits(reg, bits) ({ \
-    uint64_t __v = read_csr(reg); \
-    __v &= ~(bits); \
-    write_csr(reg, __v); \
-})
-
+#if defined(__riscv)
+/* 遗留兼容：CSR 宏实现已迁至 arch/riscv/riscv_csr.h */
+#include "../arch/riscv/riscv_csr.h"
+#endif
 #endif /* CGRTOS_H */
