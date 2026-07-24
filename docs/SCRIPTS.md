@@ -11,7 +11,7 @@
 | `./scripts/run_qemu.sh` | 已废弃，转发到 `run` |
 
 **原则：编译与运行分离。** `build` 永不启动 QEMU；`run` 永不调用 `make`。  
-对象在 `build/<BOARD>/`；`cgrtos.elf` / `cgrtos.bin` 仍在仓库根。ARM64 用 `BOARD_QEMU_LOAD=kernel`（`-kernel cgrtos.elf`），不必依赖 `.bin` 作为启动镜像。
+对象在 `build/{BOARD}/`；`cgrtos.elf` / `cgrtos.bin` 仍在仓库根。ARM64 用 `BOARD_QEMU_LOAD=kernel`（`-kernel cgrtos.elf`），不必依赖 `.bin` 作为启动镜像。
 
 换板请带 `--board` / `--cpu` / `--cores`；ARM64 需 `PATH`/`LD_LIBRARY_PATH` 指向 `cgrtos-tools`（见 `docs/PORTING.md`）。
 

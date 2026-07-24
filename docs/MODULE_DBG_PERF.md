@@ -24,6 +24,6 @@
 - `make PROFILE=minimal` → `-DCGRTOS_CONFIG_MINIMAL=1`
 
 ## 5. BSP
-- `boards/<BOARD>/hal_board.h`（默认 `nuclei_evalsoc`）
+- `boards/{BOARD}/hal_board.h`（默认 `nuclei_evalsoc`）
 - `board_ipi_clear()` 替代 `startup.S` 硬编码 CLINT MSIP
 - Makefile：`BOARD=nuclei_evalsoc`，`-Iboards/$(BOARD)`

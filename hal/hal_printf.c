@@ -2,8 +2,8 @@
  * @file hal_printf.c
  * @brief 简易格式化输出（HAL 侧实现，持控制台锁）
  * @author Cong Zhou / Juilletioi
- * @version 5.0.0
- * @date 2026-07-22
+ * @version 5.3.0
+ * @date 2026-07-24
  * @copyright CG-RTOS
  *
  * @details
@@ -33,7 +33,7 @@
  * @retval 无
  * @note 调用方须已持有 hal_console_lock
  * @warning 无
- * @attention ❌ ISR；❌ block
+ * @attention ✅ ISR（须已持锁）；❌ block/switch
  * @internal
  */
 static void pchar(char c)
@@ -49,7 +49,7 @@ static void pchar(char c)
  * @retval 无
  * @note 调用方须已持有 hal_console_lock
  * @warning 字符串须以 NUL 结尾
- * @attention ❌ ISR；❌ block
+ * @attention ✅ ISR（须已持锁）；❌ block/switch
  * @internal
  */
 static void pstr(const char *s)
@@ -71,7 +71,7 @@ static void pstr(const char *s)
  * @retval 无
  * @note 内部 buf 固定 20 字节
  * @warning 无
- * @attention ❌ ISR；❌ block
+ * @attention ✅ ISR（须已持锁）；❌ block/switch
  * @internal
  */
 static void pnum(unsigned long v, int hex)
@@ -105,7 +105,7 @@ static void pnum(unsigned long v, int hex)
  * @retval 无
  * @note 调用方须已持有 hal_console_lock
  * @warning 无
- * @attention ❌ ISR；❌ block
+ * @attention ✅ ISR（须已持锁）；❌ block/switch
  * @internal
  */
 static void psnum(long v)
@@ -126,7 +126,7 @@ static void psnum(long v)
  * @retval 无
  * @note 支持 %s %d %i %u %x %c %p %% 及 %lu %ld %lx %ls
  * @warning fmt 为 NULL 时直接返回；持锁期间禁止 yield
- * @attention ❌ ISR；❌ block
+ * @attention ✅ ISR；❌ block/switch（持锁勿长时间占用/yield）
  */
 void cgrtos_printf(const char *fmt, ...)
 {

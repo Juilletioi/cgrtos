@@ -2,8 +2,8 @@
  * @file cli_fs.c
  * @brief CLI 文件系统命令实现（基于 VFS）
  * @author Cong Zhou / Juilletioi
- * @version 5.0.0
- * @date 2026-07-22
+ * @version 5.3.0
+ * @date 2026-07-24
  * @copyright CG-RTOS
  *
  * @details
@@ -41,22 +41,33 @@
 #include "../kernel/vfs.h"
 #include <string.h>
 
-/** @brief 大文件 IO 堆缓冲大小 */
+/**
+ * @brief 大文件 IO 堆缓冲大小
+ * @warning 无运行时副作用（编译期常量）
+ */
 #define CLI_FS_IO_CHUNK   512
-/** @brief CLI 跟踪的打开句柄数 */
+/**
+ * @brief CLI 跟踪的打开句柄数
+ * @warning 无运行时副作用（编译期常量）
+ */
 #define CLI_FS_FH_MAX     8
 
+/**
+ * @brief CLI 打开句柄跟踪表项
+ * @details 供 fhandle 列出本会话曾登记的 fd/path；非内核 fd 表。
+ */
 typedef struct {
-    uint8_t used;
-    int     fd;
-    char    path[CLI_FS_PATH_MAX];
+    uint8_t used;                 /**< @brief 槽是否占用 */
+    int     fd;                   /**< @brief VFS 文件描述符 */
+    char    path[CLI_FS_PATH_MAX]; /**< @brief 打开时绝对路径快照 */
 } cli_fs_fh_t;
 
+/** @brief 本 CLI 任务跟踪的打开句柄表（无锁，单任务） */
 static cli_fs_fh_t g_fh[CLI_FS_FH_MAX];
 
 /**
  * @brief 本地字符串相等比较
- * @details 逐字节至双 NUL。
+ * @details 逐字节至双 NUL；两指针同为 NULL 视为相等。
  * @param[in] a 串 A
  * @param[in] b 串 B
  * @return 1 相等；0 不等
@@ -64,7 +75,7 @@ static cli_fs_fh_t g_fh[CLI_FS_FH_MAX];
  * @retval 0 不等
  * @note 无
  * @warning 无
- * @attention ✅ ISR；❌ 不阻塞
+ * @attention ✅ ISR；❌ block/switch
  * @internal
  */
 static int fs_streq(const char *a, const char *b)
@@ -81,7 +92,7 @@ static int fs_streq(const char *a, const char *b)
 
 /**
  * @brief 前缀匹配且后接空白或结束
- * @details 用于解析 `cmd args`。
+ * @details 用于解析 `cmd args`；匹配后可选写出参数起始指针。
  * @param[in]  s      行
  * @param[in]  prefix 命令名
  * @param[out] rest   参数起始；可为 NULL
@@ -90,7 +101,7 @@ static int fs_streq(const char *a, const char *b)
  * @retval 0 否
  * @note 无
  * @warning 无
- * @attention ✅ ISR；❌ 不阻塞
+ * @attention ✅ ISR；❌ block/switch
  * @internal
  */
 static int fs_startswith(const char *s, const char *prefix, const char **rest)
@@ -113,13 +124,14 @@ static int fs_startswith(const char *s, const char *prefix, const char **rest)
 }
 
 /**
- * @brief 跳过空白
- * @param[in] s 字符串
- * @return 指向首个非空白
- * @retval 非 NULL 指针
+ * @brief 跳过前导空白
+ * @details 前进至首个非空格/制表符，或指向 NUL。
+ * @param[in] s 输入串
+ * @return 指向首个非空白字符
+ * @retval 非 NULL 始终有效（同 s 或其后）
  * @note 无
  * @warning 无
- * @attention ✅ ISR；❌ 不阻塞
+ * @attention ✅ ISR；❌ block/switch
  * @internal
  */
 static const char *fs_skip_ws(const char *s)
@@ -132,13 +144,14 @@ static const char *fs_skip_ws(const char *s)
 
 /**
  * @brief 登记打开句柄路径（供 fhandle）
+ * @details 在 g_fh 空闲槽写入 fd 与路径副本；表满则静默丢弃登记。
  * @param[in] fd   描述符
  * @param[in] path 绝对路径
  * @return 无
  * @retval 无
  * @note 表满则静默丢弃登记
  * @warning 无
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ ISR；❌ block/switch
  * @internal
  */
 static void fs_fh_add(int fd, const char *path)
@@ -159,12 +172,13 @@ static void fs_fh_add(int fd, const char *path)
 
 /**
  * @brief 移除句柄登记
+ * @details 按 fd 匹配并清零对应 g_fh 槽。
  * @param[in] fd 描述符
  * @return 无
  * @retval 无
  * @note 无
  * @warning 无
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ ISR；❌ block/switch
  * @internal
  */
 static void fs_fh_del(int fd)
@@ -178,13 +192,13 @@ static void fs_fh_del(int fd)
 
 /**
  * @brief 检测用户是否按 Ctrl-C 请求中止
- * @details 非阻塞 poll UART；吃掉 0x03。
+ * @details 非阻塞 poll UART；若读到 0x03 则打印 ^C 并返回 1。
  * @return 1=中止；0=继续
  * @retval 1 中止
  * @retval 0 继续
  * @note 长 IO 循环中调用
  * @warning 会消耗一个输入字节
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ ISR；❌ block/switch
  * @internal
  */
 static int fs_abort_poll(void)
@@ -206,7 +220,7 @@ static int fs_abort_poll(void)
  * @retval 0 取消
  * @note 使用 cgrtos_uart_getc
  * @warning 阻塞直到换行
- * @attention ❌ ISR；✅ 阻塞
+ * @attention ❌ ISR；✅ block/switch
  * @internal
  */
 static int fs_confirm(const char *prompt)
@@ -235,7 +249,17 @@ static int fs_confirm(const char *prompt)
 }
 
 /**
- * @brief 将用户路径解析为绝对路径（包装 cli_path_resolve，失败打印）
+ * @brief 将用户路径解析为绝对路径
+ * @details 包装 cli_path_resolve(quiet=0)；失败时由下层打印原因。
+ * @param[in]  user   用户路径
+ * @param[out] abs    输出绝对路径
+ * @param[in]  abs_sz 容量
+ * @return 0 成功；-1 失败
+ * @retval 0  成功
+ * @retval -1 失败
+ * @note 不持 g_fs_mtx
+ * @warning 无
+ * @attention ❌ ISR；❌ block/switch
  * @internal
  */
 static int fs_resolve(const char *user, char *abs, size_t abs_sz)
@@ -245,14 +269,14 @@ static int fs_resolve(const char *user, char *abs, size_t abs_sz)
 
 /**
  * @brief 取下一空白分隔 token（原地切开）
- * @details 将首个空白写为 NUL，返回后续指针。
+ * @details 将首个空白写为 NUL，推进 *pp，返回 token 起始。
  * @param[in,out] pp 指向当前解析位置的指针
  * @return token 起始；无则 NULL
  * @retval 非 NULL token
  * @retval NULL    结束
  * @note 无
  * @warning 修改原字符串
- * @attention ✅ ISR；❌ 不阻塞
+ * @attention ✅ ISR；❌ block/switch
  * @internal
  */
 static char *fs_next_tok(char **pp)
@@ -280,7 +304,7 @@ static char *fs_next_tok(char **pp)
 
 /**
  * @brief 递归删除目录树
- * @details 深度优先；每步检查 Ctrl-C；目录非空则先删子项。
+ * @details 深度优先；每步检查 Ctrl-C；目录非空则先删子项；拒绝删除 `/`。
  * @param[in] path 绝对路径
  * @return 0 成功；-1 失败；-2 用户中止
  * @retval 0  成功
@@ -288,7 +312,7 @@ static char *fs_next_tok(char **pp)
  * @retval -2 中止
  * @note 使用堆缓冲拼接子路径
  * @warning 危险
- * @attention ❌ ISR；✅ 可能阻塞
+ * @attention ❌ ISR；✅ block/switch
  * @internal
  */
 static int fs_rm_tree(const char *path)
@@ -346,14 +370,15 @@ static int fs_rm_tree(const char *path)
 
 /**
  * @brief 带跟踪的打开
+ * @details 调用 vfs_open；成功则 fs_fh_add 登记路径。
  * @param[in] path  绝对路径
- * @param[in] flags 标志
+ * @param[in] flags 打开标志
  * @return fd 或 -1
  * @retval >=0 fd
  * @retval -1  失败
  * @note 无
  * @warning 无
- * @attention ❌ ISR；✅ 可能阻塞
+ * @attention ❌ ISR；✅ block/switch
  * @internal
  */
 static int fs_open_tracked(const char *path, int flags)
@@ -367,12 +392,14 @@ static int fs_open_tracked(const char *path, int flags)
 
 /**
  * @brief 带跟踪的关闭
+ * @details 先 fs_fh_del 再 vfs_close。
  * @param[in] fd 描述符
  * @return vfs_close 结果
- * @retval 0/-1
+ * @retval 0 成功
+ * @retval -1 失败
  * @note 无
  * @warning 无
- * @attention ❌ ISR；✅ 可能阻塞
+ * @attention ❌ ISR；✅ block/switch
  * @internal
  */
 static int fs_close_tracked(int fd)
@@ -383,12 +410,13 @@ static int fs_close_tracked(int fd)
 
 /**
  * @brief pwd：打印当前工作目录
+ * @details 读取会话 CWD 并打印一行；无会话则报错。
  * @param[in] arg 忽略
  * @return 无
  * @retval 无
  * @note 示例：`pwd`
  * @warning 无
- * @attention ❌ ISR；✅ 可能阻塞
+ * @attention ❌ ISR；✅ block/switch
  * @internal
  */
 static void cmd_pwd(const char *arg)
@@ -404,12 +432,13 @@ static void cmd_pwd(const char *arg)
 
 /**
  * @brief cd：切换工作目录
+ * @details 解析路径，确认目标为目录后 cli_path_setcwd；空参数视为 `/`。
  * @param[in] arg 目标路径；空则 `/`
  * @return 无
  * @retval 无
  * @note 示例：`cd /tmp` / `cd ..`
  * @warning 目标须为目录
- * @attention ❌ ISR；✅ 可能阻塞
+ * @attention ❌ ISR；✅ block/switch
  * @internal
  */
 static void cmd_cd(const char *arg)
@@ -435,12 +464,13 @@ static void cmd_cd(const char *arg)
 
 /**
  * @brief ls：列出目录（可选 -l）
+ * @details 解析可选 `-l` 与路径；目录则 readdir；若为普通文件则打印该项。长列表含类型与大小。
  * @param[in] arg `[-l] [path]`
  * @return 无
  * @retval 无
- * @note 示例：`ls` / `ls -l /tmp`
+ * @note 示例：`ls` / `ls -l /tmp`；Ctrl-C 可中止
  * @warning 无
- * @attention ❌ ISR；✅ 可能阻塞
+ * @attention ❌ ISR；✅ block/switch
  * @internal
  */
 static void cmd_ls(const char *arg)
@@ -519,12 +549,13 @@ static void cmd_ls(const char *arg)
 
 /**
  * @brief cat：打印文件内容（堆缓冲分块）
+ * @details 只读打开文件，按 CLI_FS_IO_CHUNK 分块读出并写 UART；循环中轮询 Ctrl-C。
  * @param[in] arg 文件路径
  * @return 无
  * @retval 无
- * @note 示例：`cat /tmp/a.txt`；Ctrl-C 可中止
+ * @note 示例：`cat /tmp/a.txt`
  * @warning 二进制可能扰乱终端
- * @attention ❌ ISR；✅ 可能阻塞
+ * @attention ❌ ISR；✅ block/switch
  * @internal
  */
 static void cmd_cat(const char *arg)
@@ -574,13 +605,14 @@ static void cmd_cat(const char *arg)
 }
 
 /**
- * @brief touch：创建空文件或更新存在性
+ * @brief touch：创建空文件或确保存在
+ * @details 以 CREAT|RDWR 打开后立即关闭；已存在则仅打开关闭。
  * @param[in] arg 路径
  * @return 无
  * @retval 无
  * @note 示例：`touch a.txt`
  * @warning 无
- * @attention ❌ ISR；✅ 可能阻塞
+ * @attention ❌ ISR；✅ block/switch
  * @internal
  */
 static void cmd_touch(const char *arg)
@@ -605,12 +637,13 @@ static void cmd_touch(const char *arg)
 
 /**
  * @brief mkdir：创建目录
+ * @details 解析绝对路径后调用 vfs_mkdir；不递归创建父目录。
  * @param[in] arg 路径
  * @return 无
  * @retval 无
  * @note 示例：`mkdir /tmp`
  * @warning 无父级递归创建
- * @attention ❌ ISR；✅ 可能阻塞
+ * @attention ❌ ISR；✅ block/switch
  * @internal
  */
 static void cmd_mkdir(const char *arg)
@@ -631,12 +664,13 @@ static void cmd_mkdir(const char *arg)
 
 /**
  * @brief rm：删除文件；`rm -r` 递归删目录（需确认）
+ * @details 普通文件 unlink；目录须 `-r`/`-R` 且交互确认后 fs_rm_tree。
  * @param[in] arg `[-r] <path>`
  * @return 无
  * @retval 无
  * @note 示例：`rm a.txt` / `rm -r /tmp`
  * @warning 递归删除危险
- * @attention ❌ ISR；✅ 可能阻塞
+ * @attention ❌ ISR；✅ block/switch
  * @internal
  */
 static void cmd_rm(const char *arg)
@@ -706,12 +740,13 @@ static void cmd_rm(const char *arg)
 
 /**
  * @brief mv：重命名/移动
+ * @details 解析 src/dst 绝对路径后 vfs_rename。
  * @param[in] arg `<src> <dst>`
  * @return 无
  * @retval 无
  * @note 示例：`mv a.txt b.txt`
  * @warning 无
- * @attention ❌ ISR；✅ 可能阻塞
+ * @attention ❌ ISR；✅ block/switch
  * @internal
  */
 static void cmd_mv(const char *arg)
@@ -749,12 +784,13 @@ static void cmd_mv(const char *arg)
 
 /**
  * @brief cp：拷贝文件（堆缓冲分块，可 Ctrl-C）
+ * @details 仅普通文件；分块 read/write；中止时留下部分目标文件。
  * @param[in] arg `<src> <dst>`
  * @return 无
  * @retval 无
  * @note 示例：`cp a.txt b.txt`
  * @warning 仅普通文件
- * @attention ❌ ISR；✅ 可能阻塞
+ * @attention ❌ ISR；✅ block/switch
  * @internal
  */
 static void cmd_cp(const char *arg)
@@ -833,12 +869,13 @@ out:
 
 /**
  * @brief stat：打印类型与大小
+ * @details vfs_stat 后输出 path/type/size。
  * @param[in] arg 路径
  * @return 无
  * @retval 无
  * @note 示例：`stat /tmp/a.txt`
  * @warning 无
- * @attention ❌ ISR；✅ 可能阻塞
+ * @attention ❌ ISR；✅ block/switch
  * @internal
  */
 static void cmd_stat(const char *arg)
@@ -864,12 +901,13 @@ static void cmd_stat(const char *arg)
 
 /**
  * @brief hexdump：十六进制转储文件
+ * @details 每行 16 字节偏移、十六进制与可打印 ASCII；Ctrl-C 可中止。
  * @param[in] arg 路径
  * @return 无
  * @retval 无
- * @note 示例：`hexdump a.txt`；Ctrl-C 可中止
+ * @note 示例：`hexdump a.txt`
  * @warning 无
- * @attention ❌ ISR；✅ 可能阻塞
+ * @attention ❌ ISR；✅ block/switch
  * @internal
  */
 static void cmd_hexdump(const char *arg)
@@ -924,12 +962,13 @@ static void cmd_hexdump(const char *arg)
 
 /**
  * @brief mount：挂载或列示
+ * @details 无参列出挂载表；有参则 `<fstype> <mp>` 调用 vfs_mount。
  * @param[in] arg 空=列表；否则 `<fstype> <mp>`
  * @return 无
  * @retval 无
- * @note 示例：`mount` / `mount ram /mnt`（littlefs/fat 未链接时失败）
+ * @note 示例：`mount` / `mount ram /mnt`
  * @warning 无
- * @attention ❌ ISR；✅ 可能阻塞
+ * @attention ❌ ISR；✅ block/switch
  * @internal
  */
 static void cmd_mount(const char *arg)
@@ -970,12 +1009,13 @@ static void cmd_mount(const char *arg)
 
 /**
  * @brief umount：卸载挂载点
+ * @details 调用 vfs_umount；由 VFS 拒绝卸掉唯一根等非法操作。
  * @param[in] arg 挂载点
  * @return 无
  * @retval 无
- * @note 示例：`umount /mnt`；拒绝卸掉唯一根
+ * @note 示例：`umount /mnt`
  * @warning 无
- * @attention ❌ ISR；✅ 可能阻塞
+ * @attention ❌ ISR；✅ block/switch
  * @internal
  */
 static void cmd_umount(const char *arg)
@@ -992,12 +1032,13 @@ static void cmd_umount(const char *arg)
 
 /**
  * @brief df：显示容量
+ * @details 遍历挂载点 vfs_statfs；可选参数过滤单一挂载点。
  * @param[in] arg 可选挂载点
  * @return 无
  * @retval 无
  * @note 示例：`df` / `df /`
  * @warning 无
- * @attention ❌ ISR；✅ 可能阻塞
+ * @attention ❌ ISR；✅ block/switch
  * @internal
  */
 static void cmd_df(const char *arg)
@@ -1026,12 +1067,13 @@ static void cmd_df(const char *arg)
 
 /**
  * @brief sync：刷写挂载点
+ * @details 空参数同步全部；否则同步指定挂载点。
  * @param[in] arg 可选挂载点；空=全部
  * @return 无
  * @retval 无
  * @note 示例：`sync`
  * @warning 无
- * @attention ❌ ISR；✅ 可能阻塞
+ * @attention ❌ ISR；✅ block/switch
  * @internal
  */
 static void cmd_sync(const char *arg)
@@ -1046,12 +1088,13 @@ static void cmd_sync(const char *arg)
 
 /**
  * @brief mkfs：格式化（需确认）
+ * @details 解析可选 fstype/mp（默认 ram /）；确认后 vfs_mkfs 并将 CWD 重置为 `/`。
  * @param[in] arg `[fstype] [mp]`，默认 `ram /`
  * @return 无
  * @retval 无
  * @note 示例：`mkfs ram /`
  * @warning 销毁全部数据
- * @attention ❌ ISR；✅ 可能阻塞
+ * @attention ❌ ISR；✅ block/switch
  * @internal
  */
 static void cmd_mkfs(const char *arg)
@@ -1090,12 +1133,13 @@ static void cmd_mkfs(const char *arg)
 
 /**
  * @brief fhandle：列出 CLI 跟踪的打开句柄
+ * @details 打印 g_fh 中所有 used 槽的 fd 与 path；无则提示空。
  * @param[in] arg 保留
  * @return 无
  * @retval 无
  * @note 示例：`fhandle`
  * @warning 仅跟踪本模块 open/close
- * @attention ❌ ISR；✅ 可能阻塞
+ * @attention ❌ ISR；✅ block/switch
  * @internal
  */
 static void cmd_fhandle(const char *arg)
@@ -1115,12 +1159,13 @@ static void cmd_fhandle(const char *arg)
 
 /**
  * @brief fbench：简易文件读写基准
+ * @details 在 `/tmp/fbench.bin` 上循环写读指定大小；统计 tick 差；可 Ctrl-C。
  * @param[in] arg `[size] [iters]`，默认 256 / 20
  * @return 无
  * @retval 无
  * @note 示例：`fbench 1024 50`
- * @warning 使用 `/tmp/fbench.bin`；可 Ctrl-C
- * @attention ❌ ISR；✅ 可能阻塞
+ * @warning 使用 `/tmp/fbench.bin`
+ * @attention ❌ ISR；✅ block/switch
  * @internal
  */
 static void cmd_fbench(const char *arg)
@@ -1205,12 +1250,12 @@ static void cmd_fbench(const char *arg)
 
 /**
  * @brief 初始化本 CLI 任务的文件系统会话（CWD=/）
- * @details 按当前任务 ID 绑定会话；重复调用重置 CWD 为根。
+ * @details 调用 cli_path_session_init 并 vfs_init；重复调用重置 CWD 为根。
  * @return 无
  * @retval 无
- * @note 在 cli_task 启动时调用
+ * @note 在 cli_task 启动时调用一次
  * @warning 无
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ ISR；❌ block/switch
  */
 void cli_fs_session_init(void)
 {
@@ -1220,12 +1265,12 @@ void cli_fs_session_init(void)
 
 /**
  * @brief 向帮助文本追加 FS 命令说明与示例
- * @details 由 cli_help 调用。
+ * @details 由 cli_help 在 CONFIG_CLI_FS=1 时调用，经 UART 打印命令表。
  * @return 无
  * @retval 无
  * @note 无
  * @warning 无
- * @attention ❌ ISR；✅ 可能阻塞 printf
+ * @attention ❌ ISR；✅ block/switch
  */
 void cli_fs_help(void)
 {
@@ -1246,14 +1291,14 @@ void cli_fs_help(void)
 
 /**
  * @brief 尝试分发文件系统命令
- * @details 识别并执行 FS 命令；非本模块命令返回 0。
- * @param[in] line 已 trim 命令行
- * @return 1=已处理；0=未识别
+ * @details 识别 pwd/cd/ls/cat/… 及 vi；处理成功返回 1；非 FS 命令返回 0。
+ * @param[in] line 已 trim 的命令行
+ * @return 1=已处理；0=非本模块命令
  * @retval 1 已处理
- * @retval 0 未识别
- * @note 全部走 vfs_*
- * @warning 无
- * @attention ❌ ISR；✅ 可能阻塞
+ * @retval 0 未识别为 FS 命令
+ * @note 所有文件操作走 vfs_*
+ * @warning mkfs / rm -r 会交互确认
+ * @attention ❌ ISR；✅ block/switch
  */
 int cli_fs_try_handle(char *line)
 {

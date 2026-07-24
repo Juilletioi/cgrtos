@@ -46,7 +46,7 @@ uint32_t             g_eg_cnt;
  * @retval pdFAIL 当前为 idle 或无 running 任务
  * @note 调用方须在 exit_critical 后 cgrtos_sched_yield
  * @warning 须在临界区 / g_klock 内调用
- * @attention ❌ 单独调用非 ISR 安全；✅ 后续由调用方 yield 切换
+ * @attention ❌ ISR；✅ block/switch
  * @internal
  */
 static int block_current_on_waitq(cgrtos_task_t *volatile *wait_q,
@@ -76,7 +76,7 @@ tick_t timeout)
  * @retval errTIMEOUT 超时或被 delete 唤醒
  * @note 须在 unblock 后、任务再次运行时使用
  * @warning 无
- * @attention ✅ 任务上下文；❌ 不阻塞
+ * @attention ❌ ISR；❌ block/switch
  * @internal
  */
 static int wait_result(cgrtos_task_t *task)
@@ -98,7 +98,7 @@ static int wait_result(cgrtos_task_t *task)
  * @retval 0 无环、参数无效或链终止
  * @note 调用方已持 g_klock
  * @warning 深度截断可能漏检超长链
- * @attention ❌ 仅临界区内；❌ 不阻塞
+ * @attention ❌ ISR；❌ block/switch
  * @internal
  */
 static int mutex_would_deadlock(cgrtos_mutex_t *mutex, cgrtos_task_t *self)
@@ -134,7 +134,7 @@ static int mutex_would_deadlock(cgrtos_mutex_t *mutex, cgrtos_task_t *self)
  * @retval NULL    参数非法或池满
  * @note 对象在静态池中，用户不得 free 指针
  * @warning 无
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ ISR；❌ block/switch
  */
 cgrtos_sem_t *cgrtos_sem_create(int32_t init, int32_t max)
 {
@@ -169,7 +169,7 @@ cgrtos_sem_t *cgrtos_sem_create(int32_t init, int32_t max)
  * @retval NULL    池满
  * @note 无
  * @warning 无
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ ISR；❌ block/switch
  */
 cgrtos_sem_t *cgrtos_sem_create_binary(void)
 {
@@ -187,7 +187,7 @@ cgrtos_sem_t *cgrtos_sem_create_binary(void)
  * @retval NULL 参数非法
  * @note 无
  * @warning 勿对池对象与静态对象混用 delete 语义错误
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ ISR；❌ block/switch
  */
 cgrtos_sem_t *cgrtos_sem_create_static(cgrtos_sem_t *sem, int32_t init, int32_t max)
 {
@@ -215,7 +215,7 @@ cgrtos_sem_t *cgrtos_sem_create_static(cgrtos_sem_t *sem, int32_t init, int32_t 
  * @retval errTIMEOUT 超时或非阻塞未取到
  * @note 等待队列按任务优先级排序；临界区保护 count/wait_q
  * @warning 无所有权概念，过度 give 受 max 限制；与 mutex 混用场景需自行设计协议
- * @attention ❌ 禁止 ISR（阻塞路径）；✅ timeout>0 且无令牌时阻塞并可能切换
+ * @attention ❌ ISR；✅ block/switch
  */
 int cgrtos_sem_take(cgrtos_sem_t *sem, tick_t timeout)
 {
@@ -264,7 +264,7 @@ int cgrtos_sem_take(cgrtos_sem_t *sem, tick_t timeout)
  * @retval pdFAIL 参数错误
  * @note 无所有权概念，过度 give 受 max 限制
  * @warning 无
- * @attention ❌ ISR；✅ 唤醒等待者时可能切换
+ * @attention ❌ ISR；✅ block/switch
  */
 int cgrtos_sem_give(cgrtos_sem_t *sem)
 {
@@ -309,7 +309,7 @@ int cgrtos_sem_give(cgrtos_sem_t *sem)
  * @retval pdFAIL 参数错误
  * @note 无
  * @warning 忽略 woken 且未自动 yield 可能导致延迟调度
- * @attention ✅ ISR；❌ 不阻塞
+ * @attention ✅ ISR；❌ block/switch
  */
 int cgrtos_sem_give_from_isr(cgrtos_sem_t *sem, BaseType_t *woken)
 {
@@ -352,7 +352,7 @@ int cgrtos_sem_give_from_isr(cgrtos_sem_t *sem, BaseType_t *woken)
  * @retval pdFAIL 无令牌或参数错误
  * @note 无
  * @warning 无
- * @attention ✅ ISR；❌ 不阻塞
+ * @attention ✅ ISR；❌ block/switch
  */
 int cgrtos_sem_take_from_isr(cgrtos_sem_t *sem)
 {
@@ -378,7 +378,7 @@ int cgrtos_sem_take_from_isr(cgrtos_sem_t *sem)
  * @retval pdFAIL 参数错误
  * @note 无
  * @warning 删除后禁止再使用指针
- * @attention ❌ ISR；✅ 可能切换
+ * @attention ❌ ISR；✅ block/switch
  */
 int cgrtos_sem_delete(cgrtos_sem_t *sem)
 {
@@ -414,7 +414,7 @@ int cgrtos_sem_delete(cgrtos_sem_t *sem)
  * @retval NULL    池满
  * @note 支持递归加锁（上限 CONFIG_MUTEX_MAX_RECURSIVE）
  * @warning 勿在 ISR 中 lock
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ ISR；❌ block/switch
  */
 cgrtos_mutex_t *cgrtos_mutex_create(void)
 {
@@ -442,7 +442,7 @@ cgrtos_mutex_t *cgrtos_mutex_create(void)
  * @retval NULL    mutex 为空
  * @note delete 时不回收池槽（调用者管理存储）
  * @warning 同一 storage 未 delete 前勿重复 init
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ ISR；❌ block/switch
  */
 cgrtos_mutex_t *cgrtos_mutex_create_static(cgrtos_mutex_t *mutex)
 {
@@ -466,7 +466,7 @@ cgrtos_mutex_t *cgrtos_mutex_create_static(cgrtos_mutex_t *mutex)
  * @retval NULL    参数非法或池满
  * @note 与动态 PI 互斥
  * @warning 天花板过低无法抑制反转；过高影响其他任务
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ ISR；❌ block/switch
  */
 cgrtos_mutex_t *cgrtos_mutex_create_dpcp(uint8_t ceiling_prio, tick_t ceiling_rel)
 {
@@ -496,7 +496,7 @@ cgrtos_mutex_t *cgrtos_mutex_create_dpcp(uint8_t ceiling_prio, tick_t ceiling_re
  * @retval pdFAIL 参数非法或 mutex 已被持有
  * @note 自动设置 dpcp=1、inherit=0
  * @warning 持锁期间修改天花板无效
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ ISR；❌ block/switch
  */
 int cgrtos_mutex_set_ceiling(cgrtos_mutex_t *mutex, uint8_t ceiling_prio,
                              tick_t ceiling_rel)
@@ -520,20 +520,6 @@ int cgrtos_mutex_set_ceiling(cgrtos_mutex_t *mutex, uint8_t ceiling_prio,
 #endif /* CONFIG_USE_DPCP */
 
 
-/**
- * @brief 对互斥量持有者应用优先级继承
- * 
- * @param mutex  互斥量指针
- * @param waiter 正在等待该互斥量的任务
- * 
- * @details
- * 1. 若未启用 inherit 或无 owner/waiter，直接返回。
- * 2. 若 waiter 优先级不高于 owner，无需提升。
- * 3. 若 owner 在 READY 队列中，先 remove 再修改 prio 后 re-add。
- * 4. 将 owner->prio 提升至 waiter->prio。
- * 5. 若 owner 正在其他核 RUNNING，发送 IPI 触发重调度。
- */
-
 #if CONFIG_USE_DPCP
 /**
  * @brief DPCP：对 owner 应用天花板（优先级与/或 EDF deadline）
@@ -543,7 +529,7 @@ int cgrtos_mutex_set_ceiling(cgrtos_mutex_t *mutex, uint8_t ceiling_prio,
  * @retval 无
  * @note 设置 ceiling_applied=1 并保存 saved_prio/saved_deadline
  * @warning 必须在 g_klock 内；READY 队列须 remove/add 避免乱序
- * @attention ❌ ISR；❌ 不阻塞；✅ 可能 IPI 触发远端重调度
+ * @attention ❌ ISR；❌ block/switch
  * @internal
  */
 static void mutex_apply_dpcp(cgrtos_mutex_t *mutex)
@@ -590,7 +576,7 @@ static void mutex_apply_dpcp(cgrtos_mutex_t *mutex)
  * @retval 无
  * @note 清除 ceiling_applied 标志
  * @warning 须在 g_klock 内调用
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ ISR；❌ block/switch
  * @internal
  */
 static void mutex_restore_dpcp(cgrtos_mutex_t *mutex)
@@ -623,7 +609,7 @@ static void mutex_restore_dpcp(cgrtos_mutex_t *mutex)
  * @retval 无
  * @note 仅 inherit 启用且非 DPCP 时生效
  * @warning 须在 g_klock 内调用
- * @attention ❌ ISR；❌ 不阻塞；✅ 可能 IPI
+ * @attention ❌ ISR；❌ block/switch
  * @internal
  */
 static void mutex_apply_inheritance(cgrtos_mutex_t *mutex, cgrtos_task_t *waiter)
@@ -665,7 +651,7 @@ static void mutex_apply_inheritance(cgrtos_mutex_t *mutex, cgrtos_task_t *waiter
  * @retval 无
  * @note DPCP mutex 直接返回
  * @warning 须在 g_klock 内调用
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ ISR；❌ block/switch
  * @internal
  */
 static void mutex_boost_from_waiters(cgrtos_mutex_t *mutex)
@@ -692,7 +678,7 @@ static void mutex_boost_from_waiters(cgrtos_mutex_t *mutex)
  * @retval 无
  * @note 无 inherit 或无 owner 时直接返回
  * @warning 须在 g_klock 内调用
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ ISR；❌ block/switch
  * @internal
  */
 static void mutex_restore_inheritance(cgrtos_mutex_t *mutex)
@@ -727,7 +713,7 @@ static void mutex_restore_inheritance(cgrtos_mutex_t *mutex)
  * @retval errOVERFLOW 递归层数超过 CONFIG_MUTEX_MAX_RECURSIVE
  * @note 必须与 unlock 严格成对；临界区保护 owner/wait_q
  * @warning 锁顺序不当仍可能死锁；持锁期间长时间阻塞其它资源会扩大优先级反转窗口
- * @attention ❌ 禁止 ISR；✅ 可能阻塞并引起上下文切换；可能抬升持有者优先级
+ * @attention ❌ ISR；✅ block/switch
  */
 int cgrtos_mutex_lock(cgrtos_mutex_t *mutex, tick_t timeout)
 {
@@ -808,7 +794,7 @@ int cgrtos_mutex_lock(cgrtos_mutex_t *mutex, tick_t timeout)
  * @retval pdFAIL 非 owner 或参数非法
  * @note 须与 lock 成对调用
  * @warning 非持有者 unlock 失败
- * @attention ❌ ISR；✅ 可能切换
+ * @attention ❌ ISR；✅ block/switch
  */
 int cgrtos_mutex_unlock(cgrtos_mutex_t *mutex)
 {
@@ -878,7 +864,7 @@ int cgrtos_mutex_unlock(cgrtos_mutex_t *mutex)
  * @retval pdFAIL 参数错误
  * @note 无
  * @warning 仍有 owner 时行为以实现为准，应先确保解锁
- * @attention ❌ ISR；✅ 可能切换
+ * @attention ❌ ISR；✅ block/switch
  */
 int cgrtos_mutex_delete(cgrtos_mutex_t *mutex)
 {
@@ -911,7 +897,7 @@ int cgrtos_mutex_delete(cgrtos_mutex_t *mutex)
  * @retval >=0 当前 recursive 值；mutex 为空返回 0
  * @note 只读快照
  * @warning 无
- * @attention ✅ ISR 可读；❌ 不阻塞
+ * @attention ✅ ISR；❌ block/switch
  */
 uint32_t cgrtos_mutex_get_recursive_count(cgrtos_mutex_t *mutex)
 {
@@ -933,7 +919,7 @@ uint32_t cgrtos_mutex_get_recursive_count(cgrtos_mutex_t *mutex)
  * @retval NULL    无人持有或 mutex 为空
  * @note 只读快照
  * @warning 返回指针在 unlock 后可能失效
- * @attention ✅ ISR 可读；❌ 不阻塞
+ * @attention ✅ ISR；❌ block/switch
  */
 cgrtos_task_t *cgrtos_mutex_get_holder(cgrtos_mutex_t *mutex)
 {
@@ -954,7 +940,7 @@ cgrtos_task_t *cgrtos_mutex_get_holder(cgrtos_mutex_t *mutex)
  * @retval 无
  * @note 由 cgrtos_task_delete 等路径调用；防止持锁任务被删导致永久阻塞
  * @warning 会改变等待者优先级继承状态
- * @attention ❌ ISR；✅ 可能 unblock 等待者（不主动 yield）
+ * @attention ❌ ISR；❌ block/switch
  */
 void cgrtos_mutex_force_release_owned(cgrtos_task_t *task)
 {
@@ -998,7 +984,7 @@ void cgrtos_mutex_force_release_owned(cgrtos_task_t *task)
  * @retval NULL    参数非法、内存不足或池满
  * @note 对象在静态池中，缓冲由 delete 时 free（非 static 队列）
  * @warning len*item_sz 溢出时拒绝创建
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ ISR；❌ block/switch
  */
 cgrtos_queue_t *cgrtos_queue_create(uint32_t len, uint32_t item_sz)
 {
@@ -1045,7 +1031,7 @@ cgrtos_queue_t *cgrtos_queue_create(uint32_t len, uint32_t item_sz)
  * @retval NULL    参数非法
  * @note 不占用全局池
  * @warning storage 生命周期须覆盖队列使用期
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ ISR；❌ block/switch
  */
 cgrtos_queue_t *cgrtos_queue_create_static(cgrtos_queue_t *q, void *storage,
 uint32_t len, uint32_t item_sz)
@@ -1070,7 +1056,7 @@ uint32_t len, uint32_t item_sz)
  * @retval pdPASS 写入成功
  * @note 由 queue_send_internal 调用；调用方须保证 q->cnt < q->len
  * @warning 队列已满时行为未定义
- * @attention ❌ 仅临界区内；❌ 不阻塞
+ * @attention ❌ ISR；❌ block/switch
  * @internal
  */
 static int queue_push(cgrtos_queue_t *q, const void *data)
@@ -1090,7 +1076,7 @@ static int queue_push(cgrtos_queue_t *q, const void *data)
  * @retval pdPASS 读出成功
  * @note 由 queue receive 路径调用；调用方须保证 q->cnt > 0
  * @warning 队列为空时行为未定义
- * @attention ❌ 仅临界区内；❌ 不阻塞
+ * @attention ❌ ISR；❌ block/switch
  * @internal
  */
 static int queue_pop(cgrtos_queue_t *q, void *buf)
@@ -1112,7 +1098,7 @@ static int queue_pop(cgrtos_queue_t *q, void *buf)
  * @retval errQUEUE_FULL  无空闲槽位
  * @note 由 cgrtos_queue_send / send_from_isr 调用
  * @warning 须在 enter_critical 内；满时不会阻塞
- * @attention ❌ 仅临界区内；✅ 可能标记 need_yield
+ * @attention ❌ ISR；✅ block/switch
  * @internal
  */
 static int queue_send_internal(cgrtos_queue_t *q, const void *data, int *need_yield)
@@ -1149,7 +1135,7 @@ static int queue_send_internal(cgrtos_queue_t *q, const void *data, int *need_yi
  * @retval pdFAIL         超时或被 delete 唤醒
  * @note 唤醒后 timeout 置 0 重试，防止槽位被抢占
  * @warning data 指向的内存在拷贝完成前须保持有效
- * @attention ❌ 阻塞路径禁止 ISR；✅ timeout>0 且满时阻塞并切换
+ * @attention ❌ ISR；✅ block/switch
  */
 int cgrtos_queue_send(cgrtos_queue_t *q, const void *data, tick_t timeout)
 {
@@ -1212,7 +1198,7 @@ int cgrtos_queue_send(cgrtos_queue_t *q, const void *data, tick_t timeout)
  * @retval pdFAIL         参数错误
  * @note 不阻塞
  * @warning data 须在拷贝完成前有效
- * @attention ✅ ISR；❌ 不阻塞；✅ 可能 yield_from_isr
+ * @attention ✅ ISR；❌ block/switch
  */
 int cgrtos_queue_send_from_isr(cgrtos_queue_t *q, const void *data, BaseType_t *woken)
 {
@@ -1247,7 +1233,7 @@ int cgrtos_queue_send_from_isr(cgrtos_queue_t *q, const void *data, BaseType_t *
  * @retval pdFAIL          超时或被 delete 唤醒
  * @note 唤醒后 timeout 置 0 重试
  * @warning buf 须足够容纳 item_sz 字节
- * @attention ❌ 阻塞路径禁止 ISR；✅ timeout>0 且空时阻塞并切换
+ * @attention ❌ ISR；✅ block/switch
  */
 int cgrtos_queue_receive(cgrtos_queue_t *q, void *buf, tick_t timeout)
 {
@@ -1306,7 +1292,7 @@ int cgrtos_queue_receive(cgrtos_queue_t *q, void *buf, tick_t timeout)
  * @retval errQUEUE_EMPTY  队列空或参数非法
  * @note 不阻塞
  * @warning buf 须足够容纳 item_sz 字节
- * @attention ✅ ISR；❌ 不阻塞；✅ 可能 yield_from_isr
+ * @attention ✅ ISR；❌ block/switch
  */
 int cgrtos_queue_receive_from_isr(cgrtos_queue_t *q, void *buf, BaseType_t *woken)
 {
@@ -1340,7 +1326,7 @@ int cgrtos_queue_receive_from_isr(cgrtos_queue_t *q, void *buf, BaseType_t *woke
  * @retval >=0 当前 cnt；q 为 NULL 时返回 0
  * @note 只读
  * @warning 并发 send/recv 时值为瞬时快照
- * @attention ✅ ISR 可读；❌ 不阻塞
+ * @attention ✅ ISR；❌ block/switch
  */
 uint32_t cgrtos_queue_messages_waiting(cgrtos_queue_t *q)
 {
@@ -1362,7 +1348,7 @@ uint32_t cgrtos_queue_messages_waiting(cgrtos_queue_t *q)
  * @retval pdFAIL 参数错误
  * @note storage_static=1 的队列不 free 缓冲
  * @warning 删除后禁止再使用指针
- * @attention ❌ ISR；✅ 可能切换
+ * @attention ❌ ISR；✅ block/switch
  */
 int cgrtos_queue_delete(cgrtos_queue_t *q)
 {
@@ -1410,7 +1396,7 @@ int cgrtos_queue_delete(cgrtos_queue_t *q)
  * @retval NULL    池满
  * @note 对象在静态池中，用户不得 free 指针
  * @warning 无
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ ISR；❌ block/switch
  */
 cgrtos_event_group_t *cgrtos_event_group_create(void)
 {
@@ -1437,7 +1423,7 @@ cgrtos_event_group_t *cgrtos_event_group_create(void)
  * @retval NULL    eg 为空
  * @note delete 时不回收池槽
  * @warning 同一 storage 未 delete 前勿重复 init
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ ISR；❌ block/switch
  */
 cgrtos_event_group_t *cgrtos_event_group_create_static(cgrtos_event_group_t *eg)
 {
@@ -1459,7 +1445,7 @@ cgrtos_event_group_t *cgrtos_event_group_create_static(cgrtos_event_group_t *eg)
  * @retval 0 不满足或参数无效
  * @note 由 event_group_set / set_from_isr 遍历 wait_q 时使用
  * @warning 须在 g_klock 内读取 flags 与 task 字段
- * @attention ❌ 仅临界区内；❌ 不阻塞
+ * @attention ❌ ISR；❌ block/switch
  * @internal
  */
 static int event_match(cgrtos_event_group_t *eg, cgrtos_task_t *task)
@@ -1483,7 +1469,7 @@ static int event_match(cgrtos_event_group_t *eg, cgrtos_task_t *task)
  * @retval 0     eg 为 NULL
  * @note 无
  * @warning 无
- * @attention ❌ ISR；✅ 可能切换
+ * @attention ❌ ISR；✅ block/switch
  */
 event_flags_t cgrtos_event_group_set(cgrtos_event_group_t *eg, event_flags_t flags)
 {
@@ -1522,7 +1508,7 @@ event_flags_t cgrtos_event_group_set(cgrtos_event_group_t *eg, event_flags_t fla
  * @retval 0     eg 为 NULL
  * @note 不阻塞
  * @warning 无
- * @attention ✅ ISR；❌ 不阻塞；✅ 可能 yield_from_isr
+ * @attention ✅ ISR；❌ block/switch
  */
 event_flags_t cgrtos_event_group_set_from_isr(cgrtos_event_group_t *eg,
                                               event_flags_t flags,
@@ -1564,7 +1550,7 @@ event_flags_t cgrtos_event_group_set_from_isr(cgrtos_event_group_t *eg,
  * @retval 0     eg 为 NULL
  * @note 清位不会使 AND/OR 等待条件变为真
  * @warning 无
- * @attention ✅ ISR；❌ 不阻塞；❌ 不唤醒
+ * @attention ✅ ISR；❌ block/switch
  */
 event_flags_t cgrtos_event_group_clear_from_isr(cgrtos_event_group_t *eg,
                                                 event_flags_t flags)
@@ -1589,7 +1575,7 @@ event_flags_t cgrtos_event_group_clear_from_isr(cgrtos_event_group_t *eg,
  * @retval 0     eg 为 NULL
  * @note 任务上下文版本；与 clear_from_isr 语义一致但不走 woken 路径
  * @warning 无
- * @attention ❌ ISR；❌ 不阻塞；❌ 不唤醒
+ * @attention ❌ ISR；❌ block/switch
  */
 event_flags_t cgrtos_event_group_clear(cgrtos_event_group_t *eg, event_flags_t flags)
 {
@@ -1615,7 +1601,7 @@ event_flags_t cgrtos_event_group_clear(cgrtos_event_group_t *eg, event_flags_t f
  * @retval 0     超时或未满足
  * @note 成功返回时不自动清除位
  * @warning 多任务同时 wait 须自行设计协议
- * @attention ❌ 阻塞路径禁止 ISR；✅ timeout>0 且未满足时阻塞并切换
+ * @attention ❌ ISR；✅ block/switch
  */
 event_flags_t cgrtos_event_group_wait(cgrtos_event_group_t *eg, event_flags_t flags,
 uint8_t wait_all, tick_t timeout)
@@ -1636,7 +1622,7 @@ uint8_t wait_all, tick_t timeout)
  * @retval 0     超时、未满足、参数非法或 ISR 阻塞路径
  * @note clear_on_exit 仅在成功返回时清除对应位
  * @warning 多个任务同时 wait 同一组时须自行设计同步协议
- * @attention ❌ 阻塞路径禁止 ISR；✅ timeout>0 且未满足时阻塞并切换
+ * @attention ❌ ISR；✅ block/switch
  */
 event_flags_t cgrtos_event_group_wait_bits(cgrtos_event_group_t *eg, event_flags_t flags,
 uint8_t clear_on_exit, uint8_t wait_all,
@@ -1698,7 +1684,7 @@ tick_t timeout)
  * @retval 0     eg 为 NULL
  * @note 只读
  * @warning 并发 set/clear 时值为瞬时快照
- * @attention ✅ ISR 可读；❌ 不阻塞
+ * @attention ✅ ISR；❌ block/switch
  */
 event_flags_t cgrtos_event_group_get(cgrtos_event_group_t *eg)
 {
@@ -1720,7 +1706,7 @@ event_flags_t cgrtos_event_group_get(cgrtos_event_group_t *eg)
  * @retval pdFAIL eg 为空
  * @note 动态池对象递减 g_eg_cnt；静态对象仅清零
  * @warning 删除后禁止再使用指针
- * @attention ❌ ISR；✅ 可能切换
+ * @attention ❌ ISR；✅ block/switch
  */
 int cgrtos_event_group_delete(cgrtos_event_group_t *eg)
 {

@@ -68,7 +68,7 @@ static uint8_t g_fs_ready;
  * @retval 无
  * @note 所有公开 API 经 fs_lock/fs_unlock 包裹
  * @warning 持锁期间禁止再次 fs_lock（非递归锁）
- * @attention ❌ ISR；✅ block
+ * @attention ❌ ISR；✅ block/switch
  * @internal
  */
 static void fs_lock(void)
@@ -86,7 +86,7 @@ static void fs_lock(void)
  * @retval 无
  * @note 必须与 fs_lock 成对调用
  * @warning 未持锁时 unlock 行为未定义
- * @attention ❌ ISR；❌ block
+ * @attention ❌ ISR；❌ block/switch
  * @internal
  */
 static void fs_unlock(void)
@@ -106,7 +106,7 @@ static void fs_unlock(void)
  * @retval -1   inode 池已满
  * @note 调用方须已持 fs 锁
  * @warning 不分配 data 缓冲，由后续写入或目录操作触发
- * @attention ❌ ISR；❌ block
+ * @attention ❌ ISR；❌ block/switch
  * @internal
  */
 static int16_t ino_alloc(int is_dir)
@@ -135,7 +135,7 @@ static int16_t ino_alloc(int is_dir)
  * @retval 无
  * @note 不更新父目录 dentry，由 dir_remove_child 先行处理
  * @warning 释放仍在 fd 表或目录项中引用的 inode 将导致悬空引用
- * @attention ❌ ISR；❌ block
+ * @attention ❌ ISR；❌ block/switch
  * @internal
  */
 static void ino_free(uint16_t ino)
@@ -167,7 +167,7 @@ static void ino_free(uint16_t ino)
  * @retval -2 末级不存在且未启用创建
  * @note 路径深度上限 16 层
  * @warning 并发调用须由 fs_lock 保护
- * @attention ❌ ISR；❌ block
+ * @attention ❌ ISR；❌ block/switch
  * @internal
  */
 static int path_resolve(const char *path, int create_file, int create_dir,
@@ -360,7 +360,7 @@ static int path_resolve(const char *path, int create_file, int create_dir,
  * @retval -1 父目录无效或未找到匹配项
  * @note 调用方须已持 fs 锁
  * @warning 不释放子 inode，由调用方 ino_free
- * @attention ❌ ISR；❌ block
+ * @attention ❌ ISR；❌ block/switch
  * @internal
  */
 static int dir_remove_child(int16_t parent, const char *name)
@@ -416,7 +416,7 @@ static int dir_remove_child(int16_t parent, const char *name)
  * @retval -1 参数非法或 malloc 失败
  * @note 调用方须已持 fs 锁；不检查重名
  * @warning 重名由调用方保证不发生
- * @attention ❌ ISR；❌ block
+ * @attention ❌ ISR；❌ block/switch
  * @internal
  */
 static int dir_add_child(int16_t parent, uint16_t child_ino, const char *name)
@@ -471,7 +471,7 @@ static int dir_add_child(int16_t parent, uint16_t child_ino, const char *name)
  * @retval 无
  * @note 幂等，可重复调用
  * @warning 重复 init 不会重置已有文件数据
- * @attention ❌ ISR；❌ block
+ * @attention ❌ ISR；❌ block/switch
  */
 void cgrtos_fs_init(void)
 {
@@ -498,7 +498,7 @@ void cgrtos_fs_init(void)
  * @retval -1  路径错误、目标是目录或 fd 池满
  * @note O_APPEND 打开时 pos 初始化为文件末尾
  * @warning 目录不可通过 open 打开
- * @attention ❌ ISR；✅ block
+ * @attention ❌ ISR；✅ block/switch
  */
 int cgrtos_fs_open(const char *path, int flags)
 {
@@ -551,7 +551,7 @@ int cgrtos_fs_open(const char *path, int flags)
  * @retval -1 fd 非法或未打开
  * @note 不释放 inode 或文件数据
  * @warning 关闭后 fd 号可能被复用
- * @attention ❌ ISR；✅ block
+ * @attention ❌ ISR；✅ block/switch
  */
 int cgrtos_fs_close(int fd)
 {
@@ -579,7 +579,7 @@ int cgrtos_fs_close(int fd)
  * @retval -1  fd 或 buf 非法
  * @note 部分读取合法，调用方须循环直至满足需求
  * @warning buf 须有足够空间容纳返回值
- * @attention ❌ ISR；✅ block
+ * @attention ❌ ISR；✅ block/switch
  */
 int cgrtos_fs_read(int fd, void *buf, size_t len)
 {
@@ -623,7 +623,7 @@ int cgrtos_fs_read(int fd, void *buf, size_t len)
  * @retval -1       参数非法、只读打开、超限或 malloc 失败
  * @note 写入可扩展文件 size
  * @warning 并发写同一 fd 由互斥锁串行化，不同 fd 同一 inode 无额外保护
- * @attention ❌ ISR；✅ block
+ * @attention ❌ ISR；✅ block/switch
  */
 int cgrtos_fs_write(int fd, const void *buf, size_t len)
 {
@@ -694,7 +694,7 @@ int cgrtos_fs_write(int fd, const void *buf, size_t len)
  * @retval -1  fd 非法或 whence 无效
  * @note SEEK_END 基于当前 ino->size
  * @warning seek 超出 size 合法，后续 write 会扩展文件
- * @attention ❌ ISR；✅ block
+ * @attention ❌ ISR；✅ block/switch
  */
 long cgrtos_fs_lseek(int fd, long off, int whence)
 {
@@ -735,7 +735,7 @@ long cgrtos_fs_lseek(int fd, long off, int whence)
  * @retval -1 已存在、路径非法或 inode 池满
  * @note 不递归创建中间目录（中间路径须已存在）
  * @warning 与 mkdir -p 语义不同
- * @attention ❌ ISR；✅ block
+ * @attention ❌ ISR；✅ block/switch
  */
 int cgrtos_fs_mkdir(const char *path)
 {
@@ -764,7 +764,7 @@ int cgrtos_fs_mkdir(const char *path)
  * @retval -1 路径错误、目标是目录或 dentry 移除失败
  * @note 简化实现不维护 nlink，直接释放 inode
  * @warning 仍有 fd 打开时删除将导致 fd 悬空
- * @attention ❌ ISR；✅ block
+ * @attention ❌ ISR；✅ block/switch
  */
 int cgrtos_fs_unlink(const char *path)
 {
@@ -798,7 +798,7 @@ int cgrtos_fs_unlink(const char *path)
  * @retval -1 非目录、非空或路径错误
  * @note 非空目录（含子项）拒绝删除
  * @warning 不检查是否有 opendir 句柄仍打开
- * @attention ❌ ISR；✅ block
+ * @attention ❌ ISR；✅ block/switch
  */
 int cgrtos_fs_rmdir(const char *path)
 {
@@ -833,7 +833,7 @@ int cgrtos_fs_rmdir(const char *path)
  * @retval -1 st 为空或路径不存在
  * @note 仅填充 mode 与 size 字段
  * @warning 无
- * @attention ❌ ISR；✅ block
+ * @attention ❌ ISR；✅ block/switch
  */
 int cgrtos_fs_stat(const char *path, cgrtos_stat_t *st)
 {
@@ -862,7 +862,7 @@ int cgrtos_fs_stat(const char *path, cgrtos_stat_t *st)
  * @retval NULL    非目录、路径错误或句柄池满（最多 8 个）
  * @note 须 paired 调用 closedir
  * @warning 并发 opendir 同一目录共享 inode 数据
- * @attention ❌ ISR；✅ block
+ * @attention ❌ ISR；✅ block/switch
  */
 cgrtos_dir_t *cgrtos_fs_opendir(const char *path)
 {
@@ -897,7 +897,7 @@ cgrtos_dir_t *cgrtos_fs_opendir(const char *path)
  * @retval -1 参数非法或目录 data 损坏
  * @note 不返回 "." 与 ".."（目录项仅含实际子项）
  * @warning 迭代期间目录被修改可能导致不一致
- * @attention ❌ ISR；✅ block
+ * @attention ❌ ISR；✅ block/switch
  */
 int cgrtos_fs_readdir(cgrtos_dir_t *dir, cgrtos_dirent_t *out)
 {
@@ -934,7 +934,7 @@ int cgrtos_fs_readdir(cgrtos_dir_t *dir, cgrtos_dirent_t *out)
  * @retval -1 dir 为 NULL
  * @note 关闭后句柄槽可被后续 opendir 复用
  * @warning 无
- * @attention ❌ ISR；✅ block
+ * @attention ❌ ISR；✅ block/switch
  */
 int cgrtos_fs_closedir(cgrtos_dir_t *dir)
 {
@@ -955,7 +955,7 @@ int cgrtos_fs_closedir(cgrtos_dir_t *dir)
  * @retval -1 内部错误
  * @note 幂等；会丢弃全部用户数据
  * @warning 危险操作；CLI 须交互确认
- * @attention ❌ ISR；✅ 可能阻塞（互斥）
+ * @attention ❌ ISR；✅ block/switch
  */
 int cgrtos_fs_format(void)
 {
@@ -989,7 +989,7 @@ int cgrtos_fs_format(void)
  * @retval 0 成功
  * @note 无持久化介质时无实际 I/O
  * @warning 无
- * @attention ❌ ISR；✅ 可能阻塞
+ * @attention ❌ ISR；✅ block/switch
  */
 int cgrtos_fs_sync(void)
 {
@@ -1010,7 +1010,7 @@ int cgrtos_fs_sync(void)
  * @retval -1 st 为空
  * @note 供 df/fbench 使用
  * @warning 无
- * @attention ❌ ISR；✅ 可能阻塞
+ * @attention ❌ ISR；✅ block/switch
  */
 int cgrtos_fs_statfs(cgrtos_statfs_t *st)
 {
@@ -1052,7 +1052,7 @@ int cgrtos_fs_statfs(cgrtos_statfs_t *st)
  * @retval -1 路径非法、目标已存在或参数错误
  * @note 打开中的 fd 仍指向同一 inode
  * @warning 简化实现：目标父目录须已存在
- * @attention ❌ ISR；✅ 可能阻塞
+ * @attention ❌ ISR；✅ block/switch
  */
 int cgrtos_fs_rename(const char *oldpath, const char *newpath)
 {

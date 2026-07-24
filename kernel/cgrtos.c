@@ -206,7 +206,9 @@ void cgrtos_spin_unlock(spinlock_t *lock)
  * @brief 保存并屏蔽可屏蔽 IRQ（委托 arch_irq_save）
  * @details 架构细节见 kernel/arch_port.h。
  * @return 架构相关 flags
+ * @retval 任意 uint64_t 供 irq_restore 使用的保存值
  * @note 与 irq_restore 配对
+ * @warning 必须与 irq_restore 成对，禁止跨任务传递 flags
  * @attention ✅ ISR；❌ block/switch
  */
 uint64_t cgrtos_irq_save(void)
@@ -460,7 +462,7 @@ void cgrtos_init(void)
                   CONFIG_NUM_CORES, CONFIG_MAX_TASKS,
                   CONFIG_TICK_RATE_HZ, CONFIG_MAX_PRIORITY);
     cgrtos_printf("  HAL board: %s | devices=%d\n",
-                  HAL_BOARD_NAME, hal_device_count());
+                  HAL_BOARD, hal_device_count());
     cgrtos_printf("  Features: M1-M6 EDF-heap DPCP klog mempool safety\n");
     cgrtos_fs_init();
 #if CONFIG_USE_VFS

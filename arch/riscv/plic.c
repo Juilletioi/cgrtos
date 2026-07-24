@@ -2,8 +2,8 @@
  * @file plic.c
  * @brief RISC-V PLIC 板级驱动（纯硬件层）+ 外部中断 trap 入口
  * @author Cong Zhou / Juilletioi
- * @version 5.0.0
- * @date 2026-07-22
+ * @version 5.3.0
+ * @date 2026-07-24
  * @copyright CG-RTOS
  *
  * @details
@@ -31,7 +31,7 @@
  * @retval HAL_OK 成功
  * @note 由 HAL hal_irqc_init 经 ops->init 调用
  * @warning 驱动层禁止调用 hal_* 用户 API
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ ISR-safe；❌ 不阻塞、不引起上下文切换
  * @internal
  */
 static hal_status_t plic_hw_init(hal_device_t *dev)
@@ -60,7 +60,7 @@ static hal_status_t plic_hw_init(hal_device_t *dev)
  * @retval 0   无 pending 中断
  * @note 每 hart 独立 claim 上下文
  * @warning claim 后须 complete，否则同源无法再次触发
- * @attention ✅ ISR；❌ 不阻塞
+ * @attention ✅ ISR-safe；❌ 不阻塞、不引起上下文切换
  * @internal
  */
 static uint32_t plic_hw_claim(hal_device_t *dev)
@@ -78,9 +78,10 @@ static uint32_t plic_hw_claim(hal_device_t *dev)
  * @param[in] dev 设备描述符；本驱动未使用
  * @param[in] irq 先前 claim 返回的源号
  * @return 无
+ * @retval 无
  * @note 须与 claim 配对；trap 路径直调，不经 hal_irqc_complete
  * @warning irq 须为最近一次 claim 的源号
- * @attention ✅ ISR；❌ 不阻塞
+ * @attention ✅ ISR-safe；❌ 不阻塞、不引起上下文切换
  * @internal
  */
 static void plic_hw_complete(hal_device_t *dev, uint32_t irq)
@@ -98,9 +99,10 @@ static void plic_hw_complete(hal_device_t *dev, uint32_t irq)
  * @param[in] dev 设备描述符；本驱动未使用
  * @param[in] thr 新阈值；0 允许全部 priority>0
  * @return 无
+ * @retval 无
  * @note 仅屏蔽 priority <= threshold 的源
  * @warning threshold 过高会导致低优先级源长期得不到服务
- * @attention ✅ ISR；❌ 不阻塞
+ * @attention ✅ ISR-safe；❌ 不阻塞、不引起上下文切换
  * @internal
  */
 static void plic_hw_set_threshold(hal_device_t *dev, uint32_t thr)
@@ -120,7 +122,7 @@ static void plic_hw_set_threshold(hal_device_t *dev, uint32_t thr)
  * @retval >=0 当前阈值
  * @note 每 hart 独立 threshold
  * @warning 无
- * @attention ✅ ISR；❌ 不阻塞
+ * @attention ✅ ISR-safe；❌ 不阻塞、不引起上下文切换
  * @internal
  */
 static uint32_t plic_hw_get_threshold(hal_device_t *dev)
@@ -144,7 +146,7 @@ static uint32_t plic_hw_get_threshold(hal_device_t *dev)
  * @retval HAL_ERR_PARAM 参数非法
  * @note priority 0 表示永不触发；全局共享寄存器
  * @warning 运行期修改建议经 HAL 配置锁保护
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ ISR-safe；❌ 不阻塞、不引起上下文切换
  * @internal
  */
 static hal_status_t plic_hw_set_priority(hal_device_t *dev, uint32_t irq, uint32_t prio)
@@ -172,7 +174,7 @@ static hal_status_t plic_hw_set_priority(hal_device_t *dev, uint32_t irq, uint32
  * @retval 0   非法 irq 或未配置
  * @note 只读 MMIO
  * @warning 无
- * @attention ✅ ISR；❌ 不阻塞
+ * @attention ✅ ISR-safe；❌ 不阻塞、不引起上下文切换
  * @internal
  */
 static uint32_t plic_hw_get_priority(hal_device_t *dev, uint32_t irq)
@@ -197,7 +199,7 @@ static uint32_t plic_hw_get_priority(hal_device_t *dev, uint32_t irq)
  * @retval HAL_ERR_PARAM 参数非法
  * @note 每 hart 独立 enable 位图
  * @warning RMW 操作；并发修改须加锁
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ ISR-safe；❌ 不阻塞、不引起上下文切换
  * @internal
  */
 static hal_status_t plic_hw_enable(hal_device_t *dev, uint32_t irq)
@@ -228,7 +230,7 @@ static hal_status_t plic_hw_enable(hal_device_t *dev, uint32_t irq)
  * @retval HAL_ERR_PARAM 参数非法
  * @note 步骤同 enable，改为按位清 0
  * @warning RMW 操作；并发修改须加锁
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ ISR-safe；❌ 不阻塞、不引起上下文切换
  * @internal
  */
 static hal_status_t plic_hw_disable(hal_device_t *dev, uint32_t irq)
@@ -276,7 +278,7 @@ static hal_device_t s_plic_dev = {
  * @retval 非 NULL 成功
  * @note 勿释放返回值；应用应使用 hal_irqc_*
  * @warning 驱动不得自行调用 hal_device_register
- * @attention ✅ ISR；❌ 不阻塞
+ * @attention ✅ ISR-safe；❌ 不阻塞、不引起上下文切换
  */
 hal_device_t *drv_irqc_device(void)
 {
@@ -294,9 +296,10 @@ hal_device_t *drv_irqc_device(void)
  * 6. cgrtos_isr_exit 退出 ISR 上下文。
  * @param[in] f 陷阱栈帧指针；本实现未使用
  * @return 无
+ * @retval 无
  * @note 本路径故意不调用 hal_irqc_*，避免「底层 → HAL」倒置
  * @warning 须在中断上下文调用；不可从任务直接调用
- * @attention ✅ ISR；❌ 不阻塞
+ * @attention ✅ ISR-safe；✅ 可能引起上下文切换（irq dispatch）
  */
 void arch_handle_external(uint64_t *f)
 {
@@ -338,9 +341,10 @@ void arch_handle_external(uint64_t *f)
  * 2. 从高半字节到低半字节逐位输出十六进制字符。
  * @param[in] v 待输出的数值
  * @return 无
+ * @retval 无
  * @note 仅供 riscv_handle_exception 诊断；避免依赖 printf
  * @warning 无锁、轮询阻塞
- * @attention ✅ ISR；✅ 阻塞（轮询 TX FIFO）
+ * @attention ✅ ISR-safe；✅ 阻塞（轮询 TX FIFO）
  * @internal
  */
 static void early_put_hex(unsigned long v)
@@ -363,9 +367,10 @@ static void early_put_hex(unsigned long v)
  * @param[in] cause mcause 异常码
  * @param[in] epc   mepc 异常 PC
  * @return 无
+ * @retval 无
  * @note 由 trap 向量在同步异常路径调用
  * @warning 输出后通常进入挂起；勿依赖完整格式化库
- * @attention ✅ ISR；✅ 阻塞（轮询 TX FIFO）
+ * @attention ✅ ISR-safe；✅ 阻塞（轮询 TX FIFO）
  */
 void arch_handle_exception(uint64_t *f, uint64_t cause, uint64_t epc)
 {

@@ -29,7 +29,7 @@ Docs:
 
 - Multi-policy preemptive sched: RR / Priority / CFS / **MC-EDF** / Hybrid
 - SMP affinity, weighted LB, IPI（RISC-V；ARM64 单核首版）
-- Unified **HAL** + `boards/<BOARD>/` BSP + `kernel/arch_port.h` CPU 移植层
+- Unified **HAL** + `boards/{BOARD}/` BSP + `kernel/arch_port.h` CPU 移植层
 - Sem / mutex / queue / event / notify, StreamBuffer / MessageBuffer, QueueSet
 - Soft timers, TLSF heap, RAM filesystem
 - `scripts/cgrtos.sh` + `scripts/port-check.sh`
@@ -43,7 +43,7 @@ hal/             设备框架与用户 HAL API
 arch/riscv/      UART / CLINT / PLIC / IPI / startup
 arch/arm64/      PL011 / CNTV / GIC / startup
 boards/          板级 MMIO、board.mk、link.lds
-build/<BOARD>/   每板对象文件
+build/{BOARD}/   每板对象文件
 tests/           test / stress / bench
 scripts/         cgrtos.sh、port-check.sh、gdbinit
 docs/            PORTING、SCRIPTS、ARCHITECTURE、HAL…

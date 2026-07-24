@@ -2,8 +2,8 @@
  * @file list.h
  * @brief 内核侵入式双向链表 API
  * @author Cong Zhou / Juilletioi
- * @version 5.0.0
- * @date 2026-07-22
+ * @version 5.3.0
+ * @date 2026-07-24
  * @copyright CG-RTOS
  *
  * @details
@@ -47,7 +47,7 @@ typedef struct list {
  * @retval 无
  * @note 链表节点内存由调用方管理
  * @warning 对已在使用中的链表重复 init 将导致节点泄漏
- * @attention ✅ ISR；❌ block/switch
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 void list_init(list_t *list);
 
@@ -59,7 +59,7 @@ void list_init(list_t *list);
  * @retval 无
  * @note 插入前须确保未挂接在其他链表中
  * @warning 对仍在链表中的节点调用将导致结构损坏
- * @attention ✅ ISR；❌ block/switch
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 void list_init_item(list_item_t *item);
 
@@ -72,7 +72,7 @@ void list_init_item(list_item_t *item);
  * @retval 无
  * @note 供 CFS/EDF 就绪队列尾部入队
  * @warning 同一 item 不得重复插入
- * @attention ✅ ISR；❌ block/switch
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 void list_insert_end(list_t *list, list_item_t *item);
 
@@ -86,7 +86,7 @@ void list_insert_end(list_t *list, list_item_t *item);
  * @retval 无
  * @note 延迟唤醒链表等场景
  * @warning 链表未受保护时不可并发修改
- * @attention ✅ ISR；❌ block/switch
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 void list_insert_sorted(list_t *list, list_item_t *item, uint64_t value);
 
@@ -100,7 +100,7 @@ void list_insert_sorted(list_t *list, list_item_t *item, uint64_t value);
  * @retval 无
  * @note CFS vruntime 队列使用
  * @warning 并发修改须持锁
- * @attention ✅ ISR；❌ block/switch
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 void list_insert_sorted_asc(list_t *list, list_item_t *item, uint64_t value);
 
@@ -113,7 +113,7 @@ void list_insert_sorted_asc(list_t *list, list_item_t *item, uint64_t value);
  * @retval 无
  * @note 移除后 item 的 next/prev 被置 NULL
  * @warning 移除不属于该链表的节点将导致损坏
- * @attention ✅ ISR；❌ block/switch
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 void list_remove(list_t *list, list_item_t *item);
 
@@ -126,7 +126,7 @@ void list_remove(list_t *list, list_item_t *item);
  * @retval NULL 空链
  * @note 等价 peek，不递减 count
  * @warning 并发删除时指针可能失效
- * @attention ✅ ISR；❌ block/switch
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 list_item_t *list_peek_head(list_t *list);
 
@@ -138,7 +138,7 @@ list_item_t *list_peek_head(list_t *list);
  * @retval >=0 节点计数
  * @note 由 insert/remove 自动维护
  * @warning 无
- * @attention ✅ ISR；❌ block/switch
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 uint32_t list_count(list_t *list);
 

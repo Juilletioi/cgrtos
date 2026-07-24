@@ -2,8 +2,8 @@
  * @file test_all.c
  * @brief APP=test 入口：启动完整功能测试套件
  * @author Cong Zhou / Juilletioi
- * @version 5.0.0
- * @date 2026-07-22
+ * @version 5.3.0
+ * @date 2026-07-24
  * @copyright CG-RTOS
  *
  * @details
@@ -45,7 +45,7 @@ static void run_tests(void *arg)
  * @retval 0 仅异常
  * @note 任务 ID 假定 create 后为 1（首个用户任务），用于 set_affinity
  * @warning 若 create 失败仍 start，套件不会运行
- * @attention ❌ ISR；✅ 启动调度
+ * @attention ❌ ISR；✅ block/switch（启动调度）
  */
 int main(int hartid, void *fdt, void *end)
 {
@@ -70,7 +70,7 @@ int main(int hartid, void *fdt, void *end)
  * @retval 无
  * @note 无
  * @warning 无
- * @attention ❌ ISR；✅ 进入调度
+ * @attention ❌ ISR；✅ block/switch（进入调度）
  */
 void secondary_main(int hartid)
 {

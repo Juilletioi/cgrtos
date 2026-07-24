@@ -2,8 +2,8 @@
  * @file stress_cases.c
  * @brief CG-RTOS 全 feature 并发压力测试实现
  * @author Cong Zhou / Juilletioi
- * @version 5.0.0
- * @date 2026-07-22
+ * @version 5.3.0
+ * @date 2026-07-24
  * @copyright CG-RTOS
  *
  * @details
@@ -15,19 +15,33 @@
 #include "stress_cases.h"
 
 /* ---- knobs (keep within CONFIG_MAX_TASKS / pool limits) ---- */
+/** @brief 单次压力测试持续时间（毫秒） @warning 过大可能触发看门狗/脚本超时 */
 #define STRESS_MS           1200
+/** @brief RR 工作者任务数 @warning 增大时须保证 CONFIG_MAX_TASKS 足够 */
 #define N_RR                3
+/** @brief CFS 工作者任务数 @warning 增大时须保证 CONFIG_MAX_TASKS 足够 */
 #define N_CFS               3
+/** @brief EDF 周期任务数 @warning 增大时须保证 CONFIG_MAX_TASKS 足够 */
 #define N_EDF               2
+/** @brief Hybrid 策略任务数 @warning 增大时须保证 CONFIG_MAX_TASKS 足够 */
 #define N_HYBRID            2
+/** @brief 信号量生产者/消费者对数 @warning 增大时须保证对象池容量 */
 #define N_SEM_PAIR          2
+/** @brief 队列生产者/消费者对数 @warning 增大时须保证对象池容量 */
 #define N_Q_PAIR            2
+/** @brief 互斥锁竞争任务数 @warning 增大时须保证对象池容量 */
 #define N_MTX               2
+/** @brief 事件组等待任务数 @warning 增大时须保证对象池容量 */
 #define N_EVT_WAIT          2
+/** @brief 任务通知压测任务数 @warning 增大时须保证 CONFIG_MAX_TASKS 足够 */
 #define N_NOTIFY            2
+/** @brief 堆 churn 工作者数 @warning 与 HEAP_CHURN_MAX 共同决定峰值占用 */
 #define N_HEAP              2
+/** @brief 软定时器实例数 @warning 增大时须保证定时器池容量 */
 #define N_TIMERS            4
+/** @brief 每轮堆 churn 最大块数 @warning 过大可能耗尽 TLSF 堆 */
 #define HEAP_CHURN_MAX      6
+/** @brief 生命周期压测最大操作次数 @warning 过大延长单次 stress 运行时间 */
 #define LIFE_MAX_OPS        25
 
 static volatile int g_pass;
@@ -89,7 +103,7 @@ static void expect(const char *name, int cond)
  * @retval 无
  * @note 各 worker 热路径调用以验证 SMP 调度
  * @warning 无
- * @attention ✅ 任意任务上下文；❌ 不阻塞
+ * @attention ✅ 任务上下文（非 ISR 限制）；❌ block/switch
  * @internal
  */
 static void bump_core(void)
@@ -132,7 +146,7 @@ static void wait_until_stop(void)
  * @retval 无
  * @note 由 stress_run 以 SCHED_RR 创建
  * @warning 无
- * @attention ❌ ISR；✅ yield
+ * @attention ❌ ISR；✅ block/switch（yield）
  * @internal
  */
 static void rr_worker(void *arg)
@@ -159,7 +173,7 @@ static void rr_worker(void *arg)
  * @retval 无
  * @note 双核时通常亲和 hart1
  * @warning 单核下可能被 PRI 饿死（stress 软通过）
- * @attention ❌ ISR；✅ yield
+ * @attention ❌ ISR；✅ block/switch（yield）
  * @internal
  */
 static void cfs_worker(void *arg)
@@ -181,7 +195,7 @@ static void cfs_worker(void *arg)
  * @retval 无
  * @note 成功计 g_edf_ok，超时计 g_edf_miss
  * @warning deadline 设置依赖 self 有效
- * @attention ❌ ISR；✅ delay/set_deadline
+ * @attention ❌ ISR；✅ block/switch（delay/set_deadline）
  * @internal
  */
 static void edf_worker(void *arg)
@@ -229,7 +243,7 @@ static void edf_worker(void *arg)
  * @retval 无
  * @note hyb0 使用高于 RT 阈值的 prio
  * @warning RT 路径占用 CPU 时间片
- * @attention ❌ ISR；✅ delay/yield
+ * @attention ❌ ISR；✅ block/switch（delay/yield）
  * @internal
  */
 static void hybrid_worker(void *arg)
@@ -255,7 +269,7 @@ static void hybrid_worker(void *arg)
  * @retval 无
  * @note 与 sem_cons 成对压测
  * @warning 无
- * @attention ❌ ISR；✅ sem API/yield
+ * @attention ❌ ISR；✅ block/switch（sem API/yield）
  * @internal
  */
 static void sem_prod(void *arg)
@@ -410,7 +424,7 @@ static void evt_waiter(void *arg)
  * @retval 无
  * @note 与 evt_waiter 成对
  * @warning 无
- * @attention ❌ ISR；✅ delay/set
+ * @attention ❌ ISR；✅ block/switch（delay/set）
  * @internal
  */
 static void evt_setter(void *arg)
@@ -458,7 +472,7 @@ static void notify_waiter(void *arg)
  * @retval 无
  * @note 目标句柄由 stress_run 在创建后填充
  * @warning tgt 为 NULL 时跳过发送
- * @attention ❌ ISR；✅ yield/notify
+ * @attention ❌ ISR；✅ block/switch（yield/notify）
  * @internal
  */
 static void notify_sender(void *arg)
@@ -484,7 +498,7 @@ static void notify_sender(void *arg)
  * @retval 无
  * @note 每 8 次 op yield 一次
  * @warning 失败 malloc 仍计 op；勿在 ISR 调用堆 API
- * @attention ❌ ISR；✅ 堆 API/yield
+ * @attention ❌ ISR；✅ block/switch（堆 API/yield）
  * @internal
  */
 static void heap_churn(void *arg)
@@ -530,7 +544,7 @@ static void heap_churn(void *arg)
  * @retval 无
  * @note 由 stress_run 创建 N_TIMERS 个周期定时器
  * @warning 须保持短小，勿阻塞
- * @attention ✅ 定时器 daemon 上下文；❌ 非 ISR 直调
+ * @attention ✅ 定时器 daemon（非 ISR 直调）；❌ block/switch（须短小）
  * @internal
  */
 static void timer_cb(void *arg)
@@ -547,7 +561,7 @@ static void timer_cb(void *arg)
  * @retval 无
  * @note 供 life_cycle 反复 create/delete
  * @warning 无
- * @attention ❌ ISR；✅ delay
+ * @attention ❌ ISR；✅ block/switch（delay）
  * @internal
  */
 static void nop_worker(void *arg)
@@ -568,7 +582,7 @@ static void nop_worker(void *arg)
  * @retval 无
  * @note 每次迭代 delay_ms(40) 降低 UART 日志开销
  * @warning create 失败则跳过本次
- * @attention ❌ ISR；✅ 创建/删除任务、delay
+ * @attention ❌ ISR；✅ block/switch（创建/删除任务、delay）
  * @internal
  */
 static void life_cycle(void *arg)
@@ -603,7 +617,7 @@ static void life_cycle(void *arg)
  * @retval 无
  * @note 压测调度器与 g_cs_count
  * @warning 临界区须配对
- * @attention ❌ ISR；✅ yield/临界区
+ * @attention ❌ ISR；✅ block/switch（yield/临界区）
  * @internal
  */
 static void yield_storm(void *arg)
@@ -629,7 +643,7 @@ static void yield_storm(void *arg)
  * @retval 无
  * @note 双核场景验证 LB 迁移计数
  * @warning 无
- * @attention ❌ ISR；✅ delay/LB API
+ * @attention ❌ ISR；✅ block/switch（delay/LB API）
  * @internal
  */
 static void lb_pusher(void *arg)

@@ -2,8 +2,8 @@
  * @file main.c
  * @brief CG-RTOS 交互演示：生产者/消费者、心跳与 MC-EDF 周期任务
  * @author Cong Zhou / Juilletioi
- * @version 5.0.0
- * @date 2026-07-22
+ * @version 5.3.0
+ * @date 2026-07-24
  * @copyright CG-RTOS
  *
  * @details
@@ -97,6 +97,14 @@ static void consumer(void *arg)
 
 /**
  * @brief 心跳任务：每秒打印一次系统 tick
+ * @details 无限循环：cgrtos_delay_ms(1000) 后打印当前 ticks，供观察调度存活。
+ * @param[in] arg 未使用
+ * @return 无（永不返回）
+ * @retval 无
+ * @note 以 SCHED_RR、较低优先级创建，不抢占 producer/consumer
+ * @warning 无
+ * @attention ❌ ISR；✅ 会阻塞（delay_ms）并引起调度
+ * @internal
  */
 static void ticker(void *arg)
 {
@@ -161,7 +169,7 @@ static void edf_beat(void *arg)
  * @retval 0 仅异常路径可能返回
  * @note 须先于次核业务逻辑完成对象创建
  * @warning IPC 创建失败未检查时后续任务可能死等
- * @attention ❌ ISR；✅ cgrtos_start 启动后进入多任务调度
+ * @attention ❌ ISR；✅ block/switch（cgrtos_start 后多任务）
  */
 int main(int hartid, void *fdt, void *end)
 {

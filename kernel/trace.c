@@ -41,7 +41,7 @@ static volatile uint32_t  g_trace_drop; /* overwritten count */
  * @retval 无
  * @note ISR 安全；禁用时为空操作宏
  * @warning 高频事件可能覆盖旧记录
- * @attention ✅ ISR；❌ 不阻塞
+ * @attention ✅ ISR；❌ block/switch
  */
 void cgrtos_trace_event(uint16_t type, uint32_t a0, uint32_t a1)
 {
@@ -72,7 +72,7 @@ void cgrtos_trace_event(uint16_t type, uint32_t a0, uint32_t a1)
  * @retval 无
  * @note 诊断用
  * @warning 与并发写入存在竞态（可接受）
- * @attention ❌ ISR 慎用；❌ 不阻塞
+ * @attention ❌ ISR；❌ block/switch
  */
 void cgrtos_trace_reset(void)
 {
@@ -91,7 +91,7 @@ void cgrtos_trace_reset(void)
  * @retval >=0 条数
  * @note out 布局紧凑便于 CLI/测试
  * @warning out 须可写
- * @attention ❌ ISR 慎用；❌ 不阻塞
+ * @attention ❌ ISR；❌ block/switch
  */
 uint32_t cgrtos_trace_export(uint32_t *out, uint32_t max)
 {
@@ -128,7 +128,7 @@ uint32_t cgrtos_trace_export(uint32_t *out, uint32_t max)
  * @retval 无
  * @note 调试命令
  * @warning UART 可能阻塞
- * @attention ❌ ISR；✅ 可能阻塞
+ * @attention ❌ ISR；✅ block/switch
  */
 void cgrtos_trace_dump(void)
 {
@@ -152,19 +152,63 @@ void cgrtos_trace_dump(void)
 
 #else /* !CONFIG_USE_TRACE */
 
+/**
+ * @brief 写入一条 Trace 记录（功能未启用时的空实现）
+ * @details 忽略全部参数。
+ * @param[in] type 未使用
+ * @param[in] a0   未使用
+ * @param[in] a1   未使用
+ * @return 无
+ * @retval 无
+ * @note CONFIG_USE_TRACE 关闭
+ * @warning 无
+ * @attention ✅ ISR；❌ block/switch
+ */
 void cgrtos_trace_event(uint16_t type, uint32_t a0, uint32_t a1)
 {
     (void)type;
     (void)a0;
     (void)a1;
 }
+
+/**
+ * @brief 清空 Trace 缓冲（功能未启用时的空实现）
+ * @details 无操作。
+ * @return 无
+ * @retval 无
+ * @note CONFIG_USE_TRACE 关闭
+ * @warning 无
+ * @attention ❌ ISR；❌ block/switch
+ */
 void cgrtos_trace_reset(void) {}
+
+/**
+ * @brief 导出 Trace 记录（功能未启用时的空实现）
+ * @details 忽略参数，返回 0。
+ * @param[out] out 未使用
+ * @param[in]  max 未使用
+ * @return 0
+ * @retval 0 无记录
+ * @note CONFIG_USE_TRACE 关闭
+ * @warning 无
+ * @attention ❌ ISR；❌ block/switch
+ */
 uint32_t cgrtos_trace_export(uint32_t *out, uint32_t max)
 {
     (void)out;
     (void)max;
     return 0;
 }
+
+/**
+ * @brief 打印 Trace 摘要（功能未启用时的空实现）
+ * @details 无操作。
+ * @return 无
+ * @retval 无
+ * @note CONFIG_USE_TRACE 关闭
+ * @warning 无
+ * @attention ❌ ISR；❌ block/switch
+ */
 void cgrtos_trace_dump(void) {}
 
 #endif /* CONFIG_USE_TRACE */

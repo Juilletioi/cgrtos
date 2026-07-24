@@ -38,7 +38,7 @@ static uint32_t             g_syscall_max_prio = CONFIG_IRQ_SYSCALL_MAX_PRIO;
  * @retval 无
  * @note 由 cgrtos_plic_init 在首次调用时触发；可重复调用（幂等清表）
  * @warning 重复 init 会清除所有已注册 handler
- * @attention ❌ ISR；❌ block
+ * @attention ❌ ISR；❌ block/switch
  */
 void cgrtos_irq_init(void)
 {
@@ -62,7 +62,7 @@ void cgrtos_irq_init(void)
  * @retval pdFAIL 参数非法或 PLIC 操作失败
  * @note 本函数不注册 handler；需另调 cgrtos_irq_register
  * @warning priority 0 在 PLIC 语义下禁用该源
- * @attention ❌ ISR；❌ block
+ * @attention ❌ ISR；❌ block/switch
  */
 int cgrtos_irq_configure(uint32_t irq, uint32_t priority, int enable)
 {
@@ -95,7 +95,7 @@ int cgrtos_irq_configure(uint32_t irq, uint32_t priority, int enable)
  * @retval pdFAIL irq 越界或 handler 为空
  * @note 实际调用发生在 riscv_handle_external → cgrtos_irq_dispatch
  * @warning handler 内可调用 FromISR（仅当该源优先级 ≤ syscall_max）；不得阻塞
- * @attention ❌ ISR；❌ block
+ * @attention ❌ ISR；❌ block/switch
  */
 int cgrtos_irq_register(uint32_t irq, cgrtos_irq_handler_t handler, void *arg)
 {
@@ -118,7 +118,7 @@ int cgrtos_irq_register(uint32_t irq, cgrtos_irq_handler_t handler, void *arg)
  * @retval pdFAIL irq 非法
  * @note 不自动 disable PLIC 源；若需屏蔽请另调 plic_disable / irq_configure
  * @warning 注销后 incoming 中断仍可能触发但无 handler（空操作）
- * @attention ❌ ISR；❌ block
+ * @attention ❌ ISR；❌ block/switch
  */
 int cgrtos_irq_unregister(uint32_t irq)
 {
@@ -141,7 +141,7 @@ int cgrtos_irq_unregister(uint32_t irq)
  * @retval NULL     irq 非法或未注册
  * @note 仅供诊断与单元测试
  * @warning 无
- * @attention ❌ ISR；❌ block
+ * @attention ❌ ISR；❌ block/switch
  */
 cgrtos_irq_handler_t cgrtos_irq_get_handler(uint32_t irq)
 {
@@ -159,7 +159,7 @@ cgrtos_irq_handler_t cgrtos_irq_get_handler(uint32_t irq)
  * @retval 无
  * @note 屏蔽优先级 ≤ max_prio 的中断（这些才允许调 FromISR）
  * @warning 修改后已运行 ISR 的 threshold 不受影响直至下次 enter
- * @attention ❌ ISR；❌ block
+ * @attention ❌ ISR；❌ block/switch
  */
 void cgrtos_irq_set_syscall_max_priority(uint32_t max_prio)
 {
@@ -178,7 +178,7 @@ void cgrtos_irq_set_syscall_max_priority(uint32_t max_prio)
  * @retval 0..CONFIG_IRQ_PRIORITY_MAX 当前 syscall 上界
  * @note 只读查询
  * @warning 无
- * @attention ❌ ISR；❌ block
+ * @attention ❌ ISR；❌ block/switch
  */
 uint32_t cgrtos_irq_get_syscall_max_priority(void)
 {
@@ -193,7 +193,7 @@ uint32_t cgrtos_irq_get_syscall_max_priority(void)
  * @retval 无
  * @note 无 handler 时调用方仍须 complete，避免 PLIC 卡死
  * @warning 由 riscv_handle_external 在嵌套窗口内调用
- * @attention ✅ ISR；❌ block
+ * @attention ✅ ISR；❌ block/switch
  */
 void cgrtos_irq_dispatch(uint32_t irq)
 {
@@ -215,7 +215,7 @@ void cgrtos_irq_dispatch(uint32_t irq)
  * @retval 先前 PLIC threshold 值
  * @note 与任务侧 cgrtos_enter_critical（关 MIE + g_klock）不同：本 API 只改 threshold
  * @warning 必须与 exit_critical_from_isr 成对；嵌套时自行维护保存栈
- * @attention ✅ ISR；❌ block
+ * @attention ✅ ISR；❌ block/switch
  */
 uint32_t cgrtos_enter_critical_from_isr(void)
 {
@@ -234,7 +234,7 @@ uint32_t cgrtos_enter_critical_from_isr(void)
  * @retval 无
  * @note 必须与 enter 成对
  * @warning 嵌套调用时由调用方自行维护保存栈
- * @attention ✅ ISR；❌ block
+ * @attention ✅ ISR；❌ block/switch
  */
 void cgrtos_exit_critical_from_isr(uint32_t saved_threshold)
 {
@@ -250,7 +250,7 @@ void cgrtos_exit_critical_from_isr(uint32_t saved_threshold)
  * @retval 无
  * @note woken 非空时由 ISR 末尾 portYIELD_FROM_ISR(woken) 请求调度
  * @warning 无
- * @attention ✅ ISR；❌ block
+ * @attention ✅ ISR；❌ block/switch
  */
 void cgrtos_isr_notify_woken(BaseType_t *woken, int need_yield)
 {

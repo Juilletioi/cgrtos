@@ -33,7 +33,7 @@ static cgrtos_queue_set_t g_qsets[CGRTOS_MAX_QUEUE_SET];
  * @retval -1  未注册
  * @note O(n) 线性查找
  * @warning 无
- * @attention ❌ ISR；❌ block
+ * @attention ❌ ISR；❌ block/switch
  * @internal
  */
 static int qs_find_member(cgrtos_queue_set_t *set, void *obj)
@@ -56,7 +56,7 @@ static int qs_find_member(cgrtos_queue_set_t *set, void *obj)
  * @retval 0 不在就绪环中
  * @note 用于 push 前去重
  * @warning 无
- * @attention ❌ ISR；❌ block
+ * @attention ❌ ISR；❌ block/switch
  * @internal
  */
 static int qs_ready_contains(cgrtos_queue_set_t *set, void *obj)
@@ -81,7 +81,7 @@ static int qs_ready_contains(cgrtos_queue_set_t *set, void *obj)
  * @retval 无
  * @note 环满时静默丢弃 poke
  * @warning 调用方通常已在临界区内
- * @attention ✅ ISR；❌ block
+ * @attention ✅ ISR；❌ block/switch
  * @internal
  */
 static void qs_push_ready(cgrtos_queue_set_t *set, void *obj)
@@ -110,7 +110,7 @@ static void qs_push_ready(cgrtos_queue_set_t *set, void *obj)
  * @retval NULL     就绪环为空或索引损坏
  * @note FIFO 顺序
  * @warning 无
- * @attention ❌ ISR；❌ block
+ * @attention ❌ ISR；❌ block/switch
  * @internal
  */
 static void *qs_pop_ready(cgrtos_queue_set_t *set)
@@ -136,7 +136,7 @@ static void *qs_pop_ready(cgrtos_queue_set_t *set)
  * @retval NULL     静态池已满
  * @note length 参数当前未使用
  * @warning 无
- * @attention ❌ ISR；❌ block
+ * @attention ❌ ISR；❌ block/switch
  */
 cgrtos_queue_set_t *cgrtos_queue_set_create(uint32_t length)
 {
@@ -165,7 +165,7 @@ cgrtos_queue_set_t *cgrtos_queue_set_create(uint32_t length)
  * @retval pdFAIL 参数非法、已满或重复注册
  * @note 添加时若 cnt/count/avail>0 立即标记就绪
  * @warning 同一 obj 不可加入多个 QueueSet
- * @attention ❌ ISR；❌ block
+ * @attention ❌ ISR；❌ block/switch
  * @internal
  */
 static int qs_add(cgrtos_queue_set_t *set, cgrtos_qset_type_t type, void *obj)
@@ -213,7 +213,7 @@ static int qs_add(cgrtos_queue_set_t *set, cgrtos_qset_type_t type, void *obj)
  * @retval pdFAIL 添加失败
  * @note 便捷包装
  * @warning 无
- * @attention ❌ ISR；❌ block
+ * @attention ❌ ISR；❌ block/switch
  */
 int cgrtos_queue_set_add_queue(cgrtos_queue_set_t *set, cgrtos_queue_t *q)
 {
@@ -230,7 +230,7 @@ int cgrtos_queue_set_add_queue(cgrtos_queue_set_t *set, cgrtos_queue_t *q)
  * @retval pdFAIL 添加失败
  * @note 便捷包装
  * @warning 无
- * @attention ❌ ISR；❌ block
+ * @attention ❌ ISR；❌ block/switch
  */
 int cgrtos_queue_set_add_sem(cgrtos_queue_set_t *set, cgrtos_sem_t *sem)
 {
@@ -247,7 +247,7 @@ int cgrtos_queue_set_add_sem(cgrtos_queue_set_t *set, cgrtos_sem_t *sem)
  * @retval pdFAIL 添加失败
  * @note 便捷包装
  * @warning 无
- * @attention ❌ ISR；❌ block
+ * @attention ❌ ISR；❌ block/switch
  */
 int cgrtos_queue_set_add_stream(cgrtos_queue_set_t *set, cgrtos_stream_buffer_t *sb)
 {
@@ -264,7 +264,7 @@ int cgrtos_queue_set_add_stream(cgrtos_queue_set_t *set, cgrtos_stream_buffer_t 
  * @retval pdFAIL 参数非法或未找到
  * @note 移除后清空整个就绪环
  * @warning 不清除 IPC 对象内已有数据
- * @attention ❌ ISR；❌ block
+ * @attention ❌ ISR；❌ block/switch
  */
 int cgrtos_queue_set_remove(cgrtos_queue_set_t *set, void *obj)
 {
@@ -306,7 +306,7 @@ int cgrtos_queue_set_remove(cgrtos_queue_set_t *set, void *obj)
  * @retval 无
  * @note 调用方通常已在 IPC 临界区内（嵌套安全）
  * @warning 环满时 poke 被静默丢弃
- * @attention ✅ ISR；❌ block
+ * @attention ✅ ISR；❌ block/switch
  */
 void cgrtos_queue_set_poke(cgrtos_queue_set_t *set, void *obj)
 {
@@ -335,7 +335,7 @@ void cgrtos_queue_set_poke(cgrtos_queue_set_t *set, void *obj)
  * @retval NULL     超时、非阻塞无就绪或 idle 无法阻塞
  * @note 返回指针后调用方须对该对象 take/recv
  * @warning 就绪环 pop 后该成员事件被消费
- * @attention ❌ ISR；✅ block
+ * @attention ❌ ISR；✅ block/switch
  */
 void *cgrtos_queue_set_select(cgrtos_queue_set_t *set, tick_t timeout)
 {
@@ -384,7 +384,7 @@ void *cgrtos_queue_set_select(cgrtos_queue_set_t *set, tick_t timeout)
  * @retval pdFAIL 参数无效
  * @note 被唤醒 select 者 wake_ok=0 表示取消
  * @warning 不删除成员 IPC 对象本身
- * @attention ❌ ISR；✅ block
+ * @attention ❌ ISR；✅ block/switch
  */
 int cgrtos_queue_set_delete(cgrtos_queue_set_t *set)
 {

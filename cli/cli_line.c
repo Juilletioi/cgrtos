@@ -2,8 +2,8 @@
  * @file cli_line.c
  * @brief CLI 行编辑实现
  * @author Cong Zhou / Juilletioi
- * @version 5.1.0
- * @date 2026-07-23
+ * @version 5.3.0
+ * @date 2026-07-24
  * @copyright CG-RTOS
  *
  * @details
@@ -21,13 +21,31 @@
 
 /**
  * @brief 命令历史环（无锁；单 CLI 任务）
+ * @details 容量 CLI_HIST_MAX；g_hist_head 为下一写入下标；g_hist_len 为有效条数。
  */
 static char g_hist[CLI_HIST_MAX][CLI_LINE_MAX];
+/** @brief 历史有效条数（0..CLI_HIST_MAX） */
 static int  g_hist_len;
+/** @brief 下一写入位置（环形） */
 static int  g_hist_head;
+/** @brief 上翻历史前保存的当前草稿行 */
 static char g_draft[CLI_LINE_MAX];
+/** @brief 历史浏览下标；-1 表示编辑草稿而非历史 */
 static int  g_hist_view = -1;
 
+/**
+ * @brief 有界字符串拷贝（保证 NUL 结尾）
+ * @details 拷贝至多 cap-1 字节；src 为 NULL 时写空串；cap<1 则直接返回。
+ * @param[out] dst 目标缓冲
+ * @param[in]  src 源串；可为 NULL
+ * @param[in]  cap 容量（含 NUL）
+ * @return 无
+ * @retval 无
+ * @note 无
+ * @warning 无
+ * @attention ✅ ISR；❌ block/switch
+ * @internal
+ */
 static void line_strcpy(char *dst, const char *src, int cap)
 {
     int i = 0;
@@ -45,6 +63,17 @@ static void line_strcpy(char *dst, const char *src, int cap)
     dst[i] = 0;
 }
 
+/**
+ * @brief 计算 C 字符串长度
+ * @details NULL 视为长度 0。
+ * @param[in] s 输入串；可为 NULL
+ * @return 字符数（不含 NUL）
+ * @retval >=0 长度
+ * @note 无
+ * @warning 无
+ * @attention ✅ ISR；❌ block/switch
+ * @internal
+ */
 static int line_strlen(const char *s)
 {
     int n = 0;
@@ -57,6 +86,16 @@ static int line_strlen(const char *s)
     return n;
 }
 
+/**
+ * @brief 将已提交行推入历史（空行忽略）
+ * @details 写入 g_hist 环形缓冲；覆盖最旧条目。
+ * @param[in] line 行
+ * @return 无
+ * @retval 无
+ * @note 保护：g_hist 无锁单任务
+ * @warning 无
+ * @attention ❌ ISR；❌ block/switch
+ */
 void cli_line_hist_push(const char *line)
 {
     if (!line || !line[0]) {
@@ -69,6 +108,18 @@ void cli_line_hist_push(const char *line)
     }
 }
 
+/**
+ * @brief 按浏览下标取历史条目
+ * @details view=0 为最近一条；越界返回 NULL。
+ * @param[in] view 从近到远的下标（0..g_hist_len-1）
+ * @return 历史串指针；无效则 NULL
+ * @retval 非 NULL 指向 g_hist 槽
+ * @retval NULL 越界
+ * @note 返回指针指向静态表，勿 free
+ * @warning 无
+ * @attention ❌ ISR；❌ block/switch
+ * @internal
+ */
 static const char *hist_get(int view)
 {
     int idx;
@@ -83,7 +134,17 @@ static const char *hist_get(int view)
 }
 
 /**
- * @brief 重绘整行：\\r + prompt + 文本 + 清 EOL + 回退光标
+ * @brief 重绘整行：回车符 + prompt + 文本 + 清 EOL + 回退光标
+ * @details 先 \r 再打印提示符与文本，ANSI 清行尾，必要时用 CSI 左移到 cursor。
+ * @param[in] prompt 提示符；NULL 用默认
+ * @param[in] text   行文本
+ * @param[in] len    文本长度
+ * @param[in] cursor 光标列（0..len）
+ * @return 无
+ * @retval 无
+ * @note 依赖 ANSI 终端
+ * @warning 吞掉当前行显示内容
+ * @attention ❌ ISR；✅ block/switch
  * @internal
  */
 static void line_redraw(const char *prompt, const char *text, int len, int cursor)
@@ -101,6 +162,20 @@ static void line_redraw(const char *prompt, const char *text, int len, int curso
     }
 }
 
+/**
+ * @brief 从 UART 读入一行（可编辑）
+ * @details 支持左右光标、Backspace/Delete、↑↓ 历史、Tab 路径补全、Ctrl-C 清空；Enter 提交。
+ * @param[out] line     输出缓冲
+ * @param[in]  line_cap 容量（须 >= 2，建议 CLI_LINE_MAX）
+ * @param[in]  prompt   提示符；NULL 用默认
+ * @return 0 正常提交；1 Ctrl-C；-1 参数错误
+ * @retval 0 正常
+ * @retval 1 用户 Ctrl-C（line 为空）
+ * @retval -1 参数非法
+ * @note 历史表无锁单任务；Tab→cli_path_complete
+ * @warning 吞掉 ANSI CSI；与 vi 接管互斥（同任务）
+ * @attention ❌ ISR；✅ block/switch
+ */
 int cli_line_read(char *line, int line_cap, const char *prompt)
 {
     int len = 0;

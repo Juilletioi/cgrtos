@@ -2,8 +2,8 @@
  * @file stress_all.c
  * @brief APP=stress 入口：启动后自动跑一轮压力测试
  * @author Cong Zhou / Juilletioi
- * @version 5.0.0
- * @date 2026-07-22
+ * @version 5.3.0
+ * @date 2026-07-24
  * @copyright CG-RTOS
  *
  * @details
@@ -49,7 +49,7 @@ static void stress_task(void *arg)
  * @retval 0 仅异常
  * @note 任务 ID 假定 create 后为 1，用于 set_affinity
  * @warning 若 create 失败仍 start，套件不会运行
- * @attention ❌ ISR；✅ 启动调度
+ * @attention ❌ ISR；✅ block/switch（启动调度）
  */
 int main(int hartid, void *fdt, void *end)
 {
@@ -72,7 +72,7 @@ int main(int hartid, void *fdt, void *end)
  * @retval 无
  * @note 压力主逻辑在 hart0 stress 任务
  * @warning 无
- * @attention ❌ ISR；✅ 进入调度
+ * @attention ❌ ISR；✅ block/switch（进入调度）
  */
 void secondary_main(int hartid)
 {

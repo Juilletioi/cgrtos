@@ -2,8 +2,8 @@
  * @file cgrtos_config.h
  * @brief CG-RTOS 功能与容量配置（用户可覆盖 / 最小裁剪）
  * @author Cong Zhou / Juilletioi
- * @version 5.1.0
- * @date 2026-07-22
+ * @version 5.3.0
+ * @date 2026-07-24
  * @copyright CG-RTOS
  *
  * @details

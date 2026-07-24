@@ -88,7 +88,8 @@ extern cgrtos_malloc_failed_hook_t g_malloc_failed_hook;
  * @retval >=size 8 字节对齐结果
  * @note 内联热路径，无锁
  * @warning 无
- * @attention @internal
+ * @attention ✅ ISR；❌ block/switch
+ * @internal
  */
 static inline uint32_t tlsf_align_up(uint32_t size)
 {
@@ -103,7 +104,8 @@ static inline uint32_t tlsf_align_up(uint32_t size)
  * @retval >=0 用户区净荷大小
  * @note 内联热路径
  * @warning 无
- * @attention @internal
+ * @attention ✅ ISR；❌ block/switch
+ * @internal
  */
 static inline uint32_t tlsf_block_size(tlsf_block_t *block)
 {
@@ -119,7 +121,8 @@ static inline uint32_t tlsf_block_size(tlsf_block_t *block)
  * @retval 0 已分配块
  * @note 内联热路径
  * @warning 无
- * @attention @internal
+ * @attention ✅ ISR；❌ block/switch
+ * @internal
  */
 static inline int tlsf_block_is_free(tlsf_block_t *block)
 {
@@ -136,7 +139,8 @@ static inline int tlsf_block_is_free(tlsf_block_t *block)
  * @retval 无
  * @note 内联热路径
  * @warning 无
- * @attention @internal
+ * @attention ✅ ISR；❌ block/switch
+ * @internal
  */
 static inline void tlsf_set_block_size(tlsf_block_t *block, uint32_t size, int free)
 {
@@ -151,7 +155,8 @@ static inline void tlsf_set_block_size(tlsf_block_t *block, uint32_t size, int f
  * @retval 非 NULL 物理后继块头
  * @note 调用方须校验地址仍在堆范围内
  * @warning 越界后继指针将导致合并损坏堆
- * @attention @internal
+ * @attention ✅ ISR；❌ block/switch
+ * @internal
  */
 static inline tlsf_block_t *tlsf_block_next(tlsf_block_t *block)
 {
@@ -166,7 +171,8 @@ static inline tlsf_block_t *tlsf_block_next(tlsf_block_t *block)
  * @retval 非 NULL 对应块头
  * @note 仅对有效堆指针有意义
  * @warning 非法 ptr 将导致堆元数据损坏
- * @attention @internal
+ * @attention ✅ ISR；❌ block/switch
+ * @internal
  */
 static inline tlsf_block_t *tlsf_block_from_ptr(void *ptr)
 {
@@ -184,7 +190,8 @@ static inline tlsf_block_t *tlsf_block_from_ptr(void *ptr)
  * @retval 无
  * @note 输出 fl/sl 用于位图查找与链表操作
  * @warning 无
- * @attention @internal
+ * @attention ✅ ISR；❌ block/switch
+ * @internal
  */
 static void tlsf_mapping(uint32_t size, uint32_t *fl, uint32_t *sl)
 {
@@ -227,7 +234,8 @@ static void tlsf_mapping(uint32_t size, uint32_t *fl, uint32_t *sl)
  * @retval 无
  * @note 调用方须已持临界区
  * @warning block 不在该桶时将损坏空闲链
- * @attention @internal
+ * @attention ✅ ISR；❌ block/switch
+ * @internal
  */
 static void tlsf_list_remove(tlsf_pool_t *pool, tlsf_block_t *block,
                              uint32_t fl, uint32_t sl)
@@ -261,7 +269,8 @@ static void tlsf_list_remove(tlsf_pool_t *pool, tlsf_block_t *block,
  * @retval 无
  * @note 调用方须已持临界区
  * @warning 重复插入同一 block 将形成环
- * @attention @internal
+ * @attention ✅ ISR；❌ block/switch
+ * @internal
  */
 static void tlsf_list_insert(tlsf_pool_t *pool, tlsf_block_t *block,
                              uint32_t fl, uint32_t sl)
@@ -286,7 +295,8 @@ static void tlsf_list_insert(tlsf_pool_t *pool, tlsf_block_t *block,
  * @retval NULL    堆空间不足
  * @note 调用方须已持临界区
  * @warning 无
- * @attention @internal
+ * @attention ✅ ISR；❌ block/switch
+ * @internal
  */
 static tlsf_block_t *tlsf_find_suitable(uint32_t size)
 {
@@ -346,7 +356,8 @@ static tlsf_block_t *tlsf_find_suitable(uint32_t size)
  * @retval 无
  * @note 调用方须已持临界区
  * @warning 对过小余块强行拆分将破坏堆结构
- * @attention @internal
+ * @attention ✅ ISR；❌ block/switch
+ * @internal
  */
 static void tlsf_split_block(tlsf_block_t *block, uint32_t size)
 {
@@ -384,7 +395,8 @@ static void tlsf_split_block(tlsf_block_t *block, uint32_t size)
  * @retval 无
  * @note 调用方须已持临界区
  * @warning 遗漏 prev_phys 更新将导致后续合并/释放错误
- * @attention @internal
+ * @attention ✅ ISR；❌ block/switch
+ * @internal
  */
 static void tlsf_merge_block(tlsf_block_t *block)
 {
@@ -431,7 +443,8 @@ static void tlsf_merge_block(tlsf_block_t *block)
  * @retval 无
  * @note 供 cgrtos_get_min_free_heap 查询
  * @warning 无
- * @attention @internal
+ * @attention ✅ ISR；❌ block/switch
+ * @internal
  */
 static void heap_update_min_free(void)
 {
@@ -449,7 +462,8 @@ static void heap_update_min_free(void)
  * @retval 无
  * @note 由 cgrtos_malloc 首次调用惰性触发
  * @warning 重复初始化将损坏已有分配
- * @attention @internal
+ * @attention ✅ ISR；❌ block/switch
+ * @internal
  */
 static void tlsf_init_pool(void)
 {

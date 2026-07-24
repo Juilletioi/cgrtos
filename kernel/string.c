@@ -176,7 +176,7 @@ char* strncpy(char* d,const char* s,size_t n){
  * @retval !=0 差值
  * @note 无
  * @warning 无
- * @attention ✅ ISR；❌ 不阻塞
+ * @attention ✅ ISR；❌ block/switch
  */
 int strcmp(const char* s1,const char* s2){
     while(*s1&&*s1==*s2){s1++;s2++;}
@@ -185,6 +185,7 @@ int strcmp(const char* s1,const char* s2){
 
 /**
  * @brief 从右查找字符
+ * @details 自左向右扫描并记录最后一次命中位置；含查找 '\\0' 时返回指向终止符的指针。
  * @param[in] s 串
  * @param[in] c 目标字符（转 unsigned char）
  * @return 最后一次出现的指针；未找到 NULL
@@ -192,7 +193,7 @@ int strcmp(const char* s1,const char* s2){
  * @retval NULL 未命中
  * @note 含查找 '\\0' 时返回指向终止符的指针
  * @warning 无
- * @attention ✅ ISR；❌ 不阻塞
+ * @attention ✅ ISR；❌ block/switch
  */
 char* strrchr(const char* s,int c){
     const char* last=0;
@@ -213,7 +214,7 @@ char* strrchr(const char* s,int c){
  * @retval d 目标
  * @note 若 d 长度 + n 空间不足，调用方须保证缓冲
  * @warning 无
- * @attention ✅ ISR；❌ 不阻塞
+ * @attention ✅ ISR；❌ block/switch
  */
 char* strncat(char* d,const char* s,size_t n){
     char* p=d;

@@ -2,8 +2,8 @@
  * @file hal_drv.h
  * @brief HAL ↔ 板级驱动绑定接口（仅供 HAL 与 arch 驱动使用，应用勿包含）
  * @author Cong Zhou / Juilletioi
- * @version 5.0.0
- * @date 2026-07-22
+ * @version 5.3.0
+ * @date 2026-07-24
  * @copyright CG-RTOS
  *
  * @details
@@ -53,24 +53,40 @@ hal_device_t *drv_uart_device(void);
 
 /**
  * @brief 取得系统定时器设备描述符（CLINT/SysTimer 或 CNTV 等）
- * @details 注册由 hal_board_init 完成；应用用 hal_timer_init / hal_mtime_read。
- * @return 非 NULL 静态设备指针
+ * @details
+ * 1. 返回静态 TIMER 设备指针（含 ops）。
+ * 2. 注册由 hal_board_init 完成；应用用 hal_timer_init / hal_mtime_read。
+ * @return 非 NULL 静态设备指针；生命周期 = 系统寿命
+ * @retval 非 NULL 成功
+ * @note 应用应使用 hal_timer_* / hal_mtime_read，勿直接包含本头
+ * @warning 驱动不得自行注册或释放
  * @attention ✅ ISR；❌ 不阻塞
  */
 hal_device_t *drv_timer_device(void);
 
-/** @brief 兼容旧名（RISC-V CLINT 时代） */
+/**
+ * @brief 兼容旧名：取得定时器设备（等同 drv_timer_device）
+ * @warning 仅为符号别名，无额外运行时副作用
+ */
 #define drv_clint_device drv_timer_device
 
 /**
  * @brief 取得外部中断控制器设备描述符（PLIC 或 GIC 等）
- * @details 应用应使用 hal_irqc_*；trap 路径直调驱动 static 例程。
- * @return 非 NULL 静态设备指针
+ * @details
+ * 1. 返回静态 IRQC 设备指针（含 ops）。
+ * 2. 应用应使用 hal_irqc_*；trap 路径直调驱动 static 例程。
+ * @return 非 NULL 静态设备指针；生命周期 = 系统寿命
+ * @retval 非 NULL 成功
+ * @note 应用应使用 hal_irqc_*，勿直接包含本头
+ * @warning 驱动不得自行注册或释放；trap 勿再绕回 hal_irqc_claim
  * @attention ✅ ISR；❌ 不阻塞
  */
 hal_device_t *drv_irqc_device(void);
 
-/** @brief 兼容旧名（RISC-V PLIC 时代） */
+/**
+ * @brief 兼容旧名：取得 IRQC 设备（等同 drv_irqc_device）
+ * @warning 仅为符号别名，无额外运行时副作用
+ */
 #define drv_plic_device drv_irqc_device
 
 /**
@@ -106,6 +122,7 @@ hal_device_t *drv_cpu_device(void);
  * 2. '\\n' 自动补 '\\r'。
  * @param[in] c 待输出字符
  * @return 无
+ * @retval 无
  * @note 仅供异常诊断等底层路径；应用请用 hal_console_putc
  * @warning 无锁、轮询阻塞；多核并发输出可能字节交错
  * @attention ✅ ISR；✅ 阻塞（轮询 TX FIFO）
@@ -119,6 +136,7 @@ void drv_uart_early_putc(char c);
  * 2. 逐字符调用 drv_uart_early_putc 输出。
  * @param[in] s NUL 结尾字符串；NULL 忽略
  * @return 无
+ * @retval 无
  * @note 仅供异常诊断等底层路径；应用请用 hal_console_puts
  * @warning 无锁、轮询阻塞；多核并发输出可能字节交错
  * @attention ✅ ISR；✅ 阻塞（轮询 TX FIFO）

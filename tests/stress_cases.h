@@ -2,8 +2,8 @@
  * @file stress_cases.h
  * @brief 全 feature 并发压力测试对外接口
  * @author Cong Zhou / Juilletioi
- * @version 5.0.0
- * @date 2026-07-22
+ * @version 5.3.0
+ * @date 2026-07-24
  * @copyright CG-RTOS
  *
  * @details

@@ -36,7 +36,7 @@ static cgrtos_stream_buffer_t g_sbs[CGRTOS_MAX_STREAM_BUFFER];
  * @retval pdFAIL 当前为 idle 或无 running 任务
  * @note 调用方须在 exit_critical 后 cgrtos_sched_yield
  * @warning 须在临界区内调用
- * @attention ❌ ISR；✅ block
+ * @attention ❌ ISR；✅ block/switch
  * @internal
  */
 static int sb_block(cgrtos_stream_buffer_t *sb, cgrtos_task_t *volatile *wq,
@@ -62,7 +62,7 @@ static int sb_block(cgrtos_stream_buffer_t *sb, cgrtos_task_t *volatile *wq,
  * @retval >=0 可写字节数
  * @note 纯计算，不修改状态
  * @warning 无
- * @attention ❌ ISR；❌ block
+ * @attention ❌ ISR；❌ block/switch
  * @internal
  */
 static uint32_t sb_spaces(const cgrtos_stream_buffer_t *sb)
@@ -80,7 +80,7 @@ static uint32_t sb_spaces(const cgrtos_stream_buffer_t *sb)
  * @retval 无
  * @note 调用方须确保 n <= sb_spaces(sb)
  * @warning 须在临界区内调用
- * @attention ❌ ISR；❌ block
+ * @attention ❌ ISR；❌ block/switch
  * @internal
  */
 static void sb_write_bytes(cgrtos_stream_buffer_t *sb, const uint8_t *src, uint32_t n)
@@ -102,7 +102,7 @@ static void sb_write_bytes(cgrtos_stream_buffer_t *sb, const uint8_t *src, uint3
  * @retval 无
  * @note 调用方须确保 n <= sb->avail
  * @warning 须在临界区内调用
- * @attention ❌ ISR；❌ block
+ * @attention ❌ ISR；❌ block/switch
  * @internal
  */
 static void sb_read_bytes(cgrtos_stream_buffer_t *sb, uint8_t *dst, uint32_t n)
@@ -123,7 +123,7 @@ static void sb_read_bytes(cgrtos_stream_buffer_t *sb, uint8_t *dst, uint32_t n)
  * @retval 无
  * @note 可在任务或 ISR 临界区内调用
  * @warning 无
- * @attention ✅ ISR；❌ block
+ * @attention ✅ ISR；❌ block/switch
  * @internal
  */
 static void sb_wake_recv(cgrtos_stream_buffer_t *sb, int *need_yield)
@@ -159,7 +159,7 @@ static void sb_wake_recv(cgrtos_stream_buffer_t *sb, int *need_yield)
  * @retval 无
  * @note 可在任务或 ISR 临界区内调用
  * @warning 无
- * @attention ✅ ISR；❌ block
+ * @attention ✅ ISR；❌ block/switch
  * @internal
  */
 static void sb_wake_send(cgrtos_stream_buffer_t *sb, int *need_yield)
@@ -187,7 +187,7 @@ static void sb_wake_send(cgrtos_stream_buffer_t *sb, int *need_yield)
  * @retval NULL     参数非法、池满或 malloc 失败
  * @note trigger 决定 recv 阻塞唤醒的最小 avail
  * @warning 无
- * @attention ❌ ISR；❌ block
+ * @attention ❌ ISR；❌ block/switch
  */
 cgrtos_stream_buffer_t *cgrtos_stream_buffer_create(uint32_t size, uint32_t trigger)
 {
@@ -225,7 +225,7 @@ cgrtos_stream_buffer_t *cgrtos_stream_buffer_create(uint32_t size, uint32_t trig
  * @retval >=0 当前可用字节数
  * @note 只读查询，无锁（调用方须自行同步或接受竞态）
  * @warning 并发读写时返回值可能瞬时变化
- * @attention ❌ ISR；❌ block
+ * @attention ❌ ISR；❌ block/switch
  */
 uint32_t cgrtos_stream_buffer_bytes_available(cgrtos_stream_buffer_t *sb)
 {
@@ -240,7 +240,7 @@ uint32_t cgrtos_stream_buffer_bytes_available(cgrtos_stream_buffer_t *sb)
  * @retval >=0 可写字节数
  * @note 只读查询
  * @warning 并发读写时返回值可能瞬时变化
- * @attention ❌ ISR；❌ block
+ * @attention ❌ ISR；❌ block/switch
  */
 uint32_t cgrtos_stream_buffer_spaces_available(cgrtos_stream_buffer_t *sb)
 {
@@ -258,7 +258,7 @@ uint32_t cgrtos_stream_buffer_spaces_available(cgrtos_stream_buffer_t *sb)
  * @retval >=0 实际写入字节数（可能小于 len）
  * @note 唤醒后 timeout 置 0，仅再尝试一次非阻塞写入
  * @warning 挂入 QueueSet 时写入成功会 poke
- * @attention ❌ ISR；✅ block
+ * @attention ❌ ISR；✅ block/switch
  */
 size_t cgrtos_stream_buffer_send(cgrtos_stream_buffer_t *sb, const void *data,
                                  size_t len, tick_t timeout)
@@ -329,7 +329,7 @@ size_t cgrtos_stream_buffer_send(cgrtos_stream_buffer_t *sb, const void *data,
  * @retval >=0 实际写入字节数
  * @note 绝不阻塞
  * @warning 无空间时返回 0，已写部分保留
- * @attention ✅ ISR；❌ block
+ * @attention ✅ ISR；❌ block/switch
  */
 size_t cgrtos_stream_buffer_send_from_isr(cgrtos_stream_buffer_t *sb, const void *data,
                                           size_t len, BaseType_t *woken)
@@ -367,7 +367,7 @@ size_t cgrtos_stream_buffer_send_from_isr(cgrtos_stream_buffer_t *sb, const void
  * @retval >=0 实际读取字节数
  * @note trigger 为 0 时视为 1
  * @warning 被唤醒后 timeout 置 0 再试一次
- * @attention ❌ ISR；✅ block
+ * @attention ❌ ISR；✅ block/switch
  */
 size_t cgrtos_stream_buffer_recv(cgrtos_stream_buffer_t *sb, void *buf, size_t len,
                                  tick_t timeout)
@@ -442,7 +442,7 @@ size_t cgrtos_stream_buffer_recv(cgrtos_stream_buffer_t *sb, void *buf, size_t l
  * @retval >=0 实际读取字节数
  * @note 绝不阻塞
  * @warning 无
- * @attention ✅ ISR；❌ block
+ * @attention ✅ ISR；❌ block/switch
  */
 size_t cgrtos_stream_buffer_recv_from_isr(cgrtos_stream_buffer_t *sb, void *buf,
                                           size_t len, BaseType_t *woken)
@@ -474,7 +474,7 @@ size_t cgrtos_stream_buffer_recv_from_isr(cgrtos_stream_buffer_t *sb, void *buf,
  * @retval pdFAIL sb 无效或未使用
  * @note 不唤醒或取消阻塞任务
  * @warning 重置后等待者仍阻塞直至超时或被 delete 唤醒
- * @attention ❌ ISR；❌ block
+ * @attention ❌ ISR；❌ block/switch
  */
 int cgrtos_stream_buffer_reset(cgrtos_stream_buffer_t *sb)
 {
@@ -496,7 +496,7 @@ int cgrtos_stream_buffer_reset(cgrtos_stream_buffer_t *sb)
  * @retval pdFAIL sb 无效或未使用
  * @note 被唤醒任务 wake_ok=0 表示失败/取消
  * @warning 删除后指针不可再使用
- * @attention ❌ ISR；✅ block
+ * @attention ❌ ISR；✅ block/switch
  */
 int cgrtos_stream_buffer_delete(cgrtos_stream_buffer_t *sb)
 {
@@ -541,7 +541,7 @@ int cgrtos_stream_buffer_delete(cgrtos_stream_buffer_t *sb)
  * @retval NULL     底层 StreamBuffer 创建失败
  * @note 与 StreamBuffer 共用 g_sbs 池
  * @warning 单条消息最大载荷 0xFFFF 字节
- * @attention ❌ ISR；❌ block
+ * @attention ❌ ISR；❌ block/switch
  */
 cgrtos_message_buffer_t *cgrtos_message_buffer_create(uint32_t size)
 {
@@ -565,7 +565,7 @@ cgrtos_message_buffer_t *cgrtos_message_buffer_create(uint32_t size)
  * @retval 0   参数非法、空间不足或超时
  * @note 绝不部分写入
  * @warning 无
- * @attention ❌ ISR；✅ block
+ * @attention ❌ ISR；✅ block/switch
  */
 size_t cgrtos_message_buffer_send(cgrtos_message_buffer_t *mb, const void *data,
                                   size_t len, tick_t timeout)
@@ -626,7 +626,7 @@ size_t cgrtos_message_buffer_send(cgrtos_message_buffer_t *mb, const void *data,
  * @retval 0   失败或空间不足
  * @note 绝不部分写入
  * @warning 无
- * @attention ✅ ISR；❌ block
+ * @attention ✅ ISR；❌ block/switch
  */
 size_t cgrtos_message_buffer_send_from_isr(cgrtos_message_buffer_t *mb, const void *data,
                                            size_t len, BaseType_t *woken)
@@ -669,7 +669,7 @@ size_t cgrtos_message_buffer_send_from_isr(cgrtos_message_buffer_t *mb, const vo
  * @retval 0  无完整消息或失败
  * @note 窥读长度前缀时不移动 tail，消息未到齐不消费
  * @warning 无
- * @attention ✅ ISR；❌ block
+ * @attention ✅ ISR；❌ block/switch
  */
 size_t cgrtos_message_buffer_recv_from_isr(cgrtos_message_buffer_t *mb, void *buf,
                                            size_t buf_len, BaseType_t *woken)
@@ -715,7 +715,7 @@ size_t cgrtos_message_buffer_recv_from_isr(cgrtos_message_buffer_t *mb, void *bu
  * @retval 0  超时、缓冲不足或参数非法
  * @note 绝不部分接收
  * @warning 无
- * @attention ❌ ISR；✅ block
+ * @attention ❌ ISR；✅ block/switch
  */
 size_t cgrtos_message_buffer_recv(cgrtos_message_buffer_t *mb, void *buf, size_t buf_len,
                                   tick_t timeout)
@@ -781,7 +781,7 @@ size_t cgrtos_message_buffer_recv(cgrtos_message_buffer_t *mb, void *buf, size_t
  * @retval pdFAIL 参数无效
  * @note MessageBuffer 与 StreamBuffer 共用删除路径
  * @warning 无
- * @attention ❌ ISR；✅ block
+ * @attention ❌ ISR；✅ block/switch
  */
 int cgrtos_message_buffer_delete(cgrtos_message_buffer_t *mb)
 {

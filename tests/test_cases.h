@@ -2,8 +2,8 @@
  * @file test_cases.h
  * @brief 功能测试用例表与运行器对外接口
  * @author Cong Zhou / Juilletioi
- * @version 5.0.0
- * @date 2026-07-22
+ * @version 5.3.0
+ * @date 2026-07-24
  * @copyright CG-RTOS
  *
  * @details
@@ -14,19 +14,27 @@
 #define TEST_CASES_H
 
 /**
+ * @typedef test_case_fn_t
  * @brief 单个测试用例入口函数类型
- * @details 无参数、无返回值；内部通过 expect() 累计 pass/fail。
+ * @details 无参数、无返回值；用例内通过 expect() 累计全局 pass/fail，并打印 [PASS]/[FAIL]。
+ * @note 由 test_case_t::run 持有；须在调度已启动的任务上下文调用。
+ * @warning 用例内可能创建任务、阻塞 IPC，勿当作 ISR 回调类型使用。
+ * @attention ❌ ISR；✅ 用例实现内可能阻塞并切换
  */
 typedef void (*test_case_fn_t)(void);
 
 /**
+ * @struct test_case_t
  * @brief 测试用例描述符
- * @details 只读表项；应用不得改写 name/help/run 指针。
+ * @details 静态只读表项，描述 CLI/`run <name>` 可触发的功能用例；不含 "all"/"stress" 合成名。
+ * @note 表由 test_cases_get() 导出；调用方不得 free 或改写字段。
+ * @warning name/help/run 指针必须常驻；run 不可为 NULL。
+ * @attention ❌ ISR 勿改写；❌ block/switch
  */
 typedef struct {
-    const char *name;      ///< 短命令名，如 "mem"、"sched_m1"
-    const char *help;      ///< 一行帮助说明
-    test_case_fn_t run;    ///< 用例执行函数；不可为 NULL
+    const char *name;      /**< 短命令名，如 "mem"、"sched_m1"；与 CLI 匹配 */
+    const char *help;      /**< 一行帮助说明，供 test_cases_list 打印 */
+    test_case_fn_t run;    /**< 用例执行函数入口；不可为 NULL */
 } test_case_t;
 
 /**
@@ -75,14 +83,14 @@ int test_cases_fail_count(void);
 const test_case_t *test_cases_get(int *count);
 
 /**
- * @brief 按名称运行单个用例，或运行全部（"all"）
- * @details 名称匹配 g_cases[]；"all" 依次执行全部功能用例（不含 stress）。
- * @param[in] name 用例名或 "all"；NULL 视为非法
+ * @brief 按名称运行单个用例、"all" 或 "stress"
+ * @details 名称匹配 g_cases[]；"all" 依次执行全部功能用例；"stress" 转调 stress_run()。
+ * @param[in] name 用例名、"all" 或 "stress"；NULL 视为非法
  * @return 0 找到并执行；-1 未知名称
  * @retval 0  成功调度执行
  * @retval -1 名称未知或 name 为空
  * @note 用例内部可能创建任务/阻塞，须在调度已启动后调用
- * @warning 长时间用例会占用驱动任务
+ * @warning 长时间用例会占用驱动任务；stress 不经 expect 汇总
  * @attention ❌ ISR；✅ 用例内可能阻塞并切换
  */
 int test_cases_run(const char *name);
@@ -94,7 +102,7 @@ int test_cases_run(const char *name);
  * @retval 无
  * @note 仅输出，不执行用例
  * @warning 无
- * @attention ❌ 建议任务上下文（printf 带锁）；❌ 不阻塞调度语义
+ * @attention ❌ ISR（建议任务上下文，printf 带锁）；❌ block/switch
  */
 void test_cases_list(void);
 

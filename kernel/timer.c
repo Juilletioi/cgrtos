@@ -58,7 +58,7 @@ static cgrtos_queue_t          *g_timer_cmd_q;
  * @retval NULL     对象池已满
  * @note 须在临界区内调用
  * @warning 返回指针生命周期至 timer_free_slot
- * @attention ❌ ISR；❌ block
+ * @attention ❌ ISR；❌ block/switch
  * @internal
  */
 static cgrtos_timer_t *timer_alloc(void)
@@ -81,7 +81,7 @@ static cgrtos_timer_t *timer_alloc(void)
  * @retval 无
  * @note 调用前须已从时间轮摘除
  * @warning 传入非池内指针时静默无操作
- * @attention ❌ ISR；❌ block
+ * @attention ❌ ISR；❌ block/switch
  * @internal
  */
 static void timer_free_slot(cgrtos_timer_t *timer)
@@ -106,7 +106,7 @@ static void timer_free_slot(cgrtos_timer_t *timer)
  * @retval NULL     节点池已满
  * @note 释放节点通过 memset 置 timer=NULL 供复用
  * @warning 无
- * @attention ❌ ISR；❌ block
+ * @attention ❌ ISR；❌ block/switch
  * @internal
  */
 static timer_wheel_entry_t *wheel_entry_alloc(void)
@@ -133,7 +133,7 @@ static timer_wheel_entry_t *wheel_entry_alloc(void)
  * @retval 无
  * @note 同一 timer 重复调用安全
  * @warning 须在临界区内调用
- * @attention ❌ ISR；❌ block
+ * @attention ❌ ISR；❌ block/switch
  * @internal
  */
 static void wheel_remove_entry(cgrtos_timer_t *timer)
@@ -166,7 +166,7 @@ static void wheel_remove_entry(cgrtos_timer_t *timer)
  * @retval 无
  * @note 更新 timer->remain 为插入时的 ticks
  * @warning wheel_entry_alloc 失败时静默返回，定时器不会挂轮
- * @attention ❌ ISR；❌ block
+ * @attention ❌ ISR；❌ block/switch
  * @internal
  */
 static void wheel_insert(cgrtos_timer_t *timer, tick_t ticks)
@@ -202,7 +202,7 @@ static void wheel_insert(cgrtos_timer_t *timer, tick_t ticks)
  * @retval 无
  * @note 用户定时器回调在此任务栈上执行
  * @warning 回调内不得长时间阻塞
- * @attention ❌ ISR；✅ block
+ * @attention ❌ ISR；✅ block/switch
  * @internal
  */
 static void timer_daemon_entry(void *arg)
@@ -253,7 +253,7 @@ static void timer_daemon_entry(void *arg)
  * @retval pdFAIL 参数非法或队列不可用
  * @note 不在 ISR 内直接改时间轮
  * @warning 队列满时命令丢失
- * @attention ✅ ISR；❌ block
+ * @attention ✅ ISR；❌ block/switch
  * @internal
  */
 static int timer_cmd_from_isr(cgrtos_timer_t *timer, uint8_t cmd_id, tick_t period,
@@ -277,7 +277,7 @@ static int timer_cmd_from_isr(cgrtos_timer_t *timer, uint8_t cmd_id, tick_t peri
  * @retval 无
  * @note 须在调度器启动前或早期 boot 阶段调用
  * @warning 重复 init 会泄漏旧队列/任务（当前未防重入）
- * @attention ❌ ISR；❌ block
+ * @attention ❌ ISR；❌ block/switch
  */
 void cgrtos_timer_init(void)
 {
@@ -305,7 +305,7 @@ void cgrtos_timer_init(void)
  * @retval NULL     对象池已满
  * @note 创建后须 start 才挂入时间轮
  * @warning period 为 0 时 start 行为未定义
- * @attention ❌ ISR；❌ block
+ * @attention ❌ ISR；❌ block/switch
  */
 cgrtos_timer_t *cgrtos_timer_create(const char *name, timer_cb_t cb, void *arg,
                                     tick_t period, uint8_t periodic)
@@ -340,7 +340,7 @@ cgrtos_timer_t *cgrtos_timer_create(const char *name, timer_cb_t cb, void *arg,
  * @retval pdFAIL timer 为空
  * @note 重复 start 会重新按 period 挂轮
  * @warning 无
- * @attention ❌ ISR；❌ block
+ * @attention ❌ ISR；❌ block/switch
  */
 int cgrtos_timer_start(cgrtos_timer_t *timer)
 {
@@ -367,7 +367,7 @@ int cgrtos_timer_start(cgrtos_timer_t *timer)
  * @retval pdFAIL timer 为空
  * @note 停止后 cb 仍保留，可再次 start
  * @warning 无
- * @attention ❌ ISR；❌ block
+ * @attention ❌ ISR；❌ block/switch
  */
 int cgrtos_timer_stop(cgrtos_timer_t *timer)
 {
@@ -394,7 +394,7 @@ int cgrtos_timer_stop(cgrtos_timer_t *timer)
  * @retval pdFAIL timer 为空
  * @note 不修改 period 字段
  * @warning 无
- * @attention ❌ ISR；❌ block
+ * @attention ❌ ISR；❌ block/switch
  */
 int cgrtos_timer_reset(cgrtos_timer_t *timer)
 {
@@ -411,7 +411,7 @@ int cgrtos_timer_reset(cgrtos_timer_t *timer)
  * @retval pdFAIL 参数非法
  * @note 未激活时仅更新 period，start 后生效
  * @warning 无
- * @attention ❌ ISR；❌ block
+ * @attention ❌ ISR；❌ block/switch
  */
 int cgrtos_timer_change_period(cgrtos_timer_t *timer, tick_t period)
 {
@@ -437,7 +437,7 @@ int cgrtos_timer_change_period(cgrtos_timer_t *timer, tick_t period)
  * @retval pdFAIL 入队失败
  * @note 不在 ISR 内直接改时间轮
  * @warning 队列满时启动请求丢失
- * @attention ✅ ISR；❌ block
+ * @attention ✅ ISR；❌ block/switch
  */
 int cgrtos_timer_start_from_isr(cgrtos_timer_t *timer, BaseType_t *woken)
 {
@@ -454,7 +454,7 @@ int cgrtos_timer_start_from_isr(cgrtos_timer_t *timer, BaseType_t *woken)
  * @retval pdFAIL 入队失败
  * @note 停止操作异步完成
  * @warning 无
- * @attention ✅ ISR；❌ block
+ * @attention ✅ ISR；❌ block/switch
  */
 int cgrtos_timer_stop_from_isr(cgrtos_timer_t *timer, BaseType_t *woken)
 {
@@ -471,7 +471,7 @@ int cgrtos_timer_stop_from_isr(cgrtos_timer_t *timer, BaseType_t *woken)
  * @retval pdFAIL 入队失败
  * @note 复位操作异步完成
  * @warning 无
- * @attention ✅ ISR；❌ block
+ * @attention ✅ ISR；❌ block/switch
  */
 int cgrtos_timer_reset_from_isr(cgrtos_timer_t *timer, BaseType_t *woken)
 {
@@ -489,7 +489,7 @@ int cgrtos_timer_reset_from_isr(cgrtos_timer_t *timer, BaseType_t *woken)
  * @retval pdFAIL 参数非法或队列满
  * @note 改周期操作异步完成
  * @warning 无
- * @attention ✅ ISR；❌ block
+ * @attention ✅ ISR；❌ block/switch
  */
 int cgrtos_timer_change_period_from_isr(cgrtos_timer_t *timer, tick_t period,
                                         BaseType_t *woken)
@@ -509,7 +509,7 @@ int cgrtos_timer_change_period_from_isr(cgrtos_timer_t *timer, tick_t period,
  * @retval pdFAIL timer 为空
  * @note 删除后指针不可再使用
  * @warning 守护队列中待处理命令可能仍引用已删 timer
- * @attention ❌ ISR；❌ block
+ * @attention ❌ ISR；❌ block/switch
  */
 int cgrtos_timer_delete(cgrtos_timer_t *timer)
 {
@@ -533,7 +533,7 @@ int cgrtos_timer_delete(cgrtos_timer_t *timer)
  * @retval 无
  * @note 用户回调在 "Tmr Svc" 守护任务上下文执行，非 ISR
  * @warning 须在 tick ISR 中调用，持临界区时间应尽可能短
- * @attention ✅ ISR；❌ block
+ * @attention ✅ ISR；❌ block/switch
  */
 void cgrtos_timer_process_tick(void)
 {
@@ -597,7 +597,7 @@ void cgrtos_timer_process_tick(void)
  * @retval >=0 数量
  * @note CONFIG_USE_TIMERS 路径
  * @warning 无
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ ISR；❌ block/switch
  */
 uint32_t cgrtos_timer_count_used(void)
 {

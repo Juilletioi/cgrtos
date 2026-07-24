@@ -5,8 +5,8 @@
  * @file cgrtos.h
  * @brief CG-RTOS 公共 API 头文件
  * @author Cong Zhou / Juilletioi
- * @version 5.1.0
- * @date 2026-07-22
+ * @version 5.3.0
+ * @date 2026-07-24
  * @copyright CG-RTOS
  *
  * @details
@@ -77,20 +77,43 @@ typedef int                         BaseType_t;
  * @brief 输出 ERROR 级日志
  * @param tag 模块标签字符串
  * @param msg 消息字符串
- * @warning 可能调用 UART/console，非 ISR 安全。
+ * @warning 参数可能被多次求值；可能调用 UART/console，非 ISR 安全。
  */
 #define CGRTOS_LOGE(tag, msg) cgrtos_log(CGRTOS_LOG_ERROR, (tag), (msg))
-/** @brief 输出 WARN 级日志 @param tag 模块标签 @param msg 消息 @warning 非 ISR 安全 */
+/**
+ * @brief 输出 WARN 级日志
+ * @param tag 模块标签
+ * @param msg 消息
+ * @warning 参数可能被多次求值；非 ISR 安全。
+ */
 #define CGRTOS_LOGW(tag, msg) cgrtos_log(CGRTOS_LOG_WARN, (tag), (msg))
-/** @brief 输出 INFO 级日志 @param tag 模块标签 @param msg 消息 @warning 非 ISR 安全 */
+/**
+ * @brief 输出 INFO 级日志
+ * @param tag 模块标签
+ * @param msg 消息
+ * @warning 参数可能被多次求值；非 ISR 安全。
+ */
 #define CGRTOS_LOGI(tag, msg) cgrtos_log(CGRTOS_LOG_INFO, (tag), (msg))
-/** @brief 输出 DEBUG 级日志 @param tag 模块标签 @param msg 消息 @warning 非 ISR 安全 */
+/**
+ * @brief 输出 DEBUG 级日志
+ * @param tag 模块标签
+ * @param msg 消息
+ * @warning 参数可能被多次求值；非 ISR 安全。
+ */
 #define CGRTOS_LOGD(tag, msg) cgrtos_log(CGRTOS_LOG_DEBUG, (tag), (msg))
 #else
-/** @brief CONFIG_USE_KLOG=0 时空操作 @param tag 忽略 @param msg 忽略 */
+/**
+ * @brief CONFIG_USE_KLOG=0 时 ERROR 日志为空操作
+ * @param tag 忽略
+ * @param msg 忽略
+ * @warning 参数仍可能被求值与否取决于编译器；勿依赖副作用。
+ */
 #define CGRTOS_LOGE(tag, msg) ((void)0)
+/** @brief WARN 空操作 @param tag 忽略 @param msg 忽略 @warning 勿依赖参数副作用 */
 #define CGRTOS_LOGW(tag, msg) ((void)0)
+/** @brief INFO 空操作 @param tag 忽略 @param msg 忽略 @warning 勿依赖参数副作用 */
 #define CGRTOS_LOGI(tag, msg) ((void)0)
+/** @brief DEBUG 空操作 @param tag 忽略 @param msg 忽略 @warning 勿依赖参数副作用 */
 #define CGRTOS_LOGD(tag, msg) ((void)0)
 #endif
 
@@ -178,53 +201,54 @@ typedef enum {
 /**
  * @struct cgrtos_task
  * @brief 任务控制块（TCB），栈内嵌于结构体尾部
+ * @details 内核内部对象；应用不得直接改写成员，请通过任务/调度 API 操作。
  */
 typedef struct cgrtos_task {
-    uint64_t           *sp;              /* saved stack pointer (trap frame) */
-    char                name[CGRTOS_TASK_NAME_MAX];
-    task_id_t           id;              /* unique id; 0 = free / idle slot */
-    uint8_t             prio;            /* current effective priority */
-    uint8_t             base_prio;       /* priority before PI / DPCP boost */
+    uint64_t           *sp;              ///< 保存的栈指针（trap 帧）
+    char                name[CGRTOS_TASK_NAME_MAX]; ///< 任务名
+    task_id_t           id;              ///< 唯一 ID；0=空闲槽
+    uint8_t             prio;            ///< 当前有效优先级
+    uint8_t             base_prio;       ///< PI/DPCP 提升前的基优先级
 #if CONFIG_USE_PREEMPT_THRESH
-    uint8_t             preempt_thresh;  /* 抢占阈值：仅更高 prio 可抢占 */
+    uint8_t             preempt_thresh;  ///< 抢占阈值：仅更高 prio 可抢占
 #endif
-    task_state_t        state;
-    sched_policy_t      policy;
-    task_func_t         entry_fn;        /* 用户入口（bootstrap 调用） */
-    void               *entry_arg;
-    block_reason_t      block_reason;
-    tick_t              wake_tick;       /* delayed-list absolute wake time */
-    tick_t              deadline;        /* EDF absolute deadline */
-    tick_t              period;          /* EDF period (0 = sporadic) */
-    tick_t              exec;            /* ticks spent running (stats) */
+    task_state_t        state;           ///< 任务状态
+    sched_policy_t      policy;          ///< 调度策略
+    task_func_t         entry_fn;        ///< 用户入口（bootstrap 调用）
+    void               *entry_arg;       ///< 入口参数
+    block_reason_t      block_reason;    ///< 阻塞原因
+    tick_t              wake_tick;       ///< 延迟链绝对唤醒时刻
+    tick_t              deadline;        ///< EDF 绝对 deadline
+    tick_t              period;          ///< EDF 周期（0=偶发）
+    tick_t              exec;            ///< 累计运行 tick（统计）
 #if CONFIG_SCHED_STATS
-    tick_t              ready_since;     /* 进入 READY 的 g_ticks */
-    tick_t              max_sched_latency;
-    tick_t              last_sched_latency;
-    uint64_t            sched_latency_sum;
-    uint32_t            sched_latency_samples;
+    tick_t              ready_since;     ///< 进入 READY 的 g_ticks
+    tick_t              max_sched_latency; ///< 最大调度延迟
+    tick_t              last_sched_latency; ///< 最近一次调度延迟
+    uint64_t            sched_latency_sum; ///< 延迟累加
+    uint32_t            sched_latency_samples; ///< 延迟采样次数
 #endif
-    tick_t              vruntime;        /* CFS virtual runtime */
-    tick_t              last_run;        /* last dispatch tick */
-    tick_t              slice_remain;    /* RR/CFS remaining time slice */
-    uint8_t             cpu_aff;         /* 0xFF = any core; else hard pin */
-    uint8_t             run_cpu;         /* last / intended home core */
-    void               *block_obj;       /* IPC object while blocked */
-    event_flags_t       event_wait_mask;
-    uint8_t             event_wait_all;
+    tick_t              vruntime;        ///< CFS 虚拟运行时间
+    tick_t              last_run;        ///< 上次派发 tick
+    tick_t              slice_remain;    ///< RR/CFS 剩余时间片
+    uint8_t             cpu_aff;         ///< 0xFF=任意核；否则硬绑核
+    uint8_t             run_cpu;         ///< 上次/归属核
+    void               *block_obj;       ///< 阻塞时关联的 IPC 对象
+    event_flags_t       event_wait_mask; ///< 事件等待掩码
+    uint8_t             event_wait_all;  ///< 1=等待全部位
 #if CONFIG_USE_TASK_NOTIFICATIONS
-    uint32_t            notify_value;
-    uint8_t             notify_pending;
+    uint32_t            notify_value;    ///< 通知值
+    uint8_t             notify_pending;  ///< 通知挂起标志
 #endif
-    uint8_t             wake_ok;         /* 1 = signal wake, 0 = timeout */
-    list_item_t         delayed_item;    /* sorted delayed list node */
-    list_item_t         cfs_item;        /* CFS ready list by vruntime */
-    list_item_t         edf_item;        /* EDF ready list by deadline */
-    list_item_t         edf_rel_item;    /* EDF next-release wheel node */
-    uint8_t             edf_on_wheel;    /* 1 if armed on release wheel */
-    struct cgrtos_task *volatile next;   /* priority ready / wait-q link */
-    struct cgrtos_task *volatile prev;
-    uint64_t            stack[CONFIG_TASK_STACK_WORDS]; /* embedded stack */
+    uint8_t             wake_ok;         ///< 1=信号唤醒，0=超时
+    list_item_t         delayed_item;    ///< 延迟链节点
+    list_item_t         cfs_item;        ///< CFS 就绪链节点
+    list_item_t         edf_item;        ///< EDF 就绪链节点
+    list_item_t         edf_rel_item;    ///< EDF 释放轮节点
+    uint8_t             edf_on_wheel;    ///< 1=已挂在释放轮
+    struct cgrtos_task *volatile next;   ///< 优先级就绪/等待链后继
+    struct cgrtos_task *volatile prev;   ///< 优先级就绪/等待链前驱
+    uint64_t            stack[CONFIG_TASK_STACK_WORDS]; ///< 内嵌栈
 } cgrtos_task_t;
 
 /** @brief Idle / Tick 钩子函数类型 */
@@ -523,6 +547,8 @@ extern volatile uint32_t g_hart_stage[CONFIG_MAX_CORES];
 /**
  * @def CGRTOS_CORE_ONLINE
  * @brief 判断逻辑核是否可调度（hart0 恒为真；次核看 g_secondary_online 位）
+ * @param c 逻辑核号
+ * @warning 参数 c 被多次求值；勿传入带副作用表达式。
  */
 #define CGRTOS_CORE_ONLINE(c) \
     (((uint8_t)(c) == 0U) || \
@@ -544,7 +570,7 @@ extern volatile uint32_t g_boot_sync;
  * @retval 无
  * @note 实现位于架构汇编/ trampoline
  * @warning 禁止在持有不合理锁状态时调用；应用层请用 cgrtos_task_yield
- * @attention ❌ 非普通 ISR API；✅ 立即上下文切换
+ * @attention ❌ 不允许在中断上下文调用；✅ 会阻塞/引起调度（立即上下文切换）
  */
 extern void context_switch(uint64_t **cur, uint64_t *nxt);
 /**
@@ -555,36 +581,53 @@ extern void context_switch(uint64_t **cur, uint64_t *nxt);
  * @retval 无
  * @note 调用前须已选好 g_current
  * @warning 返回后代码不可达
- * @attention ❌ ISR；✅ 立即切换进入任务
+ * @attention ❌ 不允许在中断上下文调用；✅ 会阻塞/引起调度（立即进入任务）
  */
 extern void start_first_task(uint64_t *sp);
 /**
  * @brief 处理软件中断 / IPI（架构 trap 入口）
  * @details 清本核 IPI；处理远程 tick 与 yield 挂起。
  * @param[in] f 陷阱栈帧指针；实现可未使用
+ * @return 无
+ * @retval 无
  * @note 实现见 arch 目录下 ipic 等；禁止从任务上下文直接调用
- * @attention ✅ ISR；❌ 不阻塞
+ * @warning 仅供 trap 向量调用；勿从应用任务直接进入
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞（切换在 trap 返回路径）
  */
 extern void arch_handle_ipi(uint64_t *f);
 /**
  * @brief 处理定时器中断（架构 trap 入口）
  * @details 重载比较寄存器并调用 cgrtos_tick_handler。
  * @param[in] f 陷阱栈帧指针；实现可未使用
- * @attention ✅ ISR；❌ 不阻塞
+ * @return 无
+ * @retval 无
+ * @note 仅供 trap 向量调用
+ * @warning 处理须短小；勿在此路径阻塞
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞（可能置 yield_pending）
  */
 extern void arch_handle_timer(uint64_t *f);
 /**
  * @brief 处理外部中断（IRQC claim → dispatch）
+ * @details claim 中断源后调用 cgrtos_irq_dispatch，再 complete。
  * @param[in] f 陷阱栈帧指针；实现可未使用
- * @attention ✅ ISR；❌ 不阻塞
+ * @return 无
+ * @retval 无
+ * @note 仅供 trap 向量调用
+ * @warning handler 须短小非阻塞
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞（handler 内禁止阻塞 API）
  */
 extern void arch_handle_external(uint64_t *f);
 /**
  * @brief 处理同步异常并输出早期诊断信息
+ * @details 打印 cause/epc 等后通常进入不可恢复路径。
  * @param[in] f     陷阱栈帧指针
  * @param[in] cause 异常码
  * @param[in] epc   异常 PC
- * @attention ✅ ISR；✅ 可能轮询 UART
+ * @return 无（通常不返回）
+ * @retval 无
+ * @note 诊断输出依赖早期 console
+ * @warning 异常后系统状态可能不一致
+ * @attention ✅ 允许在中断上下文调用；✅ 会阻塞/引起调度
  */
 extern void arch_handle_exception(uint64_t *f, uint64_t cause, uint64_t epc);
 
@@ -603,7 +646,7 @@ extern void arch_handle_exception(uint64_t *f, uint64_t cause, uint64_t epc);
  * @retval 无
  * @note 可由钩子在 halt 前做最后日志
  * @warning 进入后系统停止调度
- * @attention ✅ 可从 ISR/任务调用；❌ 不“阻塞等待事件”，永久挂起
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 void _deadloop(void);
 /**
@@ -616,7 +659,7 @@ void _deadloop(void);
  * @retval 0 约定成功（若可达）
  * @note 由各 APP（demo/test/cli）分别实现
  * @warning 勿在次核调用
- * @attention ❌ ISR；✅ 随后启动调度会切换
+ * @attention ❌ 不允许在中断上下文调用；✅ 会阻塞/引起调度
  */
 int main(int hartid, void *fdt, void *end);
 /**
@@ -627,7 +670,7 @@ int main(int hartid, void *fdt, void *end);
  * @retval 无
  * @note 由各 APP 实现或弱符号提供
  * @warning 勿在 hart0 调用
- * @attention ❌ ISR；✅ 进入调度后持续可能切换
+ * @attention ❌ 不允许在中断上下文调用；✅ 会阻塞/引起调度
  */
 void secondary_main(int hartid);
 
@@ -643,7 +686,7 @@ void secondary_main(int hartid);
  * @retval 无
  * @note 仅 hart0 在创建用户任务前调用一次
  * @warning 重复调用可能导致设备二次 init / 状态错乱
- * @attention ❌ ISR；❌ 本函数不切换用户任务（次核 kick 发 IPI）
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起用户任务调度（次核 kick 发 IPI）
  */
 void cgrtos_init(void);
 
@@ -654,7 +697,7 @@ void cgrtos_init(void);
  * @retval 无
  * @note 调用前应已创建至少一个应用任务（否则跑 idle）
  * @warning 返回后的代码不可达
- * @attention ❌ ISR；✅ 立即开始上下文切换
+ * @attention ❌ 不允许在中断上下文调用；✅ 会阻塞/引起调度（立即开始上下文切换）
  */
 void cgrtos_start(void);
 
@@ -666,7 +709,7 @@ void cgrtos_start(void);
  * @retval 无
  * @note 由 secondary_main 调用
  * @warning 勿在 hart0 调用
- * @attention ❌ ISR；✅ 持续可能发生切换
+ * @attention ❌ 不允许在中断上下文调用；✅ 会阻塞/引起调度（持续可能发生切换）
  */
 void cgrtos_start_secondary(int hartid);
 
@@ -677,7 +720,7 @@ void cgrtos_start_secondary(int hartid);
  * @retval 无
  * @note 由 cgrtos_start 内部调用；也可在启动路径显式调用
  * @warning 调度运行中重复调用不安全
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 void cgrtos_init_idle_tasks(void);
 
@@ -695,7 +738,7 @@ void cgrtos_init_idle_tasks(void);
  * @retval (task_id_t)-1 参数非法 / 池满 / 策略禁用
  * @note 任务入口返回后经 bootstrap 调用 cgrtos_task_exit
  * @warning 禁止应用直接改写返回 ID 对应 TCB 字段
- * @attention ❌ ISR；❌ 通常不阻塞调用者（可能 IPI 触发他核调度）
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度（可能 IPI 触发他核调度）
  */
 task_id_t cgrtos_task_create(const char *name, task_func_t fn, void *arg,
                              uint8_t prio, sched_policy_t policy);
@@ -709,7 +752,7 @@ task_id_t cgrtos_task_create(const char *name, task_func_t fn, void *arg,
  * @retval pdFAIL 任务不存在或试图删除 idle
  * @note 自删除会 yield 切走
  * @warning 删除仍持锁任务依赖 force_release；与等待者存在竞态须由临界区保护（内部已处理）
- * @attention ❌ ISR；✅ 可能触发调度（自删/同核 RUNNING）
+ * @attention ❌ 不允许在中断上下文调用；✅ 会阻塞/引起调度（自删/同核 RUNNING）
  */
 int cgrtos_task_delete(task_id_t id);
 
@@ -722,7 +765,7 @@ int cgrtos_task_delete(task_id_t id);
  * @retval pdFAIL 无效 ID
  * @note 可用 resume 恢复
  * @warning 挂起持有互斥量的任务可能导致优先级反转/死锁
- * @attention ❌ ISR；✅ 可能引起切换
+ * @attention ❌ 不允许在中断上下文调用；✅ 会阻塞/引起调度
  */
 int cgrtos_task_suspend(task_id_t id);
 
@@ -735,7 +778,7 @@ int cgrtos_task_suspend(task_id_t id);
  * @retval pdFAIL 无效或不在挂起态（以实现为准）
  * @note 无
  * @warning 无
- * @attention ❌ ISR；✅ 可能引起切换
+ * @attention ❌ 不允许在中断上下文调用；✅ 会阻塞/引起调度
  */
 int cgrtos_task_resume(task_id_t id);
 
@@ -749,7 +792,7 @@ int cgrtos_task_resume(task_id_t id);
  * @retval pdFAIL 越界或任务不存在
  * @note 与 PI/DPCP 共存时 base_prio 更新，有效 prio 可能仍被抬升
  * @warning 降低持锁任务优先级可能加剧优先级反转窗口
- * @attention ❌ ISR；✅ 可能 yield
+ * @attention ❌ 不允许在中断上下文调用；✅ 会阻塞/引起调度
  */
 int cgrtos_task_set_priority(task_id_t id, uint8_t prio);
 
@@ -764,7 +807,7 @@ int cgrtos_task_set_priority(task_id_t id, uint8_t prio);
  * @retval pdFAIL 参数非法或任务不存在
  * @note 默认 create 时 thresh=prio（经典抢占）
  * @warning 阈值过高会推迟高优先级响应，仅用于短临界段降抖动
- * @attention ❌ ISR；✅ 可能 yield
+ * @attention ❌ 不允许在中断上下文调用；✅ 会阻塞/引起调度
  */
 int cgrtos_task_set_preempt_threshold(task_id_t id, uint8_t thresh);
 
@@ -777,7 +820,7 @@ int cgrtos_task_set_preempt_threshold(task_id_t id, uint8_t thresh);
  * @retval 0 亦可能表示无效任务，调用方应先校验 id
  * @note 无
  * @warning 无
- * @attention ❌ ISR（持 g_klock）；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度（持 g_klock）
  */
 uint8_t cgrtos_task_get_preempt_threshold(task_id_t id);
 #endif
@@ -789,7 +832,7 @@ uint8_t cgrtos_task_get_preempt_threshold(task_id_t id);
  * @retval 无
  * @note idle 禁止退出
  * @warning 在持有互斥量时退出依赖 delete 的 force_release
- * @attention ❌ ISR；✅ 必定引起调度
+ * @attention ❌ 不允许在中断上下文调用；✅ 会阻塞/引起调度
  */
 void cgrtos_task_exit(void);
 
@@ -803,7 +846,7 @@ void cgrtos_task_exit(void);
  * @retval pdFAIL 无效任务
  * @note 可能伴随迁移 IPI
  * @warning 硬绑满核可能导致过载无法迁移
- * @attention ❌ ISR；✅ 可能引起切换
+ * @attention ❌ 不允许在中断上下文调用；✅ 会阻塞/引起调度
  */
 int cgrtos_task_set_affinity(task_id_t id, uint8_t cpu);
 
@@ -817,7 +860,7 @@ int cgrtos_task_set_affinity(task_id_t id, uint8_t cpu);
  * @retval pdFAIL 任务不存在或 CONFIG_USE_EDF=0
  * @note 仅对 SCHED_EDF 有意义
  * @warning 过短周期可能导致持续过载与错过 deadline
- * @attention ❌ ISR；❌ 通常不阻塞（arm 持 ready_lock）
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度（arm 持 ready_lock）
  */
 int cgrtos_task_set_period(task_id_t id, tick_t period);
 
@@ -831,7 +874,7 @@ int cgrtos_task_set_period(task_id_t id, tick_t period);
  * @retval pdFAIL 任务不存在
  * @note 无
  * @warning deadline 已过期时仍可能被选中运行（取决于 pick 规则）
- * @attention ❌ ISR；❌ 通常不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 int cgrtos_task_set_deadline(task_id_t id, tick_t deadline);
 
@@ -844,7 +887,7 @@ int cgrtos_task_set_deadline(task_id_t id, tick_t deadline);
  * @retval NULL    未找到
  * @note 应用应视 TCB 为只读句柄，禁止直接改字段
  * @warning 返回指针在任务删除后可能失效（UAF）
- * @attention ✅ 可在 ISR 调用（无锁查找，存在撕裂风险）；❌ 不阻塞
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度（无锁查找，存在撕裂风险）
  */
 cgrtos_task_t *cgrtos_task_get_handle(task_id_t id);
 
@@ -857,7 +900,7 @@ cgrtos_task_t *cgrtos_task_get_handle(task_id_t id);
  * @retval eInvalid 无效 ID
  * @note 无
  * @warning 无锁快照，SMP 下可能略有滞后
- * @attention ✅ ISR；❌ 不阻塞
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 eTaskState_t cgrtos_task_get_state(task_id_t id);
 
@@ -870,7 +913,7 @@ eTaskState_t cgrtos_task_get_state(task_id_t id);
  * @retval 0xFF 无效任务
  * @note 无
  * @warning 无
- * @attention ✅ ISR；❌ 不阻塞
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 uint8_t cgrtos_task_get_run_cpu(task_id_t id);
 
@@ -883,7 +926,7 @@ uint8_t cgrtos_task_get_run_cpu(task_id_t id);
  * @retval 0  无效任务或已几乎用尽
  * @note 需 CONFIG_CHECK_STACK_OVERFLOW 填栈才准确
  * @warning 非精确值，仅调试用
- * @attention ✅ 任务上下文更安全；❌ 不阻塞
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 uint32_t cgrtos_task_get_stack_high_water_mark(task_id_t id);
 
@@ -894,7 +937,7 @@ uint32_t cgrtos_task_get_stack_high_water_mark(task_id_t id);
  * @retval 无
  * @note 调度挂起时为空操作
  * @warning 无
- * @attention ❌ ISR（ISR 请用 yield_from_isr）；✅ 引起切换
+ * @attention ❌ 不允许在中断上下文调用；✅ 会阻塞/引起调度（ISR 请用 yield_from_isr）
  */
 void cgrtos_task_yield(void);
 
@@ -906,7 +949,7 @@ void cgrtos_task_yield(void);
  * @retval 无
  * @note ISR 中调用直接返回
  * @warning 关调度时 delay 不会真正阻塞切换
- * @attention ❌ ISR；✅ ticks>0 时阻塞并切换
+ * @attention ❌ 不允许在中断上下文调用；✅ 会阻塞/引起调度
  */
 void cgrtos_delay(tick_t ticks);
 
@@ -918,7 +961,7 @@ void cgrtos_delay(tick_t ticks);
  * @retval 无
  * @note 仅任务上下文
  * @warning 无
- * @attention ❌ ISR；✅ 可能阻塞
+ * @attention ❌ 不允许在中断上下文调用；✅ 会阻塞/引起调度
  */
 void cgrtos_delay_until_tick(tick_t wake);
 
@@ -930,7 +973,7 @@ void cgrtos_delay_until_tick(tick_t wake);
  * @retval 无
  * @note 仅任务上下文
  * @warning 无
- * @attention ❌ ISR；✅ 可能阻塞
+ * @attention ❌ 不允许在中断上下文调用；✅ 会阻塞/引起调度
  */
 void cgrtos_delay_ms(uint32_t ms);
 
@@ -942,7 +985,7 @@ void cgrtos_delay_ms(uint32_t ms);
  * @retval 无
  * @note ISR 中无操作
  * @warning 长 us 忙等会拉长关调度窗口外的占用
- * @attention ❌ ISR；✅ 可能阻塞（长延时）
+ * @attention ❌ 不允许在中断上下文调用；✅ 会阻塞/引起调度（长延时）
  */
 void cgrtos_delay_us(uint32_t us);
 
@@ -955,7 +998,7 @@ void cgrtos_delay_us(uint32_t us);
  * @retval 无
  * @note 用于周期任务对齐
  * @warning prev_wake 未正确维护会导致相位漂移
- * @attention ❌ ISR；✅ 可能阻塞
+ * @attention ❌ 不允许在中断上下文调用；✅ 会阻塞/引起调度
  */
 void cgrtos_delay_until(tick_t *prev_wake, tick_t increment);
 
@@ -970,7 +1013,7 @@ void cgrtos_delay_until(tick_t *prev_wake, tick_t increment);
  * @retval 任意 uint32_t 旧值
  * @note 无
  * @warning 与 ISR 通知并发时依赖临界区
- * @attention ❌ 阻塞型等待在 notify_wait；本 API ❌ ISR 请用 from_isr；✅ 可能唤醒切换
+ * @attention ❌ 不允许在中断上下文调用；✅ 会阻塞/引起调度
  */
 uint32_t cgrtos_task_notify(cgrtos_task_t *task, uint32_t value,
                             eNotifyAction_t action);
@@ -987,7 +1030,7 @@ uint32_t cgrtos_task_notify(cgrtos_task_t *task, uint32_t value,
  * @retval 0   超时或失败
  * @note 无
  * @warning 通知值本为 0 时与超时返回 0 可能混淆，请结合业务区分
- * @attention ❌ ISR；✅ 可能阻塞并切换
+ * @attention ❌ 不允许在中断上下文调用；✅ 会阻塞/引起调度
  */
 uint32_t cgrtos_task_notify_wait(uint32_t clear_on_entry, uint32_t clear_on_exit,
                                  uint32_t *value, tick_t timeout);
@@ -1003,7 +1046,7 @@ uint32_t cgrtos_task_notify_wait(uint32_t clear_on_entry, uint32_t clear_on_exit
  * @retval 任意 uint32_t
  * @note 须在允许的中断优先级内调用（见 IRQ 分组）
  * @warning 忽略 woken 且未自动 yield 可能导致延迟调度
- * @attention ✅ ISR；❌ 不阻塞调用 ISR
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 uint32_t cgrtos_task_notify_from_isr(cgrtos_task_t *task, uint32_t value,
                                      eNotifyAction_t action, BaseType_t *woken);
@@ -1019,7 +1062,7 @@ uint32_t cgrtos_task_notify_from_isr(cgrtos_task_t *task, uint32_t value,
  * @retval NULL    参数非法或池满
  * @note 对象在静态池中，用户不得 free 指针
  * @warning 无
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 cgrtos_sem_t *cgrtos_sem_create(int32_t init, int32_t max);
 
@@ -1031,7 +1074,7 @@ cgrtos_sem_t *cgrtos_sem_create(int32_t init, int32_t max);
  * @retval NULL    池满
  * @note 无
  * @warning 无
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 cgrtos_sem_t *cgrtos_sem_create_binary(void);
 
@@ -1046,7 +1089,7 @@ cgrtos_sem_t *cgrtos_sem_create_binary(void);
  * @retval NULL 参数非法
  * @note 无
  * @warning 勿对池对象与静态对象混用 delete 语义错误
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 cgrtos_sem_t *cgrtos_sem_create_static(cgrtos_sem_t *sem, int32_t init, int32_t max);
 
@@ -1062,7 +1105,7 @@ cgrtos_sem_t *cgrtos_sem_create_static(cgrtos_sem_t *sem, int32_t init, int32_t 
  * @retval errTIMEOUT 超时或非阻塞未取到
  * @note 等待队列按优先级排序
  * @warning 与 mutex 不同，无所有权，错误配对 give/take 会导致计数错乱
- * @attention ❌ 阻塞路径禁止 ISR；✅ timeout>0 且无令牌时阻塞并切换
+ * @attention ❌ 不允许在中断上下文调用；✅ 会阻塞/引起调度
  */
 int cgrtos_sem_take(cgrtos_sem_t *sem, tick_t timeout);
 
@@ -1075,7 +1118,7 @@ int cgrtos_sem_take(cgrtos_sem_t *sem, tick_t timeout);
  * @retval pdFAIL 参数错误
  * @note 可能挂接 QueueSet poke
  * @warning 无
- * @attention ❌ 建议任务上下文；✅ 唤醒时可能切换
+ * @attention ❌ 不允许在中断上下文调用；✅ 会阻塞/引起调度
  */
 int cgrtos_sem_give(cgrtos_sem_t *sem);
 
@@ -1089,7 +1132,7 @@ int cgrtos_sem_give(cgrtos_sem_t *sem);
  * @retval pdFAIL 参数错误
  * @note 无
  * @warning 无
- * @attention ✅ ISR；❌ 不阻塞
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 int cgrtos_sem_give_from_isr(cgrtos_sem_t *sem, BaseType_t *woken);
 
@@ -1102,7 +1145,7 @@ int cgrtos_sem_give_from_isr(cgrtos_sem_t *sem, BaseType_t *woken);
  * @retval pdFAIL 无令牌或参数错误
  * @note 无
  * @warning 无
- * @attention ✅ ISR；❌ 不阻塞
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 int cgrtos_sem_take_from_isr(cgrtos_sem_t *sem);
 
@@ -1115,7 +1158,7 @@ int cgrtos_sem_take_from_isr(cgrtos_sem_t *sem);
  * @retval pdFAIL 参数错误
  * @note 无
  * @warning 删除后禁止再使用指针
- * @attention ❌ ISR；✅ 可能切换
+ * @attention ❌ 不允许在中断上下文调用；✅ 会阻塞/引起调度
  */
 int cgrtos_sem_delete(cgrtos_sem_t *sem);
 
@@ -1127,7 +1170,7 @@ int cgrtos_sem_delete(cgrtos_sem_t *sem);
  * @retval NULL    池满
  * @note 支持递归加锁（上限 CONFIG_MUTEX_MAX_RECURSIVE）
  * @warning 勿在 ISR 中 lock
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 cgrtos_mutex_t *cgrtos_mutex_create(void);
 
@@ -1142,7 +1185,7 @@ cgrtos_mutex_t *cgrtos_mutex_create(void);
  * @retval NULL    参数非法或池满
  * @note 与动态 PI 互斥
  * @warning 天花板过低无法抑制反转；过高影响其他任务
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 cgrtos_mutex_t *cgrtos_mutex_create_dpcp(uint8_t ceiling_prio, tick_t ceiling_rel);
 
@@ -1157,7 +1200,7 @@ cgrtos_mutex_t *cgrtos_mutex_create_dpcp(uint8_t ceiling_prio, tick_t ceiling_re
  * @retval pdFAIL 参数非法或仍有 owner
  * @note 无
  * @warning 无
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 int cgrtos_mutex_set_ceiling(cgrtos_mutex_t *mutex, uint8_t ceiling_prio,
                              tick_t ceiling_rel);
@@ -1172,7 +1215,7 @@ int cgrtos_mutex_set_ceiling(cgrtos_mutex_t *mutex, uint8_t ceiling_prio,
  * @retval NULL  参数非法
  * @note 无
  * @warning 无
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 cgrtos_mutex_t *cgrtos_mutex_create_static(cgrtos_mutex_t *mutex);
 
@@ -1190,7 +1233,7 @@ cgrtos_mutex_t *cgrtos_mutex_create_static(cgrtos_mutex_t *mutex);
  * @retval errOVERFLOW  递归超过上限
  * @note 须与 unlock 成对
  * @warning 错误的锁顺序仍可能导致未被检测的死锁；持锁期间勿长时间阻塞其他资源
- * @attention ❌ ISR；✅ 可能阻塞并切换；可能触发优先级继承
+ * @attention ❌ 不允许在中断上下文调用；✅ 会阻塞/引起调度
  */
 int cgrtos_mutex_lock(cgrtos_mutex_t *mutex, tick_t timeout);
 
@@ -1203,7 +1246,7 @@ int cgrtos_mutex_lock(cgrtos_mutex_t *mutex, tick_t timeout);
  * @retval pdFAIL 非 owner 或参数非法
  * @note 无
  * @warning 非持有者 unlock 失败
- * @attention ❌ ISR；✅ 可能切换
+ * @attention ❌ 不允许在中断上下文调用；✅ 会阻塞/引起调度
  */
 int cgrtos_mutex_unlock(cgrtos_mutex_t *mutex);
 
@@ -1216,7 +1259,7 @@ int cgrtos_mutex_unlock(cgrtos_mutex_t *mutex);
  * @retval pdFAIL 失败
  * @note 无
  * @warning 仍有 owner 时行为以实现为准，应先确保解锁
- * @attention ❌ ISR；✅ 可能切换
+ * @attention ❌ 不允许在中断上下文调用；✅ 会阻塞/引起调度
  */
 int cgrtos_mutex_delete(cgrtos_mutex_t *mutex);
 /**
@@ -1228,7 +1271,7 @@ int cgrtos_mutex_delete(cgrtos_mutex_t *mutex);
  * @retval >0 当前递归深度（不含 base lock）
  * @note 只读查询，不改变锁状态
  * @warning 与 lock/unlock 并发时数值为快照
- * @attention ❌ ISR（临界区）；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度（临界区）
  */
 uint32_t cgrtos_mutex_get_recursive_count(cgrtos_mutex_t *mutex);
 /**
@@ -1240,7 +1283,7 @@ uint32_t cgrtos_mutex_get_recursive_count(cgrtos_mutex_t *mutex);
  * @retval NULL    无人持有或参数非法
  * @note 只读查询
  * @warning 与 lock/unlock 并发时指针为快照
- * @attention ❌ ISR（临界区）；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度（临界区）
  */
 cgrtos_task_t *cgrtos_mutex_get_holder(cgrtos_mutex_t *mutex);
 /**
@@ -1251,7 +1294,7 @@ cgrtos_task_t *cgrtos_mutex_get_holder(cgrtos_mutex_t *mutex);
  * @retval 无
  * @note 防止持锁任务被删导致等待者永久阻塞
  * @warning 须在任务删除路径调用；可能改变其它任务优先级
- * @attention ❌ ISR；✅ 可能切换
+ * @attention ❌ 不允许在中断上下文调用；✅ 会阻塞/引起调度
  */
 void cgrtos_mutex_force_release_owned(cgrtos_task_t *task);
 
@@ -1265,7 +1308,7 @@ void cgrtos_mutex_force_release_owned(cgrtos_task_t *task);
  * @retval NULL    参数非法、池满或堆不足
  * @note delete 时会 free 动态缓冲
  * @warning 无
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 cgrtos_queue_t *cgrtos_queue_create(uint32_t len, uint32_t item_sz);
 /**
@@ -1280,7 +1323,7 @@ cgrtos_queue_t *cgrtos_queue_create(uint32_t len, uint32_t item_sz);
  * @retval NULL  参数非法
  * @note 不占用全局池计数
  * @warning storage 生命周期须覆盖队列使用期
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 cgrtos_queue_t *cgrtos_queue_create_static(cgrtos_queue_t *q, void *storage,
                                            uint32_t len, uint32_t item_sz);
@@ -1298,7 +1341,7 @@ cgrtos_queue_t *cgrtos_queue_create_static(cgrtos_queue_t *q, void *storage,
  * @retval pdFAIL         超时或被 delete 唤醒
  * @note 唤醒后 timeout 置 0 重试
  * @warning data 在拷贝完成前须保持有效
- * @attention ❌ ISR；✅ 可能阻塞并切换
+ * @attention ❌ 不允许在中断上下文调用；✅ 会阻塞/引起调度
  */
 int cgrtos_queue_send(cgrtos_queue_t *q, const void *data, tick_t timeout);
 /**
@@ -1315,7 +1358,7 @@ int cgrtos_queue_send(cgrtos_queue_t *q, const void *data, tick_t timeout);
  * @retval pdFAIL          超时或被 delete 唤醒
  * @note 唤醒后 timeout 置 0 重试
  * @warning 无
- * @attention ❌ ISR；✅ 可能阻塞并切换
+ * @attention ❌ 不允许在中断上下文调用；✅ 会阻塞/引起调度
  */
 int cgrtos_queue_receive(cgrtos_queue_t *q, void *buf, tick_t timeout);
 /**
@@ -1330,7 +1373,7 @@ int cgrtos_queue_receive(cgrtos_queue_t *q, void *buf, tick_t timeout);
  * @retval pdFAIL         参数非法
  * @note woken 语义同 sem_give_from_isr
  * @warning 无
- * @attention ✅ ISR；❌ 不阻塞
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 int cgrtos_queue_send_from_isr(cgrtos_queue_t *q, const void *data, BaseType_t *woken);
 /**
@@ -1345,7 +1388,7 @@ int cgrtos_queue_send_from_isr(cgrtos_queue_t *q, const void *data, BaseType_t *
  * @retval pdFAIL          参数非法
  * @note 无
  * @warning 无
- * @attention ✅ ISR；❌ 不阻塞
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 int cgrtos_queue_receive_from_isr(cgrtos_queue_t *q, void *buf, BaseType_t *woken);
 /**
@@ -1357,7 +1400,7 @@ int cgrtos_queue_receive_from_isr(cgrtos_queue_t *q, void *buf, BaseType_t *woke
  * @retval >0 待读条数
  * @note 只读查询
  * @warning 与 send/receive 并发时为快照
- * @attention ✅ ISR；❌ 不阻塞
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 uint32_t cgrtos_queue_messages_waiting(cgrtos_queue_t *q);
 /**
@@ -1369,7 +1412,7 @@ uint32_t cgrtos_queue_messages_waiting(cgrtos_queue_t *q);
  * @retval pdFAIL 参数非法
  * @note storage_static=1 时不 free 缓冲
  * @warning 删除后禁止再使用指针
- * @attention ❌ ISR；✅ 可能切换
+ * @attention ❌ 不允许在中断上下文调用；✅ 会阻塞/引起调度
  */
 int cgrtos_queue_delete(cgrtos_queue_t *q);
 
@@ -1386,7 +1429,7 @@ int cgrtos_queue_delete(cgrtos_queue_t *q);
  * @retval NULL    池满
  * @note 回调在 Tmr Svc 任务上下文执行
  * @warning period 为 0 时行为未定义
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 cgrtos_timer_t *cgrtos_timer_create(const char *name, timer_cb_t cb, void *arg,
                                     tick_t period, uint8_t periodic);
@@ -1399,7 +1442,7 @@ cgrtos_timer_t *cgrtos_timer_create(const char *name, timer_cb_t cb, void *arg,
  * @retval pdFAIL timer 为 NULL
  * @note 重复 start 会重新武装
  * @warning 须在任务上下文调用；ISR 请用 start_from_isr
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 int cgrtos_timer_start(cgrtos_timer_t *timer);
 /**
@@ -1411,7 +1454,7 @@ int cgrtos_timer_start(cgrtos_timer_t *timer);
  * @retval pdFAIL timer 为 NULL
  * @note 无
  * @warning ISR 请用 stop_from_isr
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 int cgrtos_timer_stop(cgrtos_timer_t *timer);
 /**
@@ -1423,7 +1466,7 @@ int cgrtos_timer_stop(cgrtos_timer_t *timer);
  * @retval pdFAIL timer 为 NULL
  * @note 无
  * @warning ISR 请用 reset_from_isr
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 int cgrtos_timer_reset(cgrtos_timer_t *timer);
 /**
@@ -1436,7 +1479,7 @@ int cgrtos_timer_reset(cgrtos_timer_t *timer);
  * @retval pdFAIL 参数非法
  * @note 无
  * @warning ISR 请用 change_period_from_isr
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 int cgrtos_timer_change_period(cgrtos_timer_t *timer, tick_t period);
 /**
@@ -1448,7 +1491,7 @@ int cgrtos_timer_change_period(cgrtos_timer_t *timer, tick_t period);
  * @retval pdFAIL 参数非法
  * @note 删除后禁止再使用指针
  * @warning 无
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 int cgrtos_timer_delete(cgrtos_timer_t *timer);
 /**
@@ -1461,7 +1504,7 @@ int cgrtos_timer_delete(cgrtos_timer_t *timer);
  * @retval pdFAIL 参数非法或命令队列满
  * @note 不在 ISR 内直接操作时间轮
  * @warning 无
- * @attention ✅ ISR；❌ 不阻塞
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 int cgrtos_timer_start_from_isr(cgrtos_timer_t *timer, BaseType_t *woken);
 /**
@@ -1474,7 +1517,7 @@ int cgrtos_timer_start_from_isr(cgrtos_timer_t *timer, BaseType_t *woken);
  * @retval pdFAIL 失败
  * @note 无
  * @warning 无
- * @attention ✅ ISR；❌ 不阻塞
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 int cgrtos_timer_stop_from_isr(cgrtos_timer_t *timer, BaseType_t *woken);
 /**
@@ -1487,7 +1530,7 @@ int cgrtos_timer_stop_from_isr(cgrtos_timer_t *timer, BaseType_t *woken);
  * @retval pdFAIL 失败
  * @note 无
  * @warning 无
- * @attention ✅ ISR；❌ 不阻塞
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 int cgrtos_timer_reset_from_isr(cgrtos_timer_t *timer, BaseType_t *woken);
 /**
@@ -1501,7 +1544,7 @@ int cgrtos_timer_reset_from_isr(cgrtos_timer_t *timer, BaseType_t *woken);
  * @retval pdFAIL 失败
  * @note 无
  * @warning 无
- * @attention ✅ ISR；❌ 不阻塞
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 int cgrtos_timer_change_period_from_isr(cgrtos_timer_t *timer, tick_t period,
                                         BaseType_t *woken);
@@ -1512,7 +1555,7 @@ int cgrtos_timer_change_period_from_isr(cgrtos_timer_t *timer, tick_t period,
  * @retval 无
  * @note 须在 cgrtos_start 之前或启动早期调用一次
  * @warning 重复调用可能泄漏资源
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 void cgrtos_timer_init(void);
 
@@ -1524,7 +1567,7 @@ void cgrtos_timer_init(void);
  * @retval NULL    池满
  * @note 对象在静态池中，用户不得 free 指针
  * @warning 无
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 cgrtos_event_group_t *cgrtos_event_group_create(void);
 /**
@@ -1536,7 +1579,7 @@ cgrtos_event_group_t *cgrtos_event_group_create(void);
  * @retval NULL   参数非法
  * @note 无
  * @warning eg 生命周期须覆盖使用期
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 cgrtos_event_group_t *cgrtos_event_group_create_static(cgrtos_event_group_t *eg);
 /**
@@ -1549,7 +1592,7 @@ cgrtos_event_group_t *cgrtos_event_group_create_static(cgrtos_event_group_t *eg)
  * @retval 0     eg 为 NULL
  * @note 无
  * @warning 无
- * @attention ❌ ISR；✅ 可能切换
+ * @attention ❌ 不允许在中断上下文调用；✅ 会阻塞/引起调度
  */
 event_flags_t cgrtos_event_group_set(cgrtos_event_group_t *eg, event_flags_t flags);
 /**
@@ -1563,7 +1606,7 @@ event_flags_t cgrtos_event_group_set(cgrtos_event_group_t *eg, event_flags_t fla
  * @retval 0     eg 为 NULL
  * @note 无
  * @warning 无
- * @attention ✅ ISR；❌ 不阻塞
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 event_flags_t cgrtos_event_group_set_from_isr(cgrtos_event_group_t *eg,
                                               event_flags_t flags,
@@ -1578,7 +1621,7 @@ event_flags_t cgrtos_event_group_set_from_isr(cgrtos_event_group_t *eg,
  * @retval 0     eg 为 NULL
  * @note 无
  * @warning 无
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 event_flags_t cgrtos_event_group_clear(cgrtos_event_group_t *eg, event_flags_t flags);
 /**
@@ -1591,7 +1634,7 @@ event_flags_t cgrtos_event_group_clear(cgrtos_event_group_t *eg, event_flags_t f
  * @retval 0     eg 为 NULL
  * @note 无
  * @warning 无
- * @attention ✅ ISR；❌ 不阻塞
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 event_flags_t cgrtos_event_group_clear_from_isr(cgrtos_event_group_t *eg,
                                                 event_flags_t flags);
@@ -1607,7 +1650,7 @@ event_flags_t cgrtos_event_group_clear_from_isr(cgrtos_event_group_t *eg,
  * @retval 0     超时、参数错误或 eg 为空
  * @note 无
  * @warning 无
- * @attention ❌ ISR；✅ 可能阻塞并切换
+ * @attention ❌ 不允许在中断上下文调用；✅ 会阻塞/引起调度
  */
 event_flags_t cgrtos_event_group_wait(cgrtos_event_group_t *eg, event_flags_t flags,
                                       uint8_t wait_all, tick_t timeout);
@@ -1624,7 +1667,7 @@ event_flags_t cgrtos_event_group_wait(cgrtos_event_group_t *eg, event_flags_t fl
  * @retval 0     超时或参数错误
  * @note 无
  * @warning 无
- * @attention ❌ ISR；✅ 可能阻塞并切换
+ * @attention ❌ 不允许在中断上下文调用；✅ 会阻塞/引起调度
  */
 event_flags_t cgrtos_event_group_wait_bits(cgrtos_event_group_t *eg, event_flags_t flags,
                                            uint8_t clear_on_exit, uint8_t wait_all,
@@ -1638,7 +1681,7 @@ event_flags_t cgrtos_event_group_wait_bits(cgrtos_event_group_t *eg, event_flags
  * @retval >0 当前标志
  * @note 只读查询
  * @warning 与 set/clear 并发时为快照
- * @attention ✅ ISR；❌ 不阻塞
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 event_flags_t cgrtos_event_group_get(cgrtos_event_group_t *eg);
 /**
@@ -1650,7 +1693,7 @@ event_flags_t cgrtos_event_group_get(cgrtos_event_group_t *eg);
  * @retval pdFAIL 参数非法
  * @note 删除后禁止再使用指针
  * @warning 无
- * @attention ❌ ISR；✅ 可能切换
+ * @attention ❌ 不允许在中断上下文调用；✅ 会阻塞/引起调度
  */
 int cgrtos_event_group_delete(cgrtos_event_group_t *eg);
 
@@ -1669,7 +1712,7 @@ int cgrtos_event_group_delete(cgrtos_event_group_t *eg);
  * @retval NULL    池满、参数非法或堆不足
  * @note 可加入 QueueSet
  * @warning 无
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 cgrtos_stream_buffer_t *cgrtos_stream_buffer_create(uint32_t size, uint32_t trigger);
 /**
@@ -1684,7 +1727,7 @@ cgrtos_stream_buffer_t *cgrtos_stream_buffer_create(uint32_t size, uint32_t trig
  * @retval 0  超时、参数错误或不可写
  * @note 可能只写部分数据
  * @warning data 在拷贝完成前须保持有效
- * @attention ❌ ISR；✅ 可能阻塞并切换
+ * @attention ❌ 不允许在中断上下文调用；✅ 会阻塞/引起调度
  */
 size_t cgrtos_stream_buffer_send(cgrtos_stream_buffer_t *sb, const void *data,
                                  size_t len, tick_t timeout);
@@ -1700,7 +1743,7 @@ size_t cgrtos_stream_buffer_send(cgrtos_stream_buffer_t *sb, const void *data,
  * @retval 0  参数错误或队列满
  * @note 无
  * @warning 无
- * @attention ✅ ISR；❌ 不阻塞
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 size_t cgrtos_stream_buffer_send_from_isr(cgrtos_stream_buffer_t *sb, const void *data,
                                           size_t len, BaseType_t *woken);
@@ -1716,7 +1759,7 @@ size_t cgrtos_stream_buffer_send_from_isr(cgrtos_stream_buffer_t *sb, const void
  * @retval 0  超时、参数错误或数据不足
  * @note 可能只读部分数据
  * @warning 无
- * @attention ❌ ISR；✅ 可能阻塞并切换
+ * @attention ❌ 不允许在中断上下文调用；✅ 会阻塞/引起调度
  */
 size_t cgrtos_stream_buffer_recv(cgrtos_stream_buffer_t *sb, void *buf, size_t len,
                                  tick_t timeout);
@@ -1732,7 +1775,7 @@ size_t cgrtos_stream_buffer_recv(cgrtos_stream_buffer_t *sb, void *buf, size_t l
  * @retval 0  无数据或参数错误
  * @note 无
  * @warning 无
- * @attention ✅ ISR；❌ 不阻塞
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 size_t cgrtos_stream_buffer_recv_from_isr(cgrtos_stream_buffer_t *sb, void *buf,
                                           size_t len, BaseType_t *woken);
@@ -1745,7 +1788,7 @@ size_t cgrtos_stream_buffer_recv_from_isr(cgrtos_stream_buffer_t *sb, void *buf,
  * @retval pdFAIL 参数非法
  * @note 无
  * @warning 丢弃全部未读数据
- * @attention ❌ ISR；✅ 可能切换
+ * @attention ❌ 不允许在中断上下文调用；✅ 会阻塞/引起调度
  */
 int cgrtos_stream_buffer_reset(cgrtos_stream_buffer_t *sb);
 /**
@@ -1757,7 +1800,7 @@ int cgrtos_stream_buffer_reset(cgrtos_stream_buffer_t *sb);
  * @retval pdFAIL 参数非法
  * @note 删除后禁止再使用指针
  * @warning 无
- * @attention ❌ ISR；✅ 可能切换
+ * @attention ❌ 不允许在中断上下文调用；✅ 会阻塞/引起调度
  */
 int cgrtos_stream_buffer_delete(cgrtos_stream_buffer_t *sb);
 /**
@@ -1769,7 +1812,7 @@ int cgrtos_stream_buffer_delete(cgrtos_stream_buffer_t *sb);
  * @retval >0 可读字节
  * @note 只读查询
  * @warning 与 send/recv 并发时为快照
- * @attention ✅ ISR；❌ 不阻塞
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 uint32_t cgrtos_stream_buffer_bytes_available(cgrtos_stream_buffer_t *sb);
 /**
@@ -1781,7 +1824,7 @@ uint32_t cgrtos_stream_buffer_bytes_available(cgrtos_stream_buffer_t *sb);
  * @retval >0 剩余空间
  * @note 只读查询
  * @warning 与 send/recv 并发时为快照
- * @attention ✅ ISR；❌ 不阻塞
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 uint32_t cgrtos_stream_buffer_spaces_available(cgrtos_stream_buffer_t *sb);
 
@@ -1794,7 +1837,7 @@ uint32_t cgrtos_stream_buffer_spaces_available(cgrtos_stream_buffer_t *sb);
  * @retval NULL    池满或堆不足
  * @note 每条消息带 2 字节 LE 长度前缀
  * @warning size 过小将无法发送较长消息
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 cgrtos_message_buffer_t *cgrtos_message_buffer_create(uint32_t size);
 /**
@@ -1809,7 +1852,7 @@ cgrtos_message_buffer_t *cgrtos_message_buffer_create(uint32_t size);
  * @retval 0   超时、参数错误或空间不足
  * @note 不部分写入
  * @warning data 在拷贝完成前须保持有效
- * @attention ❌ ISR；✅ 可能阻塞并切换
+ * @attention ❌ 不允许在中断上下文调用；✅ 会阻塞/引起调度
  */
 size_t cgrtos_message_buffer_send(cgrtos_message_buffer_t *mb, const void *data,
                                   size_t len, tick_t timeout);
@@ -1825,7 +1868,7 @@ size_t cgrtos_message_buffer_send(cgrtos_message_buffer_t *mb, const void *data,
  * @retval 0  超时、无消息、buf 过小或参数错误
  * @note 无
  * @warning buf_len 须 ≥ 消息长度
- * @attention ❌ ISR；✅ 可能阻塞并切换
+ * @attention ❌ 不允许在中断上下文调用；✅ 会阻塞/引起调度
  */
 size_t cgrtos_message_buffer_recv(cgrtos_message_buffer_t *mb, void *buf, size_t buf_len,
                                   tick_t timeout);
@@ -1841,7 +1884,7 @@ size_t cgrtos_message_buffer_recv(cgrtos_message_buffer_t *mb, void *buf, size_t
  * @retval 0   空间不足或参数错误
  * @note 无
  * @warning 无
- * @attention ✅ ISR；❌ 不阻塞
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 size_t cgrtos_message_buffer_send_from_isr(cgrtos_message_buffer_t *mb, const void *data,
                                            size_t len, BaseType_t *woken);
@@ -1857,7 +1900,7 @@ size_t cgrtos_message_buffer_send_from_isr(cgrtos_message_buffer_t *mb, const vo
  * @retval 0  无消息、buf 过小或参数错误
  * @note 无
  * @warning 无
- * @attention ✅ ISR；❌ 不阻塞
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 size_t cgrtos_message_buffer_recv_from_isr(cgrtos_message_buffer_t *mb, void *buf,
                                            size_t buf_len, BaseType_t *woken);
@@ -1870,7 +1913,7 @@ size_t cgrtos_message_buffer_recv_from_isr(cgrtos_message_buffer_t *mb, void *bu
  * @retval pdFAIL 参数非法
  * @note 删除后禁止再使用指针
  * @warning 无
- * @attention ❌ ISR；✅ 可能切换
+ * @attention ❌ 不允许在中断上下文调用；✅ 会阻塞/引起调度
  */
 int cgrtos_message_buffer_delete(cgrtos_message_buffer_t *mb);
 /** @} */
@@ -1889,7 +1932,7 @@ int cgrtos_message_buffer_delete(cgrtos_message_buffer_t *mb);
  * @retval NULL    池满
  * @note 成员对象须通过 add_* 注册
  * @warning 无
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 cgrtos_queue_set_t *cgrtos_queue_set_create(uint32_t length);
 /**
@@ -1902,7 +1945,7 @@ cgrtos_queue_set_t *cgrtos_queue_set_create(uint32_t length);
  * @retval pdFAIL 参数非法或已加入其它 set
  * @note 无
  * @warning 同一对象只能属于一个 set
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 int cgrtos_queue_set_add_queue(cgrtos_queue_set_t *set, cgrtos_queue_t *q);
 /**
@@ -1915,7 +1958,7 @@ int cgrtos_queue_set_add_queue(cgrtos_queue_set_t *set, cgrtos_queue_t *q);
  * @retval pdFAIL 参数非法或已加入其它 set
  * @note 无
  * @warning 同一对象只能属于一个 set
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 int cgrtos_queue_set_add_sem(cgrtos_queue_set_t *set, cgrtos_sem_t *sem);
 /**
@@ -1928,7 +1971,7 @@ int cgrtos_queue_set_add_sem(cgrtos_queue_set_t *set, cgrtos_sem_t *sem);
  * @retval pdFAIL 参数非法或已加入其它 set
  * @note MessageBuffer 与 StreamBuffer 共用底层类型
  * @warning 同一对象只能属于一个 set
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 int cgrtos_queue_set_add_stream(cgrtos_queue_set_t *set, cgrtos_stream_buffer_t *sb);
 /**
@@ -1941,7 +1984,7 @@ int cgrtos_queue_set_add_stream(cgrtos_queue_set_t *set, cgrtos_stream_buffer_t 
  * @retval pdFAIL 参数非法或未找到
  * @note 不删除成员对象本身
  * @warning 无
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 int cgrtos_queue_set_remove(cgrtos_queue_set_t *set, void *obj);
 /**
@@ -1954,7 +1997,7 @@ int cgrtos_queue_set_remove(cgrtos_queue_set_t *set, void *obj);
  * @retval NULL    超时或参数错误
  * @note 返回后仍须对该对象再 take/recv；不自动消费数据
  * @warning 无
- * @attention ❌ ISR；✅ 可能阻塞并切换
+ * @attention ❌ 不允许在中断上下文调用；✅ 会阻塞/引起调度
  */
 void *cgrtos_queue_set_select(cgrtos_queue_set_t *set, tick_t timeout);
 /**
@@ -1966,7 +2009,7 @@ void *cgrtos_queue_set_select(cgrtos_queue_set_t *set, tick_t timeout);
  * @retval pdFAIL 参数非法
  * @note 删除后禁止再使用指针
  * @warning 无
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 int cgrtos_queue_set_delete(cgrtos_queue_set_t *set);
 /**
@@ -1978,7 +2021,7 @@ int cgrtos_queue_set_delete(cgrtos_queue_set_t *set);
  * @retval 无
  * @note 应用层一般无需直接调用
  * @warning 须在持有临界区或 IPC 路径内调用
- * @attention ✅ ISR；❌ 不阻塞；✅ 可能唤醒 select 等待者
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 void cgrtos_queue_set_poke(cgrtos_queue_set_t *set, void *obj);
 /** @} */
@@ -1995,7 +2038,7 @@ void cgrtos_queue_set_poke(cgrtos_queue_set_t *set, void *obj);
  * @retval 无
  * @note 重复调用安全
  * @warning 须在堆初始化之后调用
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 void cgrtos_fs_init(void);
 /**
@@ -2008,7 +2051,7 @@ void cgrtos_fs_init(void);
  * @retval -1  失败
  * @note 全局 FS 互斥串行化
  * @warning 目录路径不可打开为文件
- * @attention ❌ ISR；✅ 可能阻塞（FS 互斥）
+ * @attention ❌ 不允许在中断上下文调用；✅ 会阻塞/引起调度（FS 互斥）
  */
 int cgrtos_fs_open(const char *path, int flags);
 /**
@@ -2020,7 +2063,7 @@ int cgrtos_fs_open(const char *path, int flags);
  * @retval -1 失败
  * @note 无
  * @warning 无
- * @attention ❌ ISR；✅ 可能阻塞（FS 互斥）
+ * @attention ❌ 不允许在中断上下文调用；✅ 会阻塞/引起调度（FS 互斥）
  */
 int cgrtos_fs_close(int fd);
 /**
@@ -2034,7 +2077,7 @@ int cgrtos_fs_close(int fd);
  * @retval -1 失败
  * @note 无
  * @warning 无
- * @attention ❌ ISR；✅ 可能阻塞（FS 互斥）
+ * @attention ❌ 不允许在中断上下文调用；✅ 会阻塞/引起调度（FS 互斥）
  */
 int cgrtos_fs_read(int fd, void *buf, size_t len);
 /**
@@ -2048,7 +2091,7 @@ int cgrtos_fs_read(int fd, void *buf, size_t len);
  * @retval -1 失败
  * @note 可能触发堆扩容
  * @warning 只读打开时失败
- * @attention ❌ ISR；✅ 可能阻塞（FS 互斥）
+ * @attention ❌ 不允许在中断上下文调用；✅ 会阻塞/引起调度（FS 互斥）
  */
 int cgrtos_fs_write(int fd, const void *buf, size_t len);
 /**
@@ -2062,7 +2105,7 @@ int cgrtos_fs_write(int fd, const void *buf, size_t len);
  * @retval -1 失败
  * @note 负偏移会被钳制为 0
  * @warning 无
- * @attention ❌ ISR；✅ 可能阻塞（FS 互斥）
+ * @attention ❌ 不允许在中断上下文调用；✅ 会阻塞/引起调度（FS 互斥）
  */
 long cgrtos_fs_lseek(int fd, long off, int whence);
 /**
@@ -2074,7 +2117,7 @@ long cgrtos_fs_lseek(int fd, long off, int whence);
  * @retval -1 失败
  * @note 不能删除目录
  * @warning 无
- * @attention ❌ ISR；✅ 可能阻塞（FS 互斥）
+ * @attention ❌ 不允许在中断上下文调用；✅ 会阻塞/引起调度（FS 互斥）
  */
 int cgrtos_fs_unlink(const char *path);
 /**
@@ -2086,7 +2129,7 @@ int cgrtos_fs_unlink(const char *path);
  * @retval -1 失败
  * @note 无
  * @warning 不会递归创建父目录
- * @attention ❌ ISR；✅ 可能阻塞（FS 互斥）
+ * @attention ❌ 不允许在中断上下文调用；✅ 会阻塞/引起调度（FS 互斥）
  */
 int cgrtos_fs_mkdir(const char *path);
 /**
@@ -2098,7 +2141,7 @@ int cgrtos_fs_mkdir(const char *path);
  * @retval -1 失败（非空或不存在）
  * @note 无
  * @warning 非空目录无法删除
- * @attention ❌ ISR；✅ 可能阻塞（FS 互斥）
+ * @attention ❌ 不允许在中断上下文调用；✅ 会阻塞/引起调度（FS 互斥）
  */
 int cgrtos_fs_rmdir(const char *path);
 /**
@@ -2111,7 +2154,7 @@ int cgrtos_fs_rmdir(const char *path);
  * @retval -1 失败
  * @note 无
  * @warning 无
- * @attention ❌ ISR；✅ 可能阻塞（FS 互斥）
+ * @attention ❌ 不允许在中断上下文调用；✅ 会阻塞/引起调度（FS 互斥）
  */
 int cgrtos_fs_stat(const char *path, cgrtos_stat_t *st);
 /**
@@ -2123,7 +2166,7 @@ int cgrtos_fs_stat(const char *path, cgrtos_stat_t *st);
  * @retval NULL    失败或目录句柄池满（最多 8 个）
  * @note 须 paired closedir
  * @warning 无
- * @attention ❌ ISR；✅ 可能阻塞（FS 互斥）
+ * @attention ❌ 不允许在中断上下文调用；✅ 会阻塞/引起调度（FS 互斥）
  */
 cgrtos_dir_t *cgrtos_fs_opendir(const char *path);
 /**
@@ -2137,7 +2180,7 @@ cgrtos_dir_t *cgrtos_fs_opendir(const char *path);
  * @retval -1 失败
  * @note 无
  * @warning 无
- * @attention ❌ ISR；✅ 可能阻塞（FS 互斥）
+ * @attention ❌ 不允许在中断上下文调用；✅ 会阻塞/引起调度（FS 互斥）
  */
 int cgrtos_fs_readdir(cgrtos_dir_t *dir, cgrtos_dirent_t *out);
 /**
@@ -2149,7 +2192,7 @@ int cgrtos_fs_readdir(cgrtos_dir_t *dir, cgrtos_dirent_t *out);
  * @retval -1 失败
  * @note 无
  * @warning 无
- * @attention ❌ ISR；✅ 可能阻塞（FS 互斥）
+ * @attention ❌ 不允许在中断上下文调用；✅ 会阻塞/引起调度（FS 互斥）
  */
 int cgrtos_fs_closedir(cgrtos_dir_t *dir);
 /**
@@ -2160,7 +2203,7 @@ int cgrtos_fs_closedir(cgrtos_dir_t *dir);
  * @retval -1 内部错误
  * @note 幂等；会丢弃全部用户数据
  * @warning 危险操作；CLI 须交互确认
- * @attention ❌ ISR；✅ 可能阻塞（互斥）
+ * @attention ❌ 不允许在中断上下文调用；✅ 会阻塞/引起调度（互斥）
  */
 int cgrtos_fs_format(void);
 /**
@@ -2170,7 +2213,7 @@ int cgrtos_fs_format(void);
  * @retval 0 成功
  * @note 无持久化介质时无实际 I/O
  * @warning 无
- * @attention ❌ ISR；✅ 可能阻塞
+ * @attention ❌ 不允许在中断上下文调用；✅ 会阻塞/引起调度
  */
 int cgrtos_fs_sync(void);
 /**
@@ -2182,7 +2225,7 @@ int cgrtos_fs_sync(void);
  * @retval -1 st 为空
  * @note 供 df/fbench 使用
  * @warning 无
- * @attention ❌ ISR；✅ 可能阻塞
+ * @attention ❌ 不允许在中断上下文调用；✅ 会阻塞/引起调度
  */
 int cgrtos_fs_statfs(cgrtos_statfs_t *st);
 /**
@@ -2195,7 +2238,7 @@ int cgrtos_fs_statfs(cgrtos_statfs_t *st);
  * @retval -1 路径非法、跨非法、目标已存在或非空目录策略失败
  * @note 目录仅支持空目录移动（与 rmdir 一致约束）
  * @warning 打开中的 fd 仍指向同一 inode
- * @attention ❌ ISR；✅ 可能阻塞
+ * @attention ❌ 不允许在中断上下文调用；✅ 会阻塞/引起调度
  */
 int cgrtos_fs_rename(const char *oldpath, const char *newpath);
 /** @} */
@@ -2209,7 +2252,7 @@ int cgrtos_fs_rename(const char *oldpath, const char *newpath);
  * @retval NULL    堆不足或参数非法
  * @note 与 cgrtos_free 成对；对象生命周期须由调用方管理
  * @warning 非 ISR 安全；持 g_klock 或堆锁，ISR 中调用可能死锁
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 void *cgrtos_malloc(unsigned long size);
 /**
@@ -2222,7 +2265,7 @@ void *cgrtos_malloc(unsigned long size);
  * @retval NULL    溢出/堆不足
  * @note 无
  * @warning 同 cgrtos_malloc，禁止 ISR 调用
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 void *cgrtos_calloc(unsigned long count, unsigned long size);
 /**
@@ -2233,7 +2276,7 @@ void *cgrtos_calloc(unsigned long count, unsigned long size);
  * @retval 无
  * @note 禁止双重释放；禁止释放非堆指针
  * @warning 非 ISR 安全
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 void cgrtos_free(void *ptr);
 /**
@@ -2243,7 +2286,7 @@ void cgrtos_free(void *ptr);
  * @retval >=0 空闲字节估测
  * @note 快照值，并发分配时可能瞬时变化
  * @warning 无
- * @attention ✅ 只读（短临界）；❌ 不阻塞
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度（短临界）
  */
 unsigned long cgrtos_get_free_heap(void);
 /**
@@ -2253,7 +2296,7 @@ unsigned long cgrtos_get_free_heap(void);
  * @retval >=0 字节数
  * @note 用于检测内存泄漏趋势
  * @warning 无
- * @attention ✅ 只读（短临界）；❌ 不阻塞
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度（短临界）
  */
 unsigned long cgrtos_get_min_free_heap(void);
 
@@ -2266,7 +2309,7 @@ unsigned long cgrtos_get_min_free_heap(void);
  * @retval 无
  * @note 钩子须短小非阻塞；勿在 idle 中阻塞或分配堆
  * @warning 钩子内阻塞会饿死低优先级任务
- * @attention ❌ ISR；❌ 不阻塞（钩子本身）
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度（钩子本身）
  */
 void cgrtos_set_idle_hook(cgrtos_hook_fn_t hook);
 /**
@@ -2277,7 +2320,7 @@ void cgrtos_set_idle_hook(cgrtos_hook_fn_t hook);
  * @retval 无
  * @note 在 tick ISR 上下文执行，须极短
  * @warning 延长 tick 钩子影响全局节拍精度
- * @attention ❌ 任务上下文注册；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 void cgrtos_set_tick_hook(cgrtos_hook_fn_t hook);
 /**
@@ -2288,7 +2331,7 @@ void cgrtos_set_tick_hook(cgrtos_hook_fn_t hook);
  * @retval 无
  * @note 钩子内勿再次 malloc
  * @warning 无
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 void cgrtos_set_malloc_failed_hook(cgrtos_malloc_failed_hook_t hook);
 #endif
@@ -2300,7 +2343,7 @@ void cgrtos_set_malloc_failed_hook(cgrtos_malloc_failed_hook_t hook);
  * @retval 无
  * @note 钩子返回后内核仍可能进入死循环
  * @warning 勿在钩子内再触发 assert
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 void cgrtos_set_assert_hook(cgrtos_assert_hook_t hook);
 /**
@@ -2311,7 +2354,7 @@ void cgrtos_set_assert_hook(cgrtos_assert_hook_t hook);
  * @retval 无
  * @note 默认路径随后仍会 assert halt
  * @warning 无
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 void cgrtos_set_stack_overflow_hook(cgrtos_stack_overflow_hook_t hook);
 
@@ -2324,7 +2367,7 @@ void cgrtos_set_stack_overflow_hook(cgrtos_stack_overflow_hook_t hook);
  * @retval 无
  * @note 无
  * @warning 无
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 void cgrtos_set_task_create_hook(cgrtos_hook_fn_t hook);
 /**
@@ -2335,7 +2378,7 @@ void cgrtos_set_task_create_hook(cgrtos_hook_fn_t hook);
  * @retval 无
  * @note 无
  * @warning 无
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 void cgrtos_set_task_delete_hook(cgrtos_hook_fn_t hook);
 /**
@@ -2346,7 +2389,7 @@ void cgrtos_set_task_delete_hook(cgrtos_hook_fn_t hook);
  * @retval 无
  * @note 用于测试/诊断非法 FromISR 用法
  * @warning 无
- * @attention ❌ 任务上下文注册；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 void cgrtos_set_isr_api_hook(cgrtos_hook_fn_t hook);
 /**
@@ -2357,7 +2400,7 @@ void cgrtos_set_isr_api_hook(cgrtos_hook_fn_t hook);
  * @retval 无
  * @note 无
  * @warning 无
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 void cgrtos_set_sched_error_hook(cgrtos_hook_fn_t hook);
 /**
@@ -2368,7 +2411,7 @@ void cgrtos_set_sched_error_hook(cgrtos_hook_fn_t hook);
  * @retval 无
  * @note 无
  * @warning 无
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 void cgrtos_set_irq_exception_hook(cgrtos_hook_fn_t hook);
 /**
@@ -2379,7 +2422,7 @@ void cgrtos_set_irq_exception_hook(cgrtos_hook_fn_t hook);
  * @retval 无
  * @note 无
  * @warning 无
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 void cgrtos_set_watchdog_hook(cgrtos_hook_fn_t hook);
 /**
@@ -2390,7 +2433,7 @@ void cgrtos_set_watchdog_hook(cgrtos_hook_fn_t hook);
  * @retval 无
  * @note 无
  * @warning 无
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 void cgrtos_set_crit_overrun_hook(cgrtos_hook_fn_t hook);
 #if CONFIG_IDLE_SLEEP_HOOK
@@ -2402,7 +2445,7 @@ void cgrtos_set_crit_overrun_hook(cgrtos_hook_fn_t hook);
  * @retval 无
  * @note 须可从中断唤醒
  * @warning 睡眠过久可能延迟 tick/IPI 响应
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 void cgrtos_set_idle_sleep_hook(cgrtos_hook_fn_t hook);
 #endif
@@ -2421,7 +2464,7 @@ typedef struct cgrtos_mempool cgrtos_mempool_t;
  * @retval NULL    参数非法
  * @note 池对象本身通常静态分配；delete 不释放 storage
  * @warning storage 生命周期须覆盖整个池使用期
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 cgrtos_mempool_t *cgrtos_mempool_create(void *storage, uint32_t block_size,
                                         uint32_t block_count);
@@ -2434,7 +2477,7 @@ cgrtos_mempool_t *cgrtos_mempool_create(void *storage, uint32_t block_size,
  * @retval NULL    池空或 pool 无效
  * @note 块须用 cgrtos_mempool_free 归还同一池
  * @warning 禁止跨池 free
- * @attention ❌ ISR（若池无锁保护）；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度（若池无锁保护）
  */
 void *cgrtos_mempool_alloc(cgrtos_mempool_t *pool);
 /**
@@ -2447,7 +2490,7 @@ void *cgrtos_mempool_alloc(cgrtos_mempool_t *pool);
  * @retval pdFAIL 参数非法或 ptr 不属于该池
  * @note 无
  * @warning 双重 free 可能导致链表损坏
- * @attention ❌ ISR（若池无锁保护）；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度（若池无锁保护）
  */
 int cgrtos_mempool_free(cgrtos_mempool_t *pool, void *ptr);
 /**
@@ -2459,7 +2502,7 @@ int cgrtos_mempool_free(cgrtos_mempool_t *pool, void *ptr);
  * @retval pdFAIL pool 无效
  * @note 销毁后禁止 alloc/free
  * @warning 仍有 outstanding 块时行为以实现为准
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 int cgrtos_mempool_delete(cgrtos_mempool_t *pool);
 /**
@@ -2471,7 +2514,7 @@ int cgrtos_mempool_delete(cgrtos_mempool_t *pool);
  * @retval 0    pool 无效
  * @note 快照值
  * @warning 无
- * @attention ✅ 只读；❌ 不阻塞
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 uint32_t cgrtos_mempool_free_count(cgrtos_mempool_t *pool);
 
@@ -2484,7 +2527,7 @@ uint32_t cgrtos_mempool_free_count(cgrtos_mempool_t *pool);
  * @retval 0 任务上下文
  * @note 由 IPC/调度内部调用
  * @warning 无
- * @attention ✅ 可在任意上下文查询；❌ 不阻塞
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 int cgrtos_reject_blocking_in_isr(void);
 /**
@@ -2495,7 +2538,7 @@ int cgrtos_reject_blocking_in_isr(void);
  * @retval 无
  * @note 由 cgrtos_enter_critical 内部调用
  * @warning 无
- * @attention ✅ 临界区内；❌ 不阻塞
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 void cgrtos_safety_on_crit_enter(uint8_t cpu);
 /**
@@ -2506,7 +2549,7 @@ void cgrtos_safety_on_crit_enter(uint8_t cpu);
  * @retval 无
  * @note 由 cgrtos_exit_critical 内部调用
  * @warning 无
- * @attention ✅ 临界区内；❌ 不阻塞
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 void cgrtos_safety_on_crit_exit(uint8_t cpu);
 /**
@@ -2516,7 +2559,7 @@ void cgrtos_safety_on_crit_exit(uint8_t cpu);
  * @retval >=0 计数
  * @note 诊断用
  * @warning 无
- * @attention ✅ 只读；❌ 不阻塞
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 uint32_t cgrtos_crit_overrun_count(void);
 /**
@@ -2527,7 +2570,7 @@ uint32_t cgrtos_crit_overrun_count(void);
  * @retval >=0 峰值
  * @note 诊断用
  * @warning 无
- * @attention ✅ 只读；❌ 不阻塞
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 uint64_t cgrtos_crit_max_cycles(uint8_t cpu);
 /**
@@ -2539,7 +2582,7 @@ uint64_t cgrtos_crit_max_cycles(uint8_t cpu);
  * @retval 无
  * @note 无
  * @warning 调用后不返回
- * @attention ❌ ISR 慎用（可能 UART 阻塞）；❌ 不返回
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度（可能 UART 阻塞）
  */
 void cgrtos_fatal_error(const char *reason, int code);
 /**
@@ -2549,7 +2592,7 @@ void cgrtos_fatal_error(const char *reason, int code);
  * @retval 无
  * @note 无
  * @warning 无
- * @attention ✅ 任务/ISR 均可；❌ 不阻塞
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 void cgrtos_watchdog_kick(void);
 
@@ -2567,7 +2610,7 @@ typedef struct {
  * @retval pdFAIL 硬件初始化失败
  * @note 由 cgrtos_init 或板级启动调用
  * @warning 无
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 int cgrtos_mpu_init(void);
 /**
@@ -2580,7 +2623,7 @@ int cgrtos_mpu_init(void);
  * @retval pdFAIL 参数非法或硬件拒绝
  * @note 无
  * @warning 错误配置可能导致访问 fault
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 int cgrtos_mpu_configure_region(uint32_t idx, const cgrtos_mpu_region_t *r);
 /**
@@ -2592,7 +2635,7 @@ int cgrtos_mpu_configure_region(uint32_t idx, const cgrtos_mpu_region_t *r);
  * @retval pdFAIL 任务不存在或 MPU 未初始化
  * @note 切换上下文时由调度器调用
  * @warning 无
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 int cgrtos_mpu_enable_task_isolation(task_id_t id);
 /**
@@ -2604,7 +2647,7 @@ int cgrtos_mpu_enable_task_isolation(task_id_t id);
  * @retval pdFAIL 任务不存在
  * @note 任务删除或切换全访问模式时调用
  * @warning 无
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 int cgrtos_mpu_disable_task_isolation(task_id_t id);
 
@@ -2617,16 +2660,17 @@ int cgrtos_mpu_disable_task_isolation(task_id_t id);
  * @retval 无
  * @note 影响后续 cgrtos_log 与 CGRTOS_LOG* 宏
  * @warning 无
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 void cgrtos_log_set_level(int level);
 /**
  * @brief 读取当前日志级别阈值
+ * @details 返回最近一次 cgrtos_log_set_level 设置的过滤阈值（默认 CONFIG_LOG_LEVEL）。
  * @return 当前 level
- * @retval 0..4 级别值
- * @note 无
+ * @retval 0..4 级别值（NONE..DEBUG）
+ * @note 与 CGRTOS_LOG* 宏过滤一致
  * @warning 无
- * @attention ✅ 只读；❌ 不阻塞
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 int cgrtos_log_get_level(void);
 /**
@@ -2639,18 +2683,21 @@ int cgrtos_log_get_level(void);
  * @retval 无
  * @note CONFIG_USE_KLOG=0 时为空操作
  * @warning 可能阻塞等待 TX FIFO；非 ISR 安全
- * @attention ❌ ISR；✅ 可能阻塞（UART）
+ * @attention ❌ 不允许在中断上下文调用；✅ 会阻塞/引起调度（UART）
  */
 void cgrtos_log(int level, const char *tag, const char *msg);
 
+/**
+ * @brief 任务列表导出项（用户只读快照；勿当作内核对象改写）
+ */
 typedef struct {
-    task_id_t       id;
-    char            name[CGRTOS_TASK_NAME_MAX];
-    uint8_t         prio;
-    task_state_t    state;
-    sched_policy_t  policy;
-    tick_t          exec_ticks;
-    uint32_t        stack_hwm; /* words unused from bottom */
+    task_id_t       id;                              ///< 任务 ID
+    char            name[CGRTOS_TASK_NAME_MAX];       ///< 任务名
+    uint8_t         prio;                            ///< 当前有效优先级
+    task_state_t    state;                           ///< 内部状态
+    sched_policy_t  policy;                          ///< 调度策略
+    tick_t          exec_ticks;                      ///< 累计运行 tick
+    uint32_t        stack_hwm;                       ///< 栈高水位（底部未用字数）
 } cgrtos_task_info_t;
 
 /**
@@ -2662,7 +2709,7 @@ typedef struct {
  * @retval >=0 实际写入或任务总数（out 为 NULL）
  * @note 快照无锁或短临界，SMP 下可能略有滞后
  * @warning out 不足时截断
- * @attention ❌ ISR 慎用；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 uint32_t cgrtos_task_list_export(cgrtos_task_info_t *out, uint32_t max);
 
@@ -2690,75 +2737,165 @@ typedef enum {
  * @retval 无
  * @note CONFIG_USE_TRACE=0 时为空操作
  * @warning 高频率可能覆盖旧记录
- * @attention ✅ ISR；❌ 不阻塞
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 void cgrtos_trace_event(uint16_t type, uint32_t a0, uint32_t a1);
-/** @brief 清空 Trace @attention ❌ ISR 慎用；❌ 不阻塞 */
+/**
+ * @brief 清空 Trace 环形缓冲
+ * @details 将写指针与条数归零，丢弃已记录事件。
+ * @return 无
+ * @retval 无
+ * @note CONFIG_USE_TRACE=0 时为空操作
+ * @warning 与并发 trace_event 无锁同步时可能丢事件
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
+ */
 void cgrtos_trace_reset(void);
 /**
  * @brief 导出 Trace（每条 4×uint32：ts, meta, a0, a1）
- * @param[out] out 缓冲
+ * @details 从环缓冲复制至多 max 条记录到 out；不消费/不清空源缓冲。
+ * @param[out] out 缓冲；每条占 4 个 uint32
  * @param[in]  max 最大条数
  * @return 实际条数
  * @retval >=0 条数
  * @note meta = type | cpu<<16 | flags<<24
- * @warning 无
- * @attention ❌ ISR 慎用；❌ 不阻塞
+ * @warning out 为 NULL 或 max=0 时返回 0
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 uint32_t cgrtos_trace_export(uint32_t *out, uint32_t max);
-/** @brief UART 打印 Trace 摘要 @attention ❌ ISR；✅ 可能阻塞 */
+/**
+ * @brief UART 打印 Trace 摘要
+ * @details 将环缓冲中的事件格式化输出到控制台，便于现场诊断。
+ * @return 无
+ * @retval 无
+ * @note CONFIG_USE_TRACE=0 时为空操作
+ * @warning 依赖 UART，可能长时间占用
+ * @attention ❌ 不允许在中断上下文调用；✅ 会阻塞/引起调度（UART 忙等）
+ */
 void cgrtos_trace_dump(void);
 
 #if CONFIG_USE_TRACE
+/**
+ * @brief 记录一条 Trace（包装 cgrtos_trace_event）
+ * @param type 事件类型
+ * @param a0 参数0
+ * @param a1 参数1
+ * @warning 参数可能被求值；高频调用可能覆盖旧记录。
+ */
 #define CGRTOS_TRACE(type, a0, a1) cgrtos_trace_event((uint16_t)(type), (uint32_t)(a0), (uint32_t)(a1))
 #else
+/** @brief Trace 裁剪为空操作 @param type 忽略 @param a0 忽略 @param a1 忽略 @warning 勿依赖参数副作用 */
 #define CGRTOS_TRACE(type, a0, a1) ((void)0)
 #endif
 
-/** @brief 对象池占用快照 */
+/** @brief 对象池占用快照（用户只读；勿改内核对象） */
 typedef struct {
-    uint32_t tasks_used, tasks_max;
-    uint32_t sem_used, sem_max;
-    uint32_t mutex_used, mutex_max;
-    uint32_t queue_used, queue_max;
-    uint32_t event_used, event_max;
-    uint32_t timer_used, timer_max;
+    uint32_t tasks_used, tasks_max;   ///< 任务池 used/max
+    uint32_t sem_used, sem_max;       ///< 信号量池 used/max
+    uint32_t mutex_used, mutex_max;   ///< 互斥量池 used/max
+    uint32_t queue_used, queue_max;   ///< 队列池 used/max
+    uint32_t event_used, event_max;   ///< 事件组池 used/max
+    uint32_t timer_used, timer_max;   ///< 定时器池 used/max
 } cgrtos_objects_stats_t;
 
+/**
+ * @brief 信号量导出快照（用户只读）
+ */
 typedef struct {
-    cgrtos_sem_t *handle;
-    int32_t       count;
-    int32_t       max;
-    uint32_t      waiters;
+    cgrtos_sem_t *handle;  ///< 对象句柄
+    int32_t       count;   ///< 当前计数
+    int32_t       max;     ///< 最大计数
+    uint32_t      waiters; ///< 等待者数
 } cgrtos_sem_info_t;
 
+/**
+ * @brief 互斥量导出快照（用户只读）
+ */
 typedef struct {
-    cgrtos_mutex_t *handle;
-    task_id_t       owner_id;
-    uint32_t        recursive;
-    uint32_t        waiters;
+    cgrtos_mutex_t *handle;    ///< 对象句柄
+    task_id_t       owner_id;  ///< 持有者任务 ID；0=无
+    uint32_t        recursive; ///< 递归深度
+    uint32_t        waiters;   ///< 等待者数
 } cgrtos_mutex_info_t;
 
+/**
+ * @brief 队列导出快照（用户只读）
+ */
 typedef struct {
-    cgrtos_queue_t *handle;
-    uint32_t        len;
-    uint32_t        item_sz;
-    uint32_t        count;
-    uint32_t        wait_send;
-    uint32_t        wait_recv;
+    cgrtos_queue_t *handle;     ///< 对象句柄
+    uint32_t        len;        ///< 容量
+    uint32_t        item_sz;    ///< 元素大小
+    uint32_t        count;      ///< 当前消息数
+    uint32_t        wait_send;  ///< 发送等待者数
+    uint32_t        wait_recv;  ///< 接收等待者数
 } cgrtos_queue_info_t;
 
-/** @brief 填充对象池统计 @return 0/-1 @attention ❌ ISR；❌ 不阻塞 */
+/**
+ * @brief 填充对象池统计
+ * @details 统计任务/信号量/互斥量/队列/事件组/定时器等池的 used/max。
+ * @param[out] out 输出结构；不可为 NULL
+ * @return 结果码
+ * @retval 0  成功
+ * @retval -1 out 为空或未使能 CONFIG_USE_OBJ_QUERY
+ * @note 须 CONFIG_USE_OBJ_QUERY=1
+ * @warning 快照无全局锁，SMP 下可能略有滞后
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
+ */
 int cgrtos_objects_stats_get(cgrtos_objects_stats_t *out);
-/** @brief 导出信号量列表 @return 条数 @attention ❌ ISR；❌ 不阻塞 */
+/**
+ * @brief 导出信号量列表
+ * @details 遍历信号量池，将占用项快照写入 out[]。
+ * @param[out] out 输出数组；NULL 时仅返回计数
+ * @param[in]  max 数组容量
+ * @return 写入条数（或总数）
+ * @retval >=0 条数
+ * @note 须 CONFIG_USE_OBJ_QUERY=1
+ * @warning out 不足时截断
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
+ */
 uint32_t cgrtos_sem_list_export(cgrtos_sem_info_t *out, uint32_t max);
-/** @brief 导出互斥量列表 @return 条数 @attention ❌ ISR；❌ 不阻塞 */
+/**
+ * @brief 导出互斥量列表
+ * @details 遍历互斥量池，填充 owner/recursive/waiters 等快照。
+ * @param[out] out 输出数组；NULL 时仅返回计数
+ * @param[in]  max 数组容量
+ * @return 写入条数（或总数）
+ * @retval >=0 条数
+ * @note 须 CONFIG_USE_OBJ_QUERY=1
+ * @warning out 不足时截断
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
+ */
 uint32_t cgrtos_mutex_list_export(cgrtos_mutex_info_t *out, uint32_t max);
-/** @brief 导出队列列表 @return 条数 @attention ❌ ISR；❌ 不阻塞 */
+/**
+ * @brief 导出队列列表
+ * @details 遍历队列池，填充长度/元素大小/当前计数与等待者数。
+ * @param[out] out 输出数组；NULL 时仅返回计数
+ * @param[in]  max 数组容量
+ * @return 写入条数（或总数）
+ * @retval >=0 条数
+ * @note 须 CONFIG_USE_OBJ_QUERY=1
+ * @warning out 不足时截断
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
+ */
 uint32_t cgrtos_queue_list_export(cgrtos_queue_info_t *out, uint32_t max);
-/** @brief UART 打印对象池占用 @attention ❌ ISR；✅ 可能阻塞 */
+/**
+ * @brief UART 打印对象池占用
+ * @details 输出各对象池 used/max，便于 CLI/诊断。
+ * @return 无
+ * @retval 无
+ * @note 须 CONFIG_USE_OBJ_QUERY=1
+ * @warning 依赖 UART，可能忙等
+ * @attention ❌ 不允许在中断上下文调用；✅ 会阻塞/引起调度（UART）
+ */
 void cgrtos_objects_dump(void);
-/** @brief 已占用软定时器数 @return 数量 @attention ❌ ISR；❌ 不阻塞 */
+/**
+ * @brief 已占用软定时器数
+ * @details 统计定时器对象池中 in_use 槽位数。
+ * @return 占用数量
+ * @retval >=0 已用定时器数
+ * @note 诊断用；与 CGRTOS_MAX_TIMER 对照
+ * @warning 无
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
+ */
 uint32_t cgrtos_timer_count_used(void);
 
 /**
@@ -2768,7 +2905,7 @@ uint32_t cgrtos_timer_count_used(void);
  * @retval 无
  * @note 诊断/调试命令用
  * @warning UART 输出可能阻塞
- * @attention ❌ ISR；✅ 可能阻塞（UART）
+ * @attention ❌ 不允许在中断上下文调用；✅ 会阻塞/引起调度（UART）
  */
 void cgrtos_stats_dump(void);
 /**
@@ -2779,7 +2916,7 @@ void cgrtos_stats_dump(void);
  * @retval 无
  * @note 无
  * @warning 无锁快照
- * @attention ✅ 只读快照；❌ 不阻塞
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 void cgrtos_stats_get(cgrtos_runtime_stats_t *out);
 #if CONFIG_SCHED_STATS
@@ -2793,7 +2930,7 @@ void cgrtos_stats_get(cgrtos_runtime_stats_t *out);
  * @retval pdFAIL 任务不存在或 out 为空
  * @note 须 CONFIG_SCHED_STATS=1
  * @warning 无
- * @attention ❌ ISR（持锁读）；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度（持锁读）
  */
 int cgrtos_task_get_sched_stats(task_id_t id, cgrtos_task_sched_stats_t *out);
 /**
@@ -2805,7 +2942,7 @@ int cgrtos_task_get_sched_stats(task_id_t id, cgrtos_task_sched_stats_t *out);
  * @retval 无
  * @note 指针可为 NULL 表示忽略
  * @warning 无
- * @attention ✅ 只读；❌ 不阻塞
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 void cgrtos_sched_stats_get(tick_t *max_latency_global, uint32_t *samples);
 /**
@@ -2815,7 +2952,7 @@ void cgrtos_sched_stats_get(tick_t *max_latency_global, uint32_t *samples);
  * @retval 无
  * @note 诊断/测试用
  * @warning 无
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 void cgrtos_sched_stats_reset(void);
 #endif
@@ -2828,7 +2965,7 @@ void cgrtos_sched_stats_reset(void);
  * @retval ≥0 有效累计（无效任务通常为 0）
  * @note 无锁快照，SMP 下可能略有滞后
  * @warning 非墙钟时间；受 tick 粒度限制
- * @attention ✅ ISR；❌ 不阻塞
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 tick_t cgrtos_task_get_runtime(task_id_t id);
 /**
@@ -2840,7 +2977,7 @@ tick_t cgrtos_task_get_runtime(task_id_t id);
  * @retval pdFAIL 检测到溢出或无效任务
  * @note 可在 tick/切换路径调用
  * @warning 发现溢出后应立即停止依赖该栈的逻辑
- * @attention ✅ ISR；❌ 不阻塞
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 int cgrtos_task_check_stack(task_id_t id);
 /**
@@ -2851,7 +2988,7 @@ int cgrtos_task_check_stack(task_id_t id);
  * @retval 无
  * @note 由调度器切换 / tick 抽检路径调用
  * @warning 钩子返回后仍可能 halt
- * @attention ✅ ISR；❌ 不阻塞（随后可能永久挂起）
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度（随后可能永久挂起）
  */
 void cgrtos_task_handle_stack_overflow(cgrtos_task_t *task);
 /**
@@ -2862,7 +2999,7 @@ void cgrtos_task_handle_stack_overflow(cgrtos_task_t *task);
  * @retval 无
  * @note 调度器内部调用
  * @warning 应用勿直接调用
- * @attention ❌ 任务上下文（调度路径）；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度（调度路径）
  */
 void cgrtos_task_reclaim_deleted(cgrtos_task_t *task);
 /**
@@ -2872,7 +3009,7 @@ void cgrtos_task_reclaim_deleted(cgrtos_task_t *task);
  * @retval 无
  * @note 调度挂起或未运行时为空操作
  * @warning ISR 中请用 cgrtos_sched_yield_from_isr
- * @attention ❌ ISR；✅ 引起切换
+ * @attention ❌ 不允许在中断上下文调用；✅ 会阻塞/引起调度
  */
 void cgrtos_sched_yield(void);
 /**
@@ -2883,17 +3020,18 @@ void cgrtos_sched_yield(void);
  * @retval 无
  * @note 不直接 ecall；切换在 ISR 返回时完成
  * @warning 无
- * @attention ✅ ISR；❌ 不阻塞
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 void cgrtos_sched_yield_from_isr(void);
 /**
  * @brief Trap 出口选下一个任务并返回其栈指针
+ * @details 根据就绪队列与策略选择下一任务，更新 g_current，返回其 trap 帧 sp。
  * @param[in] sp 当前 trap 帧栈指针
  * @return 下一任务应恢复的 sp；未切换时返回原 sp
  * @retval 非 NULL 下一任务栈指针
  * @note 由 trap 向量内部调用；处理 PRIORITY 粘性、CFS vruntime、idle 回退
  * @warning 禁止从任务上下文直接调用
- * @attention ✅ ISR/trap；❌ 不阻塞（可能切换）
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度（切换在返回路径完成）
  */
 uint64_t *cgrtos_sched_switch_from_trap(uint64_t *sp);
 /**
@@ -2903,7 +3041,7 @@ uint64_t *cgrtos_sched_switch_from_trap(uint64_t *sp);
  * @retval 无
  * @note 与 cgrtos_sched_resume 成对；可嵌套
  * @warning 挂起期间 delay/IPC 阻塞不会真正切换
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 void cgrtos_sched_suspend(void);
 /**
@@ -2913,7 +3051,7 @@ void cgrtos_sched_suspend(void);
  * @retval 无
  * @note 与 cgrtos_sched_suspend 成对
  * @warning 无
- * @attention ❌ ISR；✅ 可能引起切换
+ * @attention ❌ 不允许在中断上下文调用；✅ 会阻塞/引起调度
  */
 void cgrtos_sched_resume(void);
 /**
@@ -2923,7 +3061,7 @@ void cgrtos_sched_resume(void);
  * @retval 无
  * @note 通常由 hart0 tick 周期调用
  * @warning SMP 下持 ready_lock；勿在持锁上下文重入
- * @attention ✅ ISR（tick 路径）；❌ 不阻塞
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度（tick 路径）
  */
 void cgrtos_sched_load_balance(void);
 /**
@@ -2933,7 +3071,7 @@ void cgrtos_sched_load_balance(void);
  * @retval 无
  * @note 受 CONFIG_SMP_IDLE_STEAL 控制
  * @warning 本地已有工作或 peer 不足时不窃取
- * @attention ❌ ISR（idle 上下文）；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度（idle 上下文）
  */
 void cgrtos_sched_idle_steal(void);
 /**
@@ -2944,7 +3082,7 @@ void cgrtos_sched_idle_steal(void);
  * @retval >=0 计数
  * @note 诊断/LB 用
  * @warning 无
- * @attention ❌ ISR（持 ready_lock）；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度（持 ready_lock）
  */
 uint32_t cgrtos_sched_ready_count(uint8_t cpu);
 /**
@@ -2955,7 +3093,7 @@ uint32_t cgrtos_sched_ready_count(uint8_t cpu);
  * @retval >=0 负载分
  * @note LB 决策用
  * @warning 无
- * @attention ❌ ISR（持锁读）；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度（持锁读）
  */
 uint32_t cgrtos_sched_core_load(uint8_t cpu);
 /**
@@ -2965,7 +3103,7 @@ uint32_t cgrtos_sched_core_load(uint8_t cpu);
  * @retval 0..CONFIG_NUM_CORES-1 有效核
  * @note 新任务初始放置用
  * @warning 次核未 online 时可能回退 hart0
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 uint8_t cgrtos_sched_least_loaded_core(void);
 /**
@@ -2975,7 +3113,7 @@ uint8_t cgrtos_sched_least_loaded_core(void);
  * @retval 无
  * @note 仅 hart0 在启动路径调用
  * @warning 轮询等待可能阻塞启动线程
- * @attention ❌ ISR；✅ 可能阻塞（轮询）
+ * @attention ❌ 不允许在中断上下文调用；✅ 会阻塞/引起调度（轮询）
  */
 void cgrtos_smp_kick_secondaries(void);
 /**
@@ -2986,7 +3124,7 @@ void cgrtos_smp_kick_secondaries(void);
  * @retval 无
  * @note CONFIG_USE_EDF=0 时为空操作
  * @warning 无
- * @attention ❌ ISR；❌ 不阻塞（持 ready_lock）
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度（持 ready_lock）
  */
 void cgrtos_sched_edf_arm(cgrtos_task_t *task);
 /**
@@ -2997,7 +3135,7 @@ void cgrtos_sched_edf_arm(cgrtos_task_t *task);
  * @retval 无
  * @note core=0 通常无操作
  * @warning 频繁 IPI 增加开销
- * @attention ✅ 任务/ISR 均可；❌ 不阻塞
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 void cgrtos_smp_send_ipi(uint8_t core);
 /**
@@ -3007,7 +3145,7 @@ void cgrtos_smp_send_ipi(uint8_t core);
  * @retval 无
  * @note 由 riscv_handle_timer → cgrtos_tick_handler 调用
  * @warning 执行时间影响全局节拍
- * @attention ✅ ISR；❌ 不阻塞
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 void cgrtos_tick_handler(void);
 /**
@@ -3017,7 +3155,7 @@ void cgrtos_tick_handler(void);
  * @retval 无
  * @note 供次核 IPI 远程 tick 调用
  * @warning 无
- * @attention ✅ ISR/IPI 路径；❌ 不阻塞
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 void cgrtos_tick_local(void);
 /**
@@ -3027,7 +3165,7 @@ void cgrtos_tick_local(void);
  * @retval 无
  * @note trap 入口调用
  * @warning 须与 cgrtos_isr_exit 成对
- * @attention ✅ ISR；❌ 不阻塞
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 void cgrtos_isr_enter(void);
 /**
@@ -3037,7 +3175,7 @@ void cgrtos_isr_enter(void);
  * @retval 无
  * @note trap 出口调用
  * @warning 嵌套不匹配会破坏 in_isr 判定
- * @attention ✅ ISR；❌ 不阻塞
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 void cgrtos_isr_exit(void);
 
@@ -3049,7 +3187,7 @@ void cgrtos_isr_exit(void);
  * @retval 无
  * @note 持锁区须极短；禁止阻塞 API
  * @warning 持锁顺序错误可能死锁
- * @attention ✅ 任务/ISR（须正确关中断）；✅ 可能自旋
+ * @attention ✅ 允许在中断上下文调用；✅ 会阻塞/引起调度（须正确关中断）
  */
 void cgrtos_spin_lock(spinlock_t *lock);
 /**
@@ -3060,7 +3198,7 @@ void cgrtos_spin_lock(spinlock_t *lock);
  * @retval 无
  * @note 须与 spin_lock 成对且同核
  * @warning 未持锁 unlock 可能导致竞态
- * @attention ✅ 任务/ISR；❌ 不阻塞
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 void cgrtos_spin_unlock(spinlock_t *lock);
 /**
@@ -3070,7 +3208,7 @@ void cgrtos_spin_unlock(spinlock_t *lock);
  * @retval 完整 mstatus 位图
  * @note 比 enter_critical 轻量，不持 g_klock
  * @warning 须与 cgrtos_irq_restore 成对
- * @attention ✅ 任务/ISR；❌ 不阻塞
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 uint64_t cgrtos_irq_save(void);
 /**
@@ -3081,7 +3219,7 @@ uint64_t cgrtos_irq_save(void);
  * @retval 无
  * @note 须与 irq_save 成对
  * @warning 无
- * @attention ✅ 任务/ISR；❌ 不阻塞
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 void cgrtos_irq_restore(uint64_t flags);
 /**
@@ -3091,7 +3229,7 @@ void cgrtos_irq_restore(uint64_t flags);
  * @retval 无
  * @note 与 cgrtos_exit_critical 成对；可嵌套
  * @warning 临界区内禁止阻塞 API
- * @attention ❌ ISR（任务侧 API）；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度（任务侧 API）
  */
 void cgrtos_enter_critical(void);
 /**
@@ -3101,7 +3239,7 @@ void cgrtos_enter_critical(void);
  * @retval 无
  * @note 最外层 exit 可能触发 IPI
  * @warning 嵌套不匹配危险
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 void cgrtos_exit_critical(void);
 /**
@@ -3112,7 +3250,7 @@ void cgrtos_exit_critical(void);
  * @retval 0 不在
  * @note 诊断/assert 用
  * @warning 无
- * @attention ✅ 任意上下文；❌ 不阻塞
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 int cgrtos_in_critical(void);
 /**
@@ -3123,7 +3261,7 @@ int cgrtos_in_critical(void);
  * @retval 0 任务上下文
  * @note CONFIG_ISR_API_GUARD 依赖此判定
  * @warning 无
- * @attention ✅ 任意上下文；❌ 不阻塞
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 int cgrtos_in_isr(void);
 /**
@@ -3133,7 +3271,7 @@ int cgrtos_in_isr(void);
  * @retval 旧 threshold，须交给 exit_critical_from_isr 恢复
  * @note 与任务侧 enter_critical（关 MIE + g_klock）不同，本 API 只改 PLIC 阈值
  * @warning 更高优先级 ISR 仍可能嵌套
- * @attention ✅ ISR；❌ 不阻塞
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 uint32_t cgrtos_enter_critical_from_isr(void);
 /**
@@ -3144,7 +3282,7 @@ uint32_t cgrtos_enter_critical_from_isr(void);
  * @retval 无
  * @note 须与 enter_critical_from_isr 成对
  * @warning 无
- * @attention ✅ ISR；❌ 不阻塞
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 void cgrtos_exit_critical_from_isr(uint32_t saved_threshold);
 /**
@@ -3156,7 +3294,7 @@ void cgrtos_exit_critical_from_isr(uint32_t saved_threshold);
  * @retval 无
  * @note portYIELD_FROM_ISR 底层依赖
  * @warning woken 为 NULL 且 need_yield 会立即 yield_from_isr
- * @attention ✅ ISR；❌ 不阻塞
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 void cgrtos_isr_notify_woken(BaseType_t *woken, int need_yield);
 
@@ -3167,7 +3305,7 @@ void cgrtos_isr_notify_woken(BaseType_t *woken, int need_yield);
  * @retval 无
  * @note 启动早期调用，早于调度器
  * @warning 重复调用行为未定义
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 void cgrtos_arch_init(void);
 /**
@@ -3177,7 +3315,7 @@ void cgrtos_arch_init(void);
  * @retval 无
  * @note cgrtos_init 路径调用
  * @warning 无
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 void cgrtos_uart_init(void);
 /**
@@ -3188,7 +3326,7 @@ void cgrtos_uart_init(void);
  * @retval 无
  * @note 无
  * @warning 可能阻塞 TX
- * @attention ❌ ISR 慎用；✅ 可能阻塞（TX FIFO）
+ * @attention ❌ 不允许在中断上下文调用；✅ 会阻塞/引起调度（TX FIFO）
  */
 void cgrtos_uart_putc(char c);
 /**
@@ -3198,7 +3336,7 @@ void cgrtos_uart_putc(char c);
  * @retval 0..255 数据字节
  * @note 无
  * @warning 永久阻塞直到有输入
- * @attention ❌ ISR；✅ 阻塞
+ * @attention ❌ 不允许在中断上下文调用；✅ 会阻塞/引起调度
  */
 char cgrtos_uart_getc(void);
 /**
@@ -3209,7 +3347,7 @@ char cgrtos_uart_getc(void);
  * @retval -1     RX 空
  * @note 无
  * @warning 无
- * @attention ✅ ISR；❌ 不阻塞
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 int cgrtos_uart_pollc(void);
 /**
@@ -3220,7 +3358,7 @@ int cgrtos_uart_pollc(void);
  * @retval 无
  * @note 无
  * @warning 可能阻塞 TX
- * @attention ❌ ISR 慎用；✅ 可能阻塞（UART）
+ * @attention ❌ 不允许在中断上下文调用；✅ 会阻塞/引起调度（UART）
  */
 void cgrtos_uart_puts(const char *s);
 /**
@@ -3232,7 +3370,7 @@ void cgrtos_uart_puts(const char *s);
  * @retval 无
  * @note 无堆分配；缓冲区固定
  * @warning 可能阻塞 TX；非 ISR 安全
- * @attention ❌ ISR；✅ 可能阻塞（UART）
+ * @attention ❌ 不允许在中断上下文调用；✅ 会阻塞/引起调度（UART）
  */
 void cgrtos_printf(const char *fmt, ...);
 /**
@@ -3243,7 +3381,7 @@ void cgrtos_printf(const char *fmt, ...);
  * @retval 无
  * @note 每 hart 独立调用
  * @warning 无
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 void cgrtos_clint_init(tick_t rate);
 /**
@@ -3253,7 +3391,7 @@ void cgrtos_clint_init(tick_t rate);
  * @retval >=0 周期计数
  * @note 用于 cgrtos_delay_us 等
  * @warning 无
- * @attention ✅ ISR；❌ 不阻塞
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 uint64_t cgrtos_mtime_read(void);
 /**
@@ -3263,7 +3401,7 @@ uint64_t cgrtos_mtime_read(void);
  * @retval 无
  * @note 每 hart 启动时调用
  * @warning 无
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 void cgrtos_plic_init(void);
 /**
@@ -3274,7 +3412,7 @@ void cgrtos_plic_init(void);
  * @retval 0  无待处理
  * @note 须与 complete 成对
  * @warning 无
- * @attention ✅ ISR；❌ 不阻塞
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 uint32_t cgrtos_plic_claim(void);
 /**
@@ -3285,7 +3423,7 @@ uint32_t cgrtos_plic_claim(void);
  * @retval 无
  * @note 须与 claim 成对
  * @warning 无
- * @attention ✅ ISR；❌ 不阻塞
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 void cgrtos_plic_complete(uint32_t irq);
 /**
@@ -3296,61 +3434,66 @@ void cgrtos_plic_complete(uint32_t irq);
  * @retval 无
  * @note enter_critical_from_isr 使用
  * @warning 无
- * @attention ✅ ISR；❌ 不阻塞
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 void cgrtos_plic_set_threshold(uint32_t threshold);
 /**
  * @brief 读取本 hart PLIC 优先级阈值（兼容 → hal_irqc_get_threshold）
+ * @details 返回本核当前 threshold；低于该值的源被屏蔽。
  * @return 当前 threshold
  * @retval >=0 阈值
- * @note 无
+ * @note 与 set_threshold 成对查询
  * @warning 无
- * @attention ✅ ISR；❌ 不阻塞
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 uint32_t cgrtos_plic_get_threshold(void);
 /**
  * @brief 设置中断源优先级（兼容 → hal_irqc_set_priority）
+ * @details 写入 PLIC 源优先级寄存器；priority=0 表示禁用该源。
  * @param[in] irq      1..CONFIG_IRQ_MAX_SOURCES
  * @param[in] priority 0=禁用该源；1..CONFIG_IRQ_PRIORITY_MAX
  * @return 结果码
  * @retval pdPASS 成功
  * @retval pdFAIL 参数非法
- * @note 无
+ * @note 优先级越高越先被 claim
  * @warning 无
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 int cgrtos_plic_set_priority(uint32_t irq, uint32_t priority);
 /**
  * @brief 读取中断源优先级（兼容 → hal_irqc_get_priority）
+ * @details 读取 PLIC 源优先级；非法 irq 返回 0。
  * @param[in] irq 源编号
  * @return 优先级
  * @retval 0  非法 irq 或禁用
  * @retval 1..CONFIG_IRQ_PRIORITY_MAX 有效
  * @note 无
  * @warning 无
- * @attention ✅ ISR；❌ 不阻塞
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 uint32_t cgrtos_plic_get_priority(uint32_t irq);
 /**
  * @brief 对本 hart 使能指定中断源（兼容 → hal_irqc_enable）
+ * @details 置位本 hart 对该源的 enable 位。
  * @param[in] irq 源编号
  * @return 结果码
  * @retval pdPASS 成功
  * @retval pdFAIL 参数非法
- * @note 无
+ * @note 通常在 register/configure 后调用
  * @warning 无
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 int cgrtos_plic_enable(uint32_t irq);
 /**
  * @brief 对本 hart 禁用指定中断源（兼容 → hal_irqc_disable）
+ * @details 清除本 hart 对该源的 enable 位；不注销 handler。
  * @param[in] irq 源编号
  * @return 结果码
  * @retval pdPASS 成功
  * @retval pdFAIL 参数非法
- * @note 无
+ * @note 与 enable 成对
  * @warning 无
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 int cgrtos_plic_disable(uint32_t irq);
 
@@ -3365,11 +3508,12 @@ int cgrtos_plic_disable(uint32_t irq);
  * @retval 无
  * @note 无
  * @warning 无
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 void cgrtos_irq_init(void);
 /**
  * @brief 配置中断源优先级并可选使能
+ * @details 先设置源优先级，再按 enable 对本 hart 使能或禁用该源。
  * @param[in] irq      中断源编号（1..CONFIG_IRQ_MAX_SOURCES）
  * @param[in] priority 0..CONFIG_IRQ_PRIORITY_MAX；0 禁用该源
  * @param[in] enable   非 0 则使能该源，否则禁用
@@ -3378,7 +3522,7 @@ void cgrtos_irq_init(void);
  * @retval pdFAIL 参数非法
  * @note 封装 plic_set_priority + enable/disable
  * @warning 无
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 int cgrtos_irq_configure(uint32_t irq, uint32_t priority, int enable);
 /**
@@ -3392,29 +3536,31 @@ int cgrtos_irq_configure(uint32_t irq, uint32_t priority, int enable);
  * @retval pdFAIL 参数非法或表满
  * @note 仅当该源优先级 ≤ syscall_max 时 handler 内可调用 FromISR
  * @warning handler 阻塞会延迟其他中断
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 int cgrtos_irq_register(uint32_t irq, cgrtos_irq_handler_t handler, void *arg);
 /**
  * @brief 注销处理函数（不自动 disable 源）
+ * @details 清除 handler 表项；调用方须自行 disable 以免空转 claim。
  * @param[in] irq 源编号
  * @return 结果码
  * @retval pdPASS 成功
  * @retval pdFAIL 未注册或非法
- * @note 无
+ * @note 不修改 PLIC enable
  * @warning 注销后 claim 仍可能发生但无 handler
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 int cgrtos_irq_unregister(uint32_t irq);
 /**
  * @brief 查询已注册 handler（测试/诊断）
+ * @details 返回 irq 对应的处理函数指针，不修改表。
  * @param[in] irq 源编号
  * @return handler 指针
  * @retval 非 NULL 已注册
  * @retval NULL    未注册或非法 irq
- * @note 无
+ * @note 供测试断言
  * @warning 无
- * @attention ✅ ISR；❌ 不阻塞
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 cgrtos_irq_handler_t cgrtos_irq_get_handler(uint32_t irq);
 /**
@@ -3425,16 +3571,17 @@ cgrtos_irq_handler_t cgrtos_irq_get_handler(uint32_t irq);
  * @retval 无
  * @note 默认 CONFIG_IRQ_SYSCALL_MAX_PRIO
  * @warning 上界过高可能使 FromISR 与嵌套 ISR 冲突
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 void cgrtos_irq_set_syscall_max_priority(uint32_t max_prio);
 /**
  * @brief 当前 FromISR 允许的最高优先级
+ * @details 返回 enter_critical_from_isr 使用的优先级上界快照。
  * @return 运行时 syscall_max_prio
  * @retval 0..CONFIG_IRQ_PRIORITY_MAX
- * @note 无
+ * @note 默认 CONFIG_IRQ_SYSCALL_MAX_PRIO
  * @warning 无
- * @attention ✅ 只读；❌ 不阻塞
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 uint32_t cgrtos_irq_get_syscall_max_priority(void);
 /**
@@ -3445,7 +3592,7 @@ uint32_t cgrtos_irq_get_syscall_max_priority(void);
  * @retval 无
  * @note 供 riscv_handle_external 调用
  * @warning handler 须短小非阻塞
- * @attention ✅ ISR；❌ 不阻塞
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 void cgrtos_irq_dispatch(uint32_t irq);
 /** @} */
@@ -3456,7 +3603,7 @@ void cgrtos_irq_dispatch(uint32_t irq);
  * @retval >=0 g_ticks 快照
  * @note SMP 下 hart0 递增；读可能略有撕裂
  * @warning 无
- * @attention ✅ ISR；❌ 不阻塞
+ * @attention ✅ 允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 tick_t cgrtos_get_ticks(void);
 /**
@@ -3471,7 +3618,7 @@ tick_t cgrtos_get_ticks(void);
  * @retval -1  参数非法
  * @note 无堆分配
  * @warning 无
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 int cgrtos_snprintf(char *buf, unsigned long n, const char *fmt, ...);
 
@@ -3484,7 +3631,7 @@ int cgrtos_snprintf(char *buf, unsigned long n, const char *fmt, ...);
  * @retval 无
  * @note 由 configASSERT/CGRTOS_ASSERT 调用
  * @warning 调用后系统永不返回
- * @attention ✅ ISR；✅ 可能阻塞（halt 前 UART 输出）
+ * @attention ✅ 允许在中断上下文调用；✅ 会阻塞/引起调度（halt 前 UART 输出）
  */
 void cgrtos_assert_failed(const char *file, int line);
 
@@ -3498,7 +3645,7 @@ void cgrtos_assert_failed(const char *file, int line);
  * @retval 0..CONFIG_NUM_CORES-1 目标核
  * @note IPC/调度内部使用
  * @warning 无
- * @attention ❌ ISR（持锁）；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度（持锁）
  */
 uint8_t cgrtos_sched_target_core(cgrtos_task_t *task);
 /**
@@ -3509,7 +3656,7 @@ uint8_t cgrtos_sched_target_core(cgrtos_task_t *task);
  * @retval 无
  * @note 调用方通常已持 g_klock
  * @warning 重复 add 会导致链表损坏
- * @attention ❌ ISR；❌ 不阻塞（可能 IPI）
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度（可能 IPI）
  */
 void cgrtos_sched_add_ready(cgrtos_task_t *task);
 /**
@@ -3519,7 +3666,7 @@ void cgrtos_sched_add_ready(cgrtos_task_t *task);
  * @retval 无
  * @note 由 exit_critical 最外层调用
  * @warning 无
- * @attention ❌ ISR；❌ 不阻塞（可能 IPI）
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度（可能 IPI）
  */
 void cgrtos_sched_edf_kick_flush(void);
 /**
@@ -3530,7 +3677,7 @@ void cgrtos_sched_edf_kick_flush(void);
  * @retval 无
  * @note 调用方通常已持 g_klock
  * @warning 不在就绪态时可能空操作
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 void cgrtos_sched_remove_ready(cgrtos_task_t *task);
 /**
@@ -3544,7 +3691,7 @@ void cgrtos_sched_remove_ready(cgrtos_task_t *task);
  * @retval 无
  * @note 调用后须 yield 才真正切换
  * @warning ISR 中禁止
- * @attention ❌ ISR；✅ 阻塞并切换
+ * @attention ❌ 不允许在中断上下文调用；✅ 会阻塞/引起调度
  */
 void cgrtos_sched_block(cgrtos_task_t *task, block_reason_t reason,
                         void *obj, tick_t timeout);
@@ -3559,7 +3706,7 @@ void cgrtos_sched_block(cgrtos_task_t *task, block_reason_t reason,
  * @retval 无
  * @note 调用前应保证 wake_tick > g_ticks
  * @warning ISR 中禁止
- * @attention ❌ ISR；✅ 阻塞并切换
+ * @attention ❌ 不允许在中断上下文调用；✅ 会阻塞/引起调度
  */
 void cgrtos_sched_block_until(cgrtos_task_t *task, block_reason_t reason,
                               void *obj, tick_t wake_tick);
@@ -3572,7 +3719,7 @@ void cgrtos_sched_block_until(cgrtos_task_t *task, block_reason_t reason,
  * @retval pdFAIL 非 BLOCKED 或无效
  * @note IPC give/signal 路径调用
  * @warning 无
- * @attention ❌ ISR（任务路径）；✅ 可能切换/IPI
+ * @attention ❌ 不允许在中断上下文调用；✅ 会阻塞/引起调度（任务路径）
  */
 int cgrtos_sched_unblock(cgrtos_task_t *task);
 /**
@@ -3584,7 +3731,7 @@ int cgrtos_sched_unblock(cgrtos_task_t *task);
  * @retval 无
  * @note 调用方须持对象锁或 g_klock
  * @warning 重复入队损坏链表
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 void cgrtos_wait_list_add(cgrtos_task_t *volatile *head, cgrtos_task_t *task);
 /**
@@ -3596,7 +3743,7 @@ void cgrtos_wait_list_add(cgrtos_task_t *volatile *head, cgrtos_task_t *task);
  * @retval 无
  * @note 互斥量/信号量等待用
  * @warning 无
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 void cgrtos_wait_list_add_priority(cgrtos_task_t *volatile *head, cgrtos_task_t *task);
 /**
@@ -3608,7 +3755,7 @@ void cgrtos_wait_list_add_priority(cgrtos_task_t *volatile *head, cgrtos_task_t 
  * @retval NULL    队列为空
  * @note give/unlock 路径调用
  * @warning 无
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 cgrtos_task_t *cgrtos_wait_list_pop_highest(cgrtos_task_t *volatile *head);
 /**
@@ -3620,7 +3767,7 @@ cgrtos_task_t *cgrtos_wait_list_pop_highest(cgrtos_task_t *volatile *head);
  * @retval 无
  * @note 超时/删除/purge 路径调用
  * @warning task 不在队列上时可能空操作
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度
  */
 void cgrtos_wait_list_remove(cgrtos_task_t *volatile *head, cgrtos_task_t *task);
 /**
@@ -3631,7 +3778,7 @@ void cgrtos_wait_list_remove(cgrtos_task_t *volatile *head, cgrtos_task_t *task)
  * @retval 无
  * @note 由 delete/timeout 路径调用；须在合适临界区内
  * @warning 遗漏清理会导致 IPC 链表损坏
- * @attention ❌ ISR（通常）；❌ 不阻塞
+ * @attention ❌ 不允许在中断上下文调用；❌ 不会阻塞/引起调度（通常）
  */
 void cgrtos_task_purge_waits(cgrtos_task_t *task);
 
@@ -3639,136 +3786,225 @@ void cgrtos_task_purge_waits(cgrtos_task_t *task);
 /* FreeRTOS-style compatibility macros                                        */
 /* -------------------------------------------------------------------------- */
 
-/** @def portMAX_DELAY 无限阻塞超时值 */
+/** @brief 无限阻塞超时值 */
 #define portMAX_DELAY               ((tick_t)-1)
-/** @def portMS_TO_TICK 毫秒转 tick（四舍五入） */
+/**
+ * @brief 毫秒转 tick（四舍五入）
+ * @param ms 毫秒数
+ * @warning 参数 ms 被多次求值；勿传入带副作用表达式。
+ */
 #define portMS_TO_TICK(ms)          ((((tick_t)(ms)) * CONFIG_TICK_RATE_HZ + 500) / 1000)
-/** @def portTICK_PERIOD_MS 每 tick 对应的毫秒数 */
+/** @brief 每 tick 对应的毫秒数 */
 #define portTICK_PERIOD_MS          (1000 / CONFIG_TICK_RATE_HZ)
-/** @def portUS_TO_MTIME 微秒转 mtime 周期数 */
+/**
+ * @brief 微秒转 mtime 周期数
+ * @param us 微秒
+ * @warning 参数 us 被求值；大数值注意溢出。
+ */
 #define portUS_TO_MTIME(us) \
     (((uint64_t)(us) * (CONFIG_TIMER_CLOCK_HZ)) / 1000000ULL)
-/** @def portMTIME_PER_TICK 每个系统 tick 对应的 mtime 周期数 */
+/** @brief 每个系统 tick 对应的 mtime 周期数 */
 #define portMTIME_PER_TICK \
     (CONFIG_TIMER_CLOCK_HZ / (uint64_t)CONFIG_TICK_RATE_HZ)
 
 /**
- * @def configASSERT
  * @brief FreeRTOS 风格运行时断言；失败则 cgrtos_assert_failed
+ * @param expr 断言表达式
+ * @warning 失败路径 halt；expr 在 if 内求值一次。
  */
 #define configASSERT(expr) \
     do { if (!(expr)) { cgrtos_assert_failed(__FILE__, __LINE__); } } while (0)
-/** @def CGRTOS_ASSERT 同 configASSERT */
+/**
+ * @brief 同 configASSERT
+ * @param expr 断言表达式
+ * @warning 同 configASSERT。
+ */
 #define CGRTOS_ASSERT(expr) configASSERT(expr)
-/** @def STACK_CANARY_VALUE 任务栈低地址金丝雀（与 task_init_stack 一致） */
+/** @brief 任务栈低地址金丝雀（与 task_init_stack 一致） */
 #define STACK_CANARY_VALUE  0xDEADBEEFCAFE0000ULL
 
-/** @def xTaskCreate FreeRTOS 兼容：创建 SCHED_PRIORITY 任务（stack 参数忽略，用固定 CONFIG_TASK_STACK_WORDS） */
+/**
+ * @brief FreeRTOS 兼容：创建 SCHED_PRIORITY 任务（stack 忽略，用 CONFIG_TASK_STACK_WORDS）
+ * @param fn 入口 @param name 名 @param stack 忽略 @param arg 参数 @param prio 优先级 @param handle 输出句柄指针
+ * @warning handle 须可写；勿对参数使用带副作用的自增表达式。
+ */
 #define xTaskCreate(fn, name, stack, arg, prio, handle) \
     ((void)(stack), (*(handle) = (void *)(uintptr_t)cgrtos_task_create(name, fn, arg, prio, SCHED_PRIORITY)), pdPASS)
 
-/** @def vTaskDelete 删除任务 */
+/** @brief 删除任务 @param id 任务句柄/ID @warning 参数求值一次 */
 #define vTaskDelete(id)             cgrtos_task_delete((task_id_t)(uintptr_t)(id))
-/** @def vTaskSuspend 挂起任务 */
+/** @brief 挂起任务 @param id 任务句柄/ID @warning 参数求值一次 */
 #define vTaskSuspend(id)            cgrtos_task_suspend((task_id_t)(uintptr_t)(id))
-/** @def vTaskResume 恢复任务 */
+/** @brief 恢复任务 @param id 任务句柄/ID @warning 参数求值一次 */
 #define vTaskResume(id)             cgrtos_task_resume((task_id_t)(uintptr_t)(id))
-/** @def vTaskPrioritySet 设置优先级 */
+/**
+ * @brief 设置优先级
+ * @param id 任务句柄/ID
+ * @param p 新优先级
+ * @warning 参数各求值一次。
+ */
 #define vTaskPrioritySet(id, p)     cgrtos_task_set_priority((task_id_t)(uintptr_t)(id), (uint8_t)(p))
-/** @def eTaskGetState 查询任务状态 */
+/** @brief 查询任务状态 @param id 任务句柄/ID @warning 参数求值一次 */
 #define eTaskGetState(id)           cgrtos_task_get_state((task_id_t)(uintptr_t)(id))
-/** @def uxTaskGetStackHighWaterMark 栈水位（未用字节） */
+/** @brief 栈水位（未用字） @param h 任务句柄/ID @warning 参数求值一次 */
 #define uxTaskGetStackHighWaterMark(h) cgrtos_task_get_stack_high_water_mark((task_id_t)(uintptr_t)(h))
 
-/** @def vTaskDelay 相对延时（tick） */
+/** @brief 相对延时（tick） @param t 延时 tick @warning 会阻塞 */
 #define vTaskDelay(t)               cgrtos_delay(t)
-/** @def vTaskDelayUntil 绝对周期延时 */
+/**
+ * @brief 绝对周期延时
+ * @param p 上次唤醒 tick 指针
+ * @param i 周期
+ * @warning 会阻塞；p 必须可写。
+ */
 #define vTaskDelayUntil(p, i)       cgrtos_delay_until(p, i)
-/** @def vTaskYield 主动让出 CPU */
+/** @brief 主动让出 CPU @warning 引起调度 */
 #define vTaskYield()                cgrtos_task_yield()
-/** @def taskYIELD 同 vTaskYield */
+/** @brief 同 vTaskYield @warning 引起调度 */
 #define taskYIELD()                 cgrtos_task_yield()
 
-/** @def vTaskSuspendAll 挂起调度器 */
+/** @brief 挂起调度器 */
 #define vTaskSuspendAll()           cgrtos_sched_suspend()
-/** @def xTaskResumeAll 恢复调度器 */
+/** @brief 恢复调度器 @warning 可能引起切换 */
 #define xTaskResumeAll()            cgrtos_sched_resume()
 
-/** @def xSemaphoreCreateCounting 计数信号量 */
+/**
+ * @brief 创建计数信号量
+ * @param max 最大计数
+ * @param init 初值
+ * @warning 参数顺序为 (max, init)，映射到 cgrtos_sem_create(init, max)。
+ */
 #define xSemaphoreCreateCounting(max, init) cgrtos_sem_create(init, max)
-/** @def xSemaphoreCreateBinary 二进制信号量 */
+/** @brief 创建二进制信号量 */
 #define xSemaphoreCreateBinary()    cgrtos_sem_create_binary()
-/** @def xSemaphoreTake 获取信号量 */
+/**
+ * @brief 获取信号量
+ * @param s 信号量
+ * @param t 超时
+ * @warning 可能阻塞；参数各求值一次。
+ */
 #define xSemaphoreTake(s, t)        cgrtos_sem_take(s, t)
-/** @def xSemaphoreGive 释放信号量 */
+/** @brief 释放信号量 @param s 信号量 @warning 参数求值一次 */
 #define xSemaphoreGive(s)           cgrtos_sem_give(s)
-/** @def xSemaphoreGiveFromISR ISR 释放；hp 为 BaseType_t* woken（可为 NULL） */
+/**
+ * @brief ISR 释放信号量
+ * @param s 信号量
+ * @param hp BaseType_t* woken（可为 NULL）
+ * @warning 仅 ISR；参数求值。
+ */
 #define xSemaphoreGiveFromISR(s, hp) cgrtos_sem_give_from_isr((s), (hp))
-/** @def xSemaphoreTakeFromISR ISR 非阻塞获取；hp 忽略 */
+/**
+ * @brief ISR 非阻塞获取信号量
+ * @param s 信号量
+ * @param hp 忽略
+ * @warning 仅 ISR；hp 被求值一次后丢弃。
+ */
 #define xSemaphoreTakeFromISR(s, hp) \
     ((void)(hp), cgrtos_sem_take_from_isr(s))
-/** @def vSemaphoreDelete 删除信号量 */
+/** @brief 删除信号量 @param s 信号量 @warning 参数求值一次 */
 #define vSemaphoreDelete(s)         cgrtos_sem_delete(s)
 
-/** @def xQueueCreate 创建消息队列 */
+/**
+ * @brief 创建消息队列
+ * @param len 容量（元素个数）
+ * @param sz 单元素字节数
+ * @warning 参数各求值一次。
+ */
 #define xQueueCreate(len, sz)       cgrtos_queue_create(len, sz)
-/** @def xQueueSend 发送到队列 */
+/**
+ * @brief 发送到队列
+ * @param q 队列 @param d 数据指针 @param t 超时
+ * @warning 可能阻塞；参数各求值一次。
+ */
 #define xQueueSend(q, d, t)         cgrtos_queue_send(q, d, t)
-/** @def xQueueReceive 从队列接收 */
+/**
+ * @brief 从队列接收
+ * @param q 队列 @param b 缓冲 @param t 超时
+ * @warning 可能阻塞；参数各求值一次。
+ */
 #define xQueueReceive(q, b, t)      cgrtos_queue_receive(q, b, t)
-/** @def xQueueSendFromISR ISR 发送；hp 为 woken 指针 */
+/**
+ * @brief ISR 发送
+ * @param q 队列 @param d 数据 @param hp woken 指针
+ * @warning 仅 ISR。
+ */
 #define xQueueSendFromISR(q, d, hp) cgrtos_queue_send_from_isr((q), (d), (hp))
-/** @def xQueueReceiveFromISR ISR 接收；hp 为 woken 指针 */
+/**
+ * @brief ISR 接收
+ * @param q 队列 @param b 缓冲 @param hp woken 指针
+ * @warning 仅 ISR。
+ */
 #define xQueueReceiveFromISR(q, b, hp) cgrtos_queue_receive_from_isr((q), (b), (hp))
-/** @def uxQueueMessagesWaiting 队列当前消息数 */
+/** @brief 队列当前消息数 @param q 队列 @warning 参数求值一次 */
 #define uxQueueMessagesWaiting(q)   cgrtos_queue_messages_waiting(q)
-/** @def vQueueDelete 删除队列 */
+/** @brief 删除队列 @param q 队列 @warning 参数求值一次 */
 #define vQueueDelete(q)             cgrtos_queue_delete(q)
 
-/** @def xEventGroupCreate 创建事件组 */
+/** @brief 创建事件组 */
 #define xEventGroupCreate()         cgrtos_event_group_create()
-/** @def xEventGroupSetBits 置事件位 */
+/**
+ * @brief 置事件位
+ * @param eg 事件组 @param f 位掩码
+ * @warning 参数各求值一次。
+ */
 #define xEventGroupSetBits(eg, f)   cgrtos_event_group_set(eg, f)
-/** @def xEventGroupSetBitsFromISR ISR 置位；hp 为 woken 指针 */
+/**
+ * @brief ISR 置位
+ * @param eg 事件组 @param f 位掩码 @param hp woken 指针
+ * @warning 仅 ISR。
+ */
 #define xEventGroupSetBitsFromISR(eg, f, hp) \
     cgrtos_event_group_set_from_isr((eg), (f), (hp))
-/** @def xEventGroupClearBits 清事件位 */
+/**
+ * @brief 清事件位
+ * @param eg 事件组 @param f 位掩码
+ * @warning 参数各求值一次。
+ */
 #define xEventGroupClearBits(eg, f) cgrtos_event_group_clear(eg, f)
-/** @def xEventGroupClearBitsFromISR ISR 清位（无 woken） */
+/**
+ * @brief ISR 清位（无 woken）
+ * @param eg 事件组 @param f 位掩码
+ * @warning 仅 ISR。
+ */
 #define xEventGroupClearBitsFromISR(eg, f) cgrtos_event_group_clear_from_isr((eg), (f))
-/** @def xEventGroupWaitBits 等待事件位 */
+/**
+ * @brief 等待事件位
+ * @param eg 事件组 @param f 位掩码 @param c 退出时是否清位 @param wa 是否等待全部 @param t 超时
+ * @warning 可能阻塞；参数可能被多次求值。
+ */
 #define xEventGroupWaitBits(eg, f, c, wa, t) \
     cgrtos_event_group_wait_bits(eg, f, c, wa, t)
 
-/** @def pvPortMalloc TLSF 堆分配 */
+/** @brief TLSF 堆分配 @param sz 字节数 @warning 参数求值一次；可能失败 */
 #define pvPortMalloc(sz)            cgrtos_malloc(sz)
-/** @def vPortFree 释放堆块 */
+/** @brief 释放堆块 @param p 指针 @warning 参数求值一次 */
 #define vPortFree(p)                cgrtos_free(p)
-/** @def xPortGetFreeHeapSize 当前空闲堆字节 */
+/** @brief 当前空闲堆字节 */
 #define xPortGetFreeHeapSize()      cgrtos_get_free_heap()
-/** @def xPortGetMinimumEverFreeHeapSize 历史最小空闲堆 */
+/** @brief 历史最小空闲堆 */
 #define xPortGetMinimumEverFreeHeapSize() cgrtos_get_min_free_heap()
 
 /**
- * @def portYIELD_FROM_ISR
  * @brief ISR 末尾：若 hp（BaseType_t 值，非指针）非 pdFALSE 则请求调度
+ * @param hp woken 标志值（非指针）
+ * @warning 参数 hp 被求值；仅 ISR 末尾使用。
  */
 #define portYIELD_FROM_ISR(hp) \
     do { if ((hp) != pdFALSE) { cgrtos_sched_yield_from_isr(); } } while (0)
 /**
- * @def portSET_INTERRUPT_MASK_FROM_ISR
  * @brief 抬高 PLIC 阈值屏蔽 FromISR 级中断；返回值交给 CLEAR
  */
 #define portSET_INTERRUPT_MASK_FROM_ISR() cgrtos_enter_critical_from_isr()
 /**
- * @def portCLEAR_INTERRUPT_MASK_FROM_ISR
  * @brief 恢复 SET 返回的 PLIC 阈值
+ * @param m SET 返回的掩码/阈值
+ * @warning 参数 m 被求值一次；须与 SET 配对。
  */
 #define portCLEAR_INTERRUPT_MASK_FROM_ISR(m) cgrtos_exit_critical_from_isr(m)
 
-/** @def vApplicationIdleHook 空钩子占位；请用 cgrtos_set_idle_hook */
+/** @brief 空钩子占位；请用 cgrtos_set_idle_hook */
 #define vApplicationIdleHook()      /* app override via cgrtos_set_idle_hook */
-/** @def vApplicationTickHook 空钩子占位；请用 cgrtos_set_tick_hook */
+/** @brief 空钩子占位；请用 cgrtos_set_tick_hook */
 #define vApplicationTickHook()      /* app override via cgrtos_set_tick_hook */
 
 #if defined(__riscv)

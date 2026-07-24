@@ -2,8 +2,8 @@
  * @file cli_main.c
  * @brief CG-RTOS 交互式 CLI：跑测试 case、读写内存、命令历史上翻
  * @author Cong Zhou / Juilletioi
- * @version 5.1.0
- * @date 2026-07-23
+ * @version 5.3.0
+ * @date 2026-07-24
  * @copyright CG-RTOS
  *
  * @details
@@ -17,8 +17,16 @@
 #include "cli_line.h"
 #include "cli_vim.h"
 
+/**
+ * @brief 默认 CLI 提示符字符串
+ * @warning 无运行时副作用（编译期常量）
+ */
 #define CLI_PROMPT    "cgrtos> "
-#define CLI_MD_MAX    256   /* max units per dump */
+/**
+ * @brief 单次 md/mw 最大单元数上限
+ * @warning 无运行时副作用（编译期常量）
+ */
+#define CLI_MD_MAX    256
 
 
 /**
@@ -29,7 +37,7 @@
  * @retval 无
  * @note 原地修改，不分配内存
  * @warning s 须可写且以 NUL 结尾
- * @attention ❌ ISR；✅ 任务上下文
+ * @attention ❌ ISR；❌ block/switch
  * @internal
  */
 static void cli_trim(char *s)
@@ -65,7 +73,7 @@ static void cli_trim(char *s)
  * @retval 0 不等或指针差异
  * @note 区分大小写
  * @warning 指针须有效或同为 NULL
- * @attention ✅ ISR；❌ 不阻塞
+ * @attention ✅ ISR；❌ block/switch
  * @internal
  */
 static int cli_streq(const char *a, const char *b)
@@ -88,7 +96,7 @@ static int cli_streq(const char *a, const char *b)
  * @retval 0 不匹配
  * @note 用于 `run foo` 类命令解析
  * @warning rest 指向 s 内部，勿 free
- * @attention ✅ ISR；❌ 不阻塞
+ * @attention ✅ ISR；❌ block/switch
  * @internal
  */
 static int cli_startswith(const char *s, const char *prefix, const char **rest)
@@ -121,7 +129,7 @@ static int cli_startswith(const char *s, const char *prefix, const char **rest)
  * @retval -1 空串或无数字
  * @note 用于 md/mw 地址与数值
  * @warning 不检测溢出
- * @attention ✅ ISR；❌ 不阻塞
+ * @attention ✅ ISR；❌ block/switch
  * @internal
  */
 static int cli_parse_u64(const char *s, uint64_t *out, const char **endp)
@@ -175,7 +183,7 @@ static int cli_parse_u64(const char *s, uint64_t *out, const char **endp)
  * @retval 非 NULL 始终有效（同 s 或其后）
  * @note 不修改输入
  * @warning 无
- * @attention ✅ ISR；❌ 不阻塞
+ * @attention ✅ ISR；❌ block/switch
  * @internal
  */
 static const char *cli_skip_ws(const char *s)
@@ -197,7 +205,7 @@ static const char *cli_skip_ws(const char *s)
  * @retval -1 非 md/read 或非法后缀
  * @note .b=1 .h=2 .w=4 .d=8
  * @warning cmd 须以 NUL 结尾
- * @attention ✅ ISR；❌ 不阻塞
+ * @attention ✅ ISR；❌ block/switch
  * @internal
  */
 static int cli_match_md(const char *cmd, int *width, const char **rest_out)
@@ -251,7 +259,7 @@ static int cli_match_md(const char *cmd, int *width, const char **rest_out)
  * @retval -1 非 mw/write 或非法后缀
  * @note 与 cli_match_md 对称
  * @warning 直接写物理/映射地址，慎用
- * @attention ✅ ISR；❌ 不阻塞
+ * @attention ✅ ISR；❌ block/switch
  * @internal
  */
 static int cli_match_mw(const char *cmd, int *width, const char **rest_out)
@@ -304,7 +312,7 @@ static int cli_match_mw(const char *cmd, int *width, const char **rest_out)
  * @retval 无
  * @note count 默认 16，上限 CLI_MD_MAX
  * @warning 未对齐地址仅警告仍继续读
- * @attention ❌ ISR；✅ 可阻塞 printf
+ * @attention ❌ ISR；✅ block/switch
  * @internal
  */
 static void cli_cmd_md(const char *args, int width)
@@ -368,7 +376,7 @@ static void cli_cmd_md(const char *args, int width)
  * @retval 无
  * @note 最多写入 CLI_MD_MAX 个单元
  * @warning 直接写内存，错误地址可能 HardFault
- * @attention ❌ ISR；✅ 可阻塞 printf
+ * @attention ❌ ISR；✅ block/switch
  * @internal
  */
 static void cli_cmd_mw(const char *args, int width)
@@ -423,7 +431,7 @@ static void cli_cmd_mw(const char *args, int width)
  * @retval 无
  * @note 由 help / ? 触发
  * @warning 无
- * @attention ❌ ISR；✅ 可阻塞 printf
+ * @attention ❌ ISR；✅ block/switch
  * @internal
  */
 static void cli_help(void)
@@ -458,13 +466,14 @@ static void cli_help(void)
 
 /**
  * @brief 解析并分发一行 CLI 命令
- * @details trim 后匹配 help/list/run/md/mw/stats/ticks/heap/cores/yield/clear 等。
+ * @details trim 后匹配 help/list/run/md/mw/stats/ticks/heap/cores/yield/clear 及 FS/vim。
  * @param[in,out] line 可写行缓冲；会被 trim 原地修改
  * @return 无
  * @retval 无
  * @note 空行直接返回；未知命令提示 try help
  * @warning run/md/mw 可能长时间阻塞或写内存
- * @attention ❌ ISR；✅ 任务上下文、可阻塞
+ * @attention ❌ ISR；✅ block/switch
+ * @internal
  */
 static void cli_handle(char *line)
 {
@@ -528,13 +537,14 @@ static void cli_handle(char *line)
 
 /**
  * @brief CLI 主循环任务：行编辑与命令执行
- * @details 使用 cli_line_read（历史/光标/Tab）；提交后 cli_handle。
+ * @details 使用 cli_line_read（历史/光标/Tab）；提交后 hist_push 与 cli_handle。
  * @param[in] arg 未使用
  * @return 无（永不返回）
  * @retval 无
  * @note 优先级 12；启动前清空 RX；FS/vim 状态仅本任务访问
  * @warning 单任务独占交互
- * @attention ❌ ISR；✅ 阻塞 yield/UART/FS
+ * @attention ❌ ISR；✅ block/switch
+ * @internal
  */
 static void cli_task(void *arg)
 {
@@ -574,7 +584,7 @@ static void cli_task(void *arg)
  * @retval 0 仅异常
  * @note 任务 ID 假定 create 后为 1
  * @warning 若 create 失败仍 start，CLI 不会运行
- * @attention ❌ ISR；✅ 启动调度
+ * @attention ❌ ISR；✅ block/switch
  */
 int main(int hartid, void *fdt, void *end)
 {
@@ -598,7 +608,7 @@ int main(int hartid, void *fdt, void *end)
  * @retval 无
  * @note CLI 交互仅在 hart0 cli 任务
  * @warning 无
- * @attention ❌ ISR；✅ 进入调度
+ * @attention ❌ ISR；✅ block/switch
  */
 void secondary_main(int hartid)
 {

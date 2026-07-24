@@ -39,7 +39,7 @@ cgrtos_hook_fn_t g_idle_sleep_hook;
  * @retval 无
  * @note 钩子须短小非阻塞
  * @warning 钩子内阻塞会延迟 idle 循环与工作窃取
- * @attention ❌ ISR；❌ 可能阻塞或上下文切换
+ * @attention ❌ ISR；✅ block/switch
  */
 void cgrtos_set_idle_sleep_hook(cgrtos_hook_fn_t hook)
 {
@@ -56,7 +56,8 @@ void cgrtos_set_idle_sleep_hook(cgrtos_hook_fn_t hook)
  * @retval 无
  * @note mepc 指向本函数；禁止用户函数 return 后跑飞
  * @warning 无
- * @attention @internal
+ * @attention ❌ ISR；❌ block/switch
+ * @internal
  */
 static void task_bootstrap(void *arg)
 {
@@ -77,7 +78,10 @@ static void task_bootstrap(void *arg)
  * @param[in] arg  入口参数
  * @return 初始栈指针
  * @retval 非 NULL
- * @attention @internal
+ * @note 由 task_create / idle 初始化调用
+ * @warning 须在任务尚未入队前调用
+ * @attention ❌ ISR；❌ block/switch
+ * @internal
  */
 static uint64_t *task_init_stack(cgrtos_task_t *task, task_func_t fn, void *arg)
 {
@@ -93,7 +97,8 @@ static uint64_t *task_init_stack(cgrtos_task_t *task, task_func_t fn, void *arg)
  * @retval NULL    无可用槽或存在 use-after-free 竞态
  * @note 调用方须已持临界区
  * @warning 跳过仍被 g_current 引用的槽以防 UAF
- * @attention @internal
+ * @attention ❌ ISR；❌ block/switch
+ * @internal
  */
 static cgrtos_task_t *task_alloc_slot(void)
 {
@@ -128,7 +133,8 @@ static cgrtos_task_t *task_alloc_slot(void)
  * @retval NULL    未找到
  * @note 无锁查找，SMP 下存在撕裂风险
  * @warning 无
- * @attention @internal
+ * @attention ✅ ISR；❌ block/switch
+ * @internal
  */
 static cgrtos_task_t *task_find(task_id_t id)
 {
@@ -149,7 +155,8 @@ static cgrtos_task_t *task_find(task_id_t id)
  * @retval eInvalid 未知状态
  * @note 无
  * @warning 无
- * @attention @internal
+ * @attention ✅ ISR；❌ block/switch
+ * @internal
  */
 static eTaskState_t task_state_to_enum(task_state_t state)
 {
@@ -178,7 +185,7 @@ static eTaskState_t task_state_to_enum(task_state_t state)
  * @retval (task_id_t)-1 参数非法 / 池满 / 策略禁用
  * @note 任务入口返回后经 bootstrap 调用 cgrtos_task_exit
  * @warning 禁止应用直接改写返回 ID 对应 TCB 字段
- * @attention ❌ ISR；❌ 通常不阻塞调用者（可能 IPI 触发他核调度）
+ * @attention ❌ ISR；❌ block/switch
  */
 task_id_t cgrtos_task_create(const char *name, task_func_t fn, void *arg,
                              uint8_t prio, sched_policy_t policy)
@@ -294,7 +301,7 @@ task_id_t cgrtos_task_create(const char *name, task_func_t fn, void *arg,
  * @retval pdFAIL 任务不存在或试图删除 idle
  * @note 自删除会 yield 切走；仍运行时不立即清 id
  * @warning 删除仍持锁任务依赖 force_release
- * @attention ❌ ISR；✅ 可能触发调度（自删/同核 RUNNING）
+ * @attention ❌ ISR；✅ block/switch
  */
 int cgrtos_task_delete(task_id_t id)
 {
@@ -481,7 +488,7 @@ tick_t cgrtos_task_get_runtime(task_id_t id)
  * @retval pdFAIL 无效 ID
  * @note 可用 resume 恢复
  * @warning 挂起持有互斥量的任务可能导致优先级反转/死锁
- * @attention ❌ ISR；✅ 可能引起切换
+ * @attention ❌ ISR；✅ block/switch
  */
 int cgrtos_task_suspend(task_id_t id)
 {
@@ -513,7 +520,7 @@ int cgrtos_task_suspend(task_id_t id)
  * @retval pdFAIL 无效或不在挂起态
  * @note 无
  * @warning 无
- * @attention ❌ ISR；✅ 可能引起切换
+ * @attention ❌ ISR；✅ block/switch
  */
 int cgrtos_task_resume(task_id_t id)
 {
@@ -540,7 +547,7 @@ int cgrtos_task_resume(task_id_t id)
  * @retval pdFAIL 越界或任务不存在
  * @note 与 PI/DPCP 共存时有效 prio 可能仍被抬升
  * @warning 降低持锁任务优先级可能加剧优先级反转窗口
- * @attention ❌ ISR；✅ 可能 yield
+ * @attention ❌ ISR；✅ block/switch
  */
 int cgrtos_task_set_priority(task_id_t id, uint8_t prio)
 {
@@ -587,7 +594,7 @@ int cgrtos_task_set_priority(task_id_t id, uint8_t prio)
  * @retval pdFAIL 参数非法或任务不存在
  * @note 默认 create 时 thresh=prio（经典抢占）
  * @warning 阈值过高会推迟高优先级响应，仅用于短临界段降抖动
- * @attention ❌ ISR；✅ 可能 yield
+ * @attention ❌ ISR；✅ block/switch
  */
 int cgrtos_task_set_preempt_threshold(task_id_t id, uint8_t thresh)
 {
@@ -619,7 +626,7 @@ int cgrtos_task_set_preempt_threshold(task_id_t id, uint8_t thresh)
  * @retval 0 亦可能表示无效任务
  * @note 无
  * @warning 无
- * @attention ❌ ISR（持 g_klock）；❌ 不阻塞
+ * @attention ❌ ISR；❌ block/switch
  */
 uint8_t cgrtos_task_get_preempt_threshold(task_id_t id)
 {
@@ -641,7 +648,7 @@ uint8_t cgrtos_task_get_preempt_threshold(task_id_t id)
  * @retval 无
  * @note idle 禁止退出
  * @warning 在持有互斥量时退出依赖 delete 的 force_release
- * @attention ❌ ISR；✅ 必定引起调度
+ * @attention ❌ ISR；✅ block/switch
  */
 void cgrtos_task_exit(void)
 {
@@ -678,7 +685,7 @@ void cgrtos_task_exit(void)
  * @retval pdFAIL out 为 NULL 或任务不存在
  * @note 需 CONFIG_SCHED_STATS 编译启用
  * @warning 无
- * @attention ❌ ISR（持 g_klock）；❌ 不阻塞
+ * @attention ❌ ISR；❌ block/switch
  */
 int cgrtos_task_get_sched_stats(task_id_t id, cgrtos_task_sched_stats_t *out)
 {
@@ -717,7 +724,7 @@ int cgrtos_task_get_sched_stats(task_id_t id, cgrtos_task_sched_stats_t *out)
  * @retval pdFAIL 无效任务或 cpu 非法/次核离线
  * @note 可能伴随迁移 IPI
  * @warning 硬绑满核可能导致过载无法迁移
- * @attention ❌ ISR；✅ 可能引起切换
+ * @attention ❌ ISR；✅ block/switch
  */
 int cgrtos_task_set_affinity(task_id_t id, uint8_t cpu)
 {
@@ -764,7 +771,7 @@ int cgrtos_task_set_affinity(task_id_t id, uint8_t cpu)
  * @retval pdFAIL 任务不存在或 EDF 未启用
  * @note 仅对 SCHED_EDF 有意义
  * @warning 过短周期可能导致持续过载与错过 deadline
- * @attention ❌ ISR；❌ 通常不阻塞
+ * @attention ❌ ISR；❌ block/switch
  */
 int cgrtos_task_set_period(task_id_t id, tick_t period)
 {
@@ -801,7 +808,7 @@ int cgrtos_task_set_period(task_id_t id, tick_t period)
  * @retval pdFAIL 任务不存在
  * @note 无
  * @warning deadline 已过期时仍可能被选中运行（取决于 pick 规则）
- * @attention ❌ ISR；❌ 通常不阻塞
+ * @attention ❌ ISR；❌ block/switch
  */
 int cgrtos_task_set_deadline(task_id_t id, tick_t deadline)
 {
@@ -834,7 +841,7 @@ int cgrtos_task_set_deadline(task_id_t id, tick_t deadline)
  * @retval 0xFF 无效任务
  * @note 无
  * @warning 无锁快照，SMP 下可能略有滞后
- * @attention ✅ ISR；❌ 不阻塞
+ * @attention ✅ ISR；❌ block/switch
  */
 uint8_t cgrtos_task_get_run_cpu(task_id_t id)
 {
@@ -854,7 +861,7 @@ uint8_t cgrtos_task_get_run_cpu(task_id_t id)
  * @retval NULL    未找到
  * @note 应用应视 TCB 为只读句柄，禁止直接改字段
  * @warning 返回指针在任务删除后可能失效（UAF）
- * @attention ✅ 可在 ISR 调用（无锁查找）；❌ 不阻塞
+ * @attention ✅ ISR；❌ block/switch
  */
 cgrtos_task_t *cgrtos_task_get_handle(task_id_t id)
 {
@@ -870,7 +877,7 @@ cgrtos_task_t *cgrtos_task_get_handle(task_id_t id)
  * @retval eInvalid 无效 ID
  * @note 无
  * @warning 无锁快照，SMP 下可能略有滞后
- * @attention ✅ ISR；❌ 不阻塞
+ * @attention ✅ ISR；❌ block/switch
  */
 eTaskState_t cgrtos_task_get_state(task_id_t id)
 {
@@ -890,7 +897,7 @@ eTaskState_t cgrtos_task_get_state(task_id_t id)
  * @retval 0  无效任务或已几乎用尽
  * @note 需 CONFIG_CHECK_STACK_OVERFLOW 填栈才准确
  * @warning 非精确值，仅调试用
- * @attention ✅ 任务上下文更安全；❌ 不阻塞
+ * @attention ❌ ISR；❌ block/switch
  */
 uint32_t cgrtos_task_get_stack_high_water_mark(task_id_t id)
 {
@@ -928,7 +935,7 @@ uint32_t cgrtos_task_get_stack_high_water_mark(task_id_t id)
  * @retval 无
  * @note 调度挂起时为空操作
  * @warning 无
- * @attention ❌ ISR（ISR 请用 yield_from_isr）；✅ 引起切换
+ * @attention ❌ ISR；✅ block/switch
  */
 void cgrtos_task_yield(void)
 {
@@ -947,7 +954,8 @@ void cgrtos_task_yield(void)
  * @retval 任意 uint32_t 合并结果
  * @note 无
  * @warning 无
- * @attention @internal
+ * @attention ✅ ISR；❌ block/switch
+ * @internal
  */
 static uint32_t notify_apply(uint32_t old_val, uint32_t value, eNotifyAction_t action)
 {
@@ -976,7 +984,7 @@ static uint32_t notify_apply(uint32_t old_val, uint32_t value, eNotifyAction_t a
  * @retval 任意 uint32_t 旧值
  * @note 无
  * @warning 与 ISR 通知并发时依赖临界区
- * @attention ❌ ISR 请用 from_isr；✅ 可能唤醒切换
+ * @attention ❌ ISR；❌ block/switch
  */
 uint32_t cgrtos_task_notify(cgrtos_task_t *task, uint32_t value,
                             eNotifyAction_t action)
@@ -1015,7 +1023,7 @@ uint32_t cgrtos_task_notify(cgrtos_task_t *task, uint32_t value,
  * @retval 任意 uint32_t 旧值
  * @note 须在允许的中断优先级内调用
  * @warning 忽略 woken 且未自动 yield 可能导致延迟调度
- * @attention ✅ ISR；❌ 不阻塞调用 ISR
+ * @attention ✅ ISR；❌ block/switch
  */
 uint32_t cgrtos_task_notify_from_isr(cgrtos_task_t *task, uint32_t value,
                                      eNotifyAction_t action, BaseType_t *woken)
@@ -1052,7 +1060,7 @@ uint32_t cgrtos_task_notify_from_isr(cgrtos_task_t *task, uint32_t value,
  * @retval 0   超时或失败
  * @note 通知值本为 0 时与超时返回 0 可能混淆
  * @warning 无
- * @attention ❌ ISR；✅ 可能阻塞并切换
+ * @attention ❌ ISR；✅ block/switch
  */
 uint32_t cgrtos_task_notify_wait(uint32_t clear_on_entry, uint32_t clear_on_exit,
                                  uint32_t *value, tick_t timeout)
@@ -1118,7 +1126,8 @@ uint32_t cgrtos_task_notify_wait(uint32_t clear_on_entry, uint32_t clear_on_exit
  * @retval 无
  * @note 用于 delay_us 尾段亚 tick 精确等待
  * @warning 长忙等会占用 CPU
- * @attention @internal
+ * @attention ❌ ISR；❌ block/switch
+ * @internal
  */
 static void delay_busy_until_mtime(uint64_t deadline)
 {
@@ -1130,11 +1139,13 @@ static void delay_busy_until_mtime(uint64_t deadline)
 
 /**
  * @brief 相对延时若干系统 tick
- * @param ticks 延迟 tick 数；0 等价于仅 yield 一次
- * @details
- * 1. ISR 内或当前无有效任务时直接返回。
- * 2. ticks==0 时仅 sched_yield，不进入延迟队列。
- * 3. 否则临界区内 sched_block(BLOCK_DELAY, timeout=ticks)，yield 后在 wake tick 恢复。
+ * @details ISR/无任务则返回；ticks==0 仅 yield；否则 sched_block(BLOCK_DELAY) 后 yield 至唤醒。
+ * @param[in] ticks 延迟 tick 数；0 等价于仅 yield 一次
+ * @return 无
+ * @retval 无
+ * @note 任务上下文相对延时原语
+ * @warning ISR 内调用为 no-op
+ * @attention ❌ ISR；✅ block/switch
  */
 void cgrtos_delay(tick_t ticks)
 {
@@ -1167,11 +1178,13 @@ void cgrtos_delay(tick_t ticks)
 
 /**
  * @brief 阻塞到绝对系统 tick 时刻
- * @param wake 目标唤醒时刻（g_ticks 绝对值）
- * @details
- * 1. ISR 或无有效当前任务时返回。
- * 2. 临界区读取 now=g_ticks；若 wake<=now 说明已过期，立即返回。
- * 3. 否则 sched_block_until(BLOCK_DELAY, wake)，yield 等待 tick 到达 wake。
+ * @details ISR/无任务则返回；wake 已过期立即返回；否则 sched_block_until 后 yield。
+ * @param[in] wake 目标唤醒时刻（g_ticks 绝对值）
+ * @return 无
+ * @retval 无
+ * @note 与 delay 相对延时对应的绝对时刻版本
+ * @warning ISR 内调用为 no-op
+ * @attention ❌ ISR；✅ block/switch
  */
 void cgrtos_delay_until_tick(tick_t wake)
 {
@@ -1205,12 +1218,13 @@ void cgrtos_delay_until_tick(tick_t wake)
 
 /**
  * @brief 相对延时若干微秒（tick 粗阻塞 + mtime 忙等混合）
- * @param us 延迟微秒数；0 或 ISR 内无操作
- * @details
- * 1. 将 us 转为 mtime 周期数，计算绝对截止 t_end=mtime_now+cycles。
- * 2. 当剩余时间 >= 2 tick 时，用 cgrtos_delay 粗阻塞（remain/per_tick - 1 tick）。
- * 3. 剩余不足 2 tick 时退出循环，调用 delay_busy_until_mtime 精确补齐。
- * 4. 混合策略兼顾调度友好与亚 tick 精度。
+ * @details us→mtime 截止；剩余≥2 tick 用 delay 粗阻塞；尾段 delay_busy_until_mtime 补齐。
+ * @param[in] us 延迟微秒数；0 或 ISR 内无操作
+ * @return 无
+ * @retval 无
+ * @note 兼顾调度友好与亚 tick 精度
+ * @warning 尾段忙等占用 CPU；ISR 内为 no-op
+ * @attention ❌ ISR；✅ block/switch
  */
 void cgrtos_delay_us(uint32_t us)
 {
@@ -1260,11 +1274,13 @@ void cgrtos_delay_us(uint32_t us)
 
 /**
  * @brief 相对延时若干毫秒
- * @param ms 延迟毫秒数；0 等价于 delay(0)
- * @details
- * 1. ms==0 时转调 cgrtos_delay(0) 仅 yield。
- * 2. ms 过大导致 us 乘法溢出时，退化为纯 tick 路径 portMS_TO_TICK。
- * 3. 常规模围内转 us（ms*1000）委托 cgrtos_delay_us 实现。
+ * @details ms==0 仅 yield；溢出则 portMS_TO_TICK；否则转 us 委托 delay_us。
+ * @param[in] ms 延迟毫秒数；0 等价于 delay(0)
+ * @return 无
+ * @retval 无
+ * @note CONFIG_DELAY_BUSY_US=0 时强制纯 tick 路径
+ * @warning 大 ms 可能长时间阻塞调用任务
+ * @attention ❌ ISR；✅ block/switch
  */
 void cgrtos_delay_ms(uint32_t ms)
 {
@@ -1290,13 +1306,14 @@ void cgrtos_delay_ms(uint32_t ms)
 
 /**
  * @brief 绝对周期延时（FreeRTOS vTaskDelayUntil 语义）
- * @param prev_wake 上次唤醒 tick（入参/出参，由本函数推进）
- * @param increment 周期间隔 tick 数
- * @details
- * 1. prev_wake 或 increment 无效、或 ISR 内则返回。
- * 2. 计算 next=*prev_wake+increment，并写回 *prev_wake=next。
- * 3. 读取 now=g_ticks；若 next>now 则 delay_until_tick(next)。
- * 4. 若已错过 deadline（next<=now），立即返回不拉伸周期（不补偿漂移）。
+ * @details 推进 *prev_wake+=increment；next>now 则 delay_until_tick；错过则立即返回不补偿。
+ * @param[in,out] prev_wake 上次唤醒 tick（入参/出参，由本函数推进）
+ * @param[in]     increment 周期间隔 tick 数
+ * @return 无
+ * @retval 无
+ * @note 周期任务常用；不补偿已错过的周期
+ * @warning prev_wake 不可为 NULL；ISR 内为 no-op
+ * @attention ❌ ISR；✅ block/switch
  */
 void cgrtos_delay_until(tick_t *prev_wake, tick_t increment)
 {
@@ -1321,12 +1338,13 @@ void cgrtos_delay_until(tick_t *prev_wake, tick_t increment)
 
 /**
  * @brief 各 CPU 核 idle 任务入口（最低优先级后台循环）
- * @param arg 未使用（核号通过 arch_cpu_id() 获取）
- * @details
- * 1. 无限循环：可选 idle 钩子 → sched_idle_steal 工作窃取。
- * 2. QEMU busy 泵模式：hart0 自旋推进 mtime；hart1 短自旋（禁止 WFI 以免时间基冻结）。
- * 3. 非 busy 模式执行 WFI 等待中断。
- * 4. 若 g_yield_pending 置位则 yield，处理跨核唤醒的待切换请求。
+ * @details 循环：钩子→idle_steal→WFI/busy 泵；g_yield_pending 则 yield。永不返回。
+ * @param[in] arg 未使用（核号通过 arch_cpu_id() 获取）
+ * @return 无
+ * @retval 无
+ * @note 由各核 idle TCB 入口指向；非用户 API
+ * @warning busy 泵模式下禁止在此软调 tick_handler
+ * @attention ❌ ISR；✅ block/switch
  */
 void cgrtos_idle_task_entry(void *arg)
 {
@@ -1379,11 +1397,12 @@ void cgrtos_idle_task_entry(void *arg)
 
 /**
  * @brief 初始化各 CPU 核的 idle 任务 TCB 与初始栈帧
- * @details
- * 1. 对每个核 i 清零 g_idle[i]，初始化调度链表节点。
- * 2. 设置名 "idle_i"、prio=0、state=READY、policy=RR、cpu_aff=run_cpu=i。
- * 3. task_init_stack 绑定 cgrtos_idle_task_entry，将 g_current[i] 指向 idle TCB。
- * 4. idle 任务 id 保持 0，表示非用户创建任务。
+ * @details 清零并配置各核 idle TCB；绑定 idle_task_entry；g_current[i] 指向 idle；id 保持 0。
+ * @return 无
+ * @retval 无
+ * @note 由 cgrtos_init 在调度启动前调用
+ * @warning 须在调度器运行前完成
+ * @attention ❌ ISR；❌ block/switch
  */
 void cgrtos_init_idle_tasks(void)
 {
@@ -1423,7 +1442,7 @@ void cgrtos_init_idle_tasks(void)
  * @retval >=0 任务总数
  * @note out 为 NULL 时返回当前任务数
  * @warning 无
- * @attention ❌ ISR（持 g_klock）；❌ 不阻塞
+ * @attention ❌ ISR；❌ block/switch
  */
 uint32_t cgrtos_task_list_export(cgrtos_task_info_t *out, uint32_t max)
 {

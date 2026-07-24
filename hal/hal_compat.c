@@ -2,8 +2,8 @@
  * @file hal_compat.c
  * @brief 历史 cgrtos_* 外设 API → HAL 用户 API 薄封装
  * @author Cong Zhou / Juilletioi
- * @version 5.0.0
- * @date 2026-07-22
+ * @version 5.3.0
+ * @date 2026-07-24
  * @copyright CG-RTOS
  *
  * @details
@@ -78,7 +78,7 @@ void cgrtos_uart_init(void)
  * @retval 无
  * @note 经 HAL 自动加锁
  * @warning 持锁期间禁止 yield
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ✅ ISR；❌ block/switch（持锁勿长时间占用/yield）
  */
 void cgrtos_uart_putc(char c)
 {
@@ -107,7 +107,7 @@ char cgrtos_uart_getc(void)
  * @retval -1 RX 空或无设备
  * @note -1 为 poll 语义，非 HAL_ERR_*
  * @warning 单次 poll，不 yield
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ✅ ISR；❌ 不阻塞
  */
 int cgrtos_uart_pollc(void)
 {
@@ -122,7 +122,7 @@ int cgrtos_uart_pollc(void)
  * @retval 无
  * @note NULL 由 HAL 忽略
  * @warning 持锁期间禁止 yield
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ✅ ISR；❌ block/switch（持锁勿长时间占用/yield）
  */
 void cgrtos_uart_puts(const char *s)
 {

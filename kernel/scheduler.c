@@ -98,7 +98,8 @@ static volatile uint8_t g_edf_kick_pending;
  * @retval -1 无就绪任务
  * @note 内联热路径；调用方已持锁或 IRQ 关闭
  * @warning 无
- * @attention @internal ✅ ISR；❌ block/switch
+ * @attention ✅ ISR；❌ block/switch
+ * @internal
  */
 static inline int sched_highest_ready_prio(uint32_t bitmap)
 {
@@ -117,7 +118,8 @@ static inline int sched_highest_ready_prio(uint32_t bitmap)
  * @retval 0 不使用
  * @note 策略路由辅助
  * @warning 无
- * @attention @internal ✅ ISR；❌ block/switch
+ * @attention ✅ ISR；❌ block/switch
+ * @internal
  */
 static inline int sched_uses_priority(cgrtos_task_t *task)
 {
@@ -142,7 +144,8 @@ static inline int sched_uses_priority(cgrtos_task_t *task)
  * @retval 0 不使用
  * @note 策略路由辅助
  * @warning 无
- * @attention @internal ✅ ISR；❌ block/switch
+ * @attention ✅ ISR；❌ block/switch
+ * @internal
  */
 static inline int sched_uses_cfs(cgrtos_task_t *task)
 {
@@ -167,7 +170,8 @@ static inline int sched_uses_cfs(cgrtos_task_t *task)
  * @retval 0 非 EDF
  * @note 未启用 EDF 时编译为恒 0
  * @warning 无
- * @attention @internal ✅ ISR；❌ block/switch
+ * @attention ✅ ISR；❌ block/switch
+ * @internal
  */
 static inline int sched_uses_edf(cgrtos_task_t *task)
 {
@@ -189,7 +193,8 @@ static inline int sched_uses_edf(cgrtos_task_t *task)
  * @retval 0 不允许或 task 为空
  * @note MC-EDF 分配与 ready_count 统计共用
  * @warning 无
- * @attention @internal ✅ ISR；❌ block/switch
+ * @attention ✅ ISR；❌ block/switch
+ * @internal
  */
 static int sched_edf_affinity_ok(cgrtos_task_t *task, uint8_t cpu)
 {
@@ -206,7 +211,8 @@ static int sched_edf_affinity_ok(cgrtos_task_t *task, uint8_t cpu)
  * @retval 无
  * @note EDF 入队/释放后调用；使更早 deadline 能抢占
  * @warning 调用方不得持有 g_ready_lock（IPI 路径可能间接争用）
- * @attention @internal ❌ ISR；❌ block/switch
+ * @attention ❌ ISR；❌ block/switch
+ * @internal
  */
 static void sched_mcedf_kick_all(void)
 {
@@ -233,7 +239,8 @@ static void sched_mcedf_kick_all(void)
  * @retval 无
  * @note 持 g_klock 时同步 IPI 可能导致对端 enter_critical 自旋死锁
  * @warning 持 g_klock 时禁止同步全员 IPI
- * @attention @internal ✅ ISR；❌ block/switch
+ * @attention ✅ ISR；❌ block/switch
+ * @internal
  */
 static void sched_edf_kick_request(void)
 {
@@ -292,7 +299,8 @@ void cgrtos_sched_edf_kick_flush(void)
  * @retval 无
  * @note remove_ready_locked 内部路径
  * @warning task 为空直接返回
- * @attention @internal ✅ ISR；❌ block/switch
+ * @attention ✅ ISR；❌ block/switch
+ * @internal
  */
 static void sched_edf_global_remove(cgrtos_task_t *task)
 {
@@ -361,7 +369,8 @@ static void sched_edf_global_remove(cgrtos_task_t *task)
  * @retval 无
  * @note 调用方已持 g_ready_lock
  * @warning 堆满时静默丢弃入队
- * @attention @internal ✅ ISR；❌ block/switch
+ * @attention ✅ ISR；❌ block/switch
+ * @internal
  */
 static void sched_add_edf_ready(cgrtos_task_t *task)
 {
@@ -399,7 +408,8 @@ static void sched_add_edf_ready(cgrtos_task_t *task)
  * @retval 无
  * @note 调用方应已持有 g_ready_lock
  * @warning 未在轮上则 no-op
- * @attention @internal ✅ ISR；❌ block/switch
+ * @attention ✅ ISR；❌ block/switch
+ * @internal
  */
 static void edf_wheel_remove(cgrtos_task_t *task)
 {
@@ -475,7 +485,8 @@ void cgrtos_sched_edf_arm(cgrtos_task_t *task)
  * @retval 无
  * @note 由 sched_process_edf_releases 在锁外调用
  * @warning 非 EDF 或 period==0 直接返回
- * @attention @internal ✅ ISR；❌ block/switch
+ * @attention ✅ ISR；❌ block/switch
+ * @internal
  */
 static void sched_edf_release(cgrtos_task_t *task)
 {
@@ -509,7 +520,8 @@ static void sched_edf_release(cgrtos_task_t *task)
  * @retval 无
  * @note hart0 tick 调用；多轮 delta 由高 32 位 rounds 表示
  * @warning 单次最多收集 16 个任务
- * @attention @internal ✅ ISR；❌ block/switch
+ * @attention ✅ ISR；❌ block/switch
+ * @internal
  */
 static void sched_process_edf_releases(void)
 {
@@ -601,7 +613,8 @@ uint8_t cgrtos_sched_target_core(cgrtos_task_t *task)
  * @retval 无
  * @note 调用方应已持有 g_ready_lock
  * @warning 无
- * @attention @internal ✅ ISR；❌ block/switch
+ * @attention ✅ ISR；❌ block/switch
+ * @internal
  */
 static void sched_add_priority_ready(cgrtos_task_t *task)
 {
@@ -632,7 +645,8 @@ static void sched_add_priority_ready(cgrtos_task_t *task)
  * @retval 无
  * @note 调用方应已持有 g_ready_lock
  * @warning 无
- * @attention @internal ✅ ISR；❌ block/switch
+ * @attention ✅ ISR；❌ block/switch
+ * @internal
  */
 static void sched_add_cfs_ready(cgrtos_task_t *task)
 {
@@ -650,7 +664,8 @@ static void sched_add_cfs_ready(cgrtos_task_t *task)
  * @retval 无
  * @note 前向声明
  * @warning 无
- * @attention @internal ✅ ISR；❌ block/switch
+ * @attention ✅ ISR；❌ block/switch
+ * @internal
  */
 static void sched_remove_priority_ready(cgrtos_task_t *task);
 
@@ -662,7 +677,8 @@ static void sched_remove_priority_ready(cgrtos_task_t *task);
  * @retval 无
  * @note 不获取锁；与 remove_ready_locked 配对
  * @warning DELETED 或 NULL 直接返回
- * @attention @internal ✅ ISR；❌ block/switch
+ * @attention ✅ ISR；❌ block/switch
+ * @internal
  */
 static void sched_add_ready_locked(cgrtos_task_t *task)
 {
@@ -703,7 +719,8 @@ static void sched_add_ready_locked(cgrtos_task_t *task)
  * @retval 无
  * @note 不获取锁
  * @warning 无
- * @attention @internal ✅ ISR；❌ block/switch
+ * @attention ✅ ISR；❌ block/switch
+ * @internal
  */
 static void sched_remove_ready_locked(cgrtos_task_t *task)
 {
@@ -765,7 +782,8 @@ void cgrtos_sched_add_ready(cgrtos_task_t *task)
  * @retval 无
  * @note remove_ready_locked 内部路径
  * @warning 无
- * @attention @internal ✅ ISR；❌ block/switch
+ * @attention ✅ ISR；❌ block/switch
+ * @internal
  */
 static void sched_remove_priority_ready(cgrtos_task_t *task)
 {
@@ -834,7 +852,8 @@ void cgrtos_sched_remove_ready(cgrtos_task_t *task)
  * @retval NULL 无匹配
  * @note switch_from_trap 内部；持 g_ready_lock
  * @warning 无
- * @attention @internal ✅ ISR；❌ block/switch
+ * @attention ✅ ISR；❌ block/switch
+ * @internal
  */
 static cgrtos_task_t *sched_pick_priority(uint8_t cpu)
 {
@@ -863,7 +882,8 @@ static cgrtos_task_t *sched_pick_priority(uint8_t cpu)
  * @retval NULL 队空
  * @note switch_from_trap 内部
  * @warning 无
- * @attention @internal ✅ ISR；❌ block/switch
+ * @attention ✅ ISR；❌ block/switch
+ * @internal
  */
 static cgrtos_task_t *sched_pick_cfs(uint8_t cpu)
 {
@@ -883,7 +903,8 @@ static cgrtos_task_t *sched_pick_cfs(uint8_t cpu)
  * @retval NULL 无 EDF 或无席
  * @note RUNNING 不在就绪链；Global EDF 规则
  * @warning cpu 越界返回 NULL
- * @attention @internal ✅ ISR；❌ block/switch
+ * @attention ✅ ISR；❌ block/switch
+ * @internal
  */
 static cgrtos_task_t *sched_pick_edf(uint8_t cpu)
 {
@@ -1024,7 +1045,8 @@ static cgrtos_task_t *sched_pick_edf(uint8_t cpu)
  * @retval idle 无其它就绪
  * @note switch_from_trap 核心选择
  * @warning 无
- * @attention @internal ✅ ISR；❌ block/switch
+ * @attention ✅ ISR；❌ block/switch
+ * @internal
  */
 static cgrtos_task_t *sched_pick_next(uint8_t cpu)
 {
@@ -1054,7 +1076,8 @@ static cgrtos_task_t *sched_pick_next(uint8_t cpu)
  * @retval 无
  * @note 实际 requeue 在 switch_from_trap
  * @warning idle(id==0) 跳过
- * @attention @internal ✅ ISR；❌ block/switch
+ * @attention ✅ ISR；❌ block/switch
+ * @internal
  */
 static void sched_rotate_time_slice(cgrtos_task_t *task)
 {
@@ -1186,7 +1209,8 @@ cgrtos_task_t *cgrtos_wait_list_pop_highest(cgrtos_task_t *volatile *head)
  * @retval 无
  * @note block/unblock/purge 共用
  * @warning 无
- * @attention @internal ✅ ISR；❌ block/switch
+ * @attention ✅ ISR；❌ block/switch
+ * @internal
  */
 static void sched_delayed_remove(cgrtos_task_t *task)
 {
@@ -1246,7 +1270,8 @@ void cgrtos_task_purge_waits(cgrtos_task_t *task)
  * @retval 无
  * @note block/block_until 内部
  * @warning 无
- * @attention @internal ❌ ISR；❌ block/switch
+ * @attention ❌ ISR；❌ block/switch
+ * @internal
  */
 static void sched_delayed_insert(cgrtos_task_t *task, tick_t wake_tick)
 {
@@ -1606,7 +1631,8 @@ uint64_t *cgrtos_sched_switch_from_trap(uint64_t *sp)
  * @retval 无
  * @note hart0 tick 调用；与 IPC 串行化
  * @warning 持 g_klock
- * @attention @internal ✅ ISR；❌ block/switch
+ * @attention ✅ ISR；❌ block/switch
+ * @internal
  */
 static void sched_process_delayed_tasks(void)
 {
@@ -1803,7 +1829,8 @@ uint32_t cgrtos_sched_ready_count(uint8_t cpu)
  * @retval 0 不计入
  * @note 权重越高越不宜迁出
  * @warning 无
- * @attention @internal ✅ ISR；❌ block/switch
+ * @attention ✅ ISR；❌ block/switch
+ * @internal
  */
 static uint32_t sched_task_weight(cgrtos_task_t *task)
 {
@@ -1828,7 +1855,8 @@ static uint32_t sched_task_weight(cgrtos_task_t *task)
  * @retval 0 不可
  * @note LB 与 idle steal 筛选
  * @warning 无
- * @attention @internal ✅ ISR；❌ block/switch
+ * @attention ✅ ISR；❌ block/switch
+ * @internal
  */
 static int sched_task_migratable(cgrtos_task_t *task)
 {
@@ -1913,7 +1941,8 @@ uint8_t cgrtos_sched_least_loaded_core(void)
  * @retval 无
  * @note LB push 与 idle steal 共用
  * @warning 须 migratable
- * @attention @internal ✅ ISR；❌ block/switch
+ * @attention ✅ ISR；❌ block/switch
+ * @internal
  */
 static void sched_migrate_task(cgrtos_task_t *task, uint8_t dst)
 {
@@ -1937,7 +1966,8 @@ static void sched_migrate_task(cgrtos_task_t *task, uint8_t dst)
  * @retval NULL 无候选
  * @note push LB 与 pull steal 共用
  * @warning 无
- * @attention @internal ✅ ISR；❌ block/switch
+ * @attention ✅ ISR；❌ block/switch
+ * @internal
  */
 static cgrtos_task_t *sched_pick_victim(uint8_t src)
 {

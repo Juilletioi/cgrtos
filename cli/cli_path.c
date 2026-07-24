@@ -2,8 +2,8 @@
  * @file cli_path.c
  * @brief CLI 路径会话与 Tab 补全实现
  * @author Cong Zhou / Juilletioi
- * @version 5.1.0
- * @date 2026-07-23
+ * @version 5.3.0
+ * @date 2026-07-24
  * @copyright CG-RTOS
  *
  * @details
@@ -24,13 +24,25 @@
 #include "../kernel/vfs.h"
 #include <string.h>
 
+/**
+ * @brief 每任务 CWD 会话槽数量上限
+ * @warning 无运行时副作用（编译期常量）
+ */
 #define CLI_PATH_SESS_MAX   4
+/**
+ * @brief Tab 补全单次最多匹配条目数
+ * @warning 无运行时副作用（编译期常量）
+ */
 #define CLI_PATH_MATCH_MAX  64
 
+/**
+ * @brief 单任务工作目录会话
+ * @details 按 task_id 绑定；仅 cli 任务访问，无锁。
+ */
 typedef struct {
-    uint8_t   used;
-    task_id_t tid;
-    char      cwd[CLI_FS_PATH_MAX];
+    uint8_t   used;                    /**< @brief 槽是否占用 */
+    task_id_t tid;                     /**< @brief 绑定任务 ID */
+    char      cwd[CLI_FS_PATH_MAX];    /**< @brief 当前工作目录（绝对路径） */
 } cli_path_sess_t;
 
 /**
@@ -39,6 +51,19 @@ typedef struct {
  */
 static cli_path_sess_t g_sess[CLI_PATH_SESS_MAX];
 
+/**
+ * @brief 本地字符串相等比较
+ * @details 逐字节至双 NUL；两指针同为 NULL 视为相等。
+ * @param[in] a 串 A
+ * @param[in] b 串 B
+ * @return 1 相等；0 不等
+ * @retval 1 相等
+ * @retval 0 不等
+ * @note 无
+ * @warning 无
+ * @attention ✅ ISR；❌ block/switch
+ * @internal
+ */
 static int path_streq(const char *a, const char *b)
 {
     if (!a || !b) {
@@ -53,9 +78,13 @@ static int path_streq(const char *a, const char *b)
 
 /**
  * @brief 取当前任务会话槽（必要时分配，CWD=/）
- * @details 保护：g_sess 无锁（单任务）。
+ * @details 按当前任务 ID 查找；无则分配空闲槽并初始化 CWD 为 `/`；表满返回 NULL。
  * @return 会话指针；表满 NULL
- * @attention ❌ ISR；❌ 不阻塞
+ * @retval 非 NULL 会话
+ * @retval NULL 表满或异常
+ * @note 保护：g_sess 无锁（单任务）
+ * @warning 无
+ * @attention ❌ ISR；❌ block/switch
  * @internal
  */
 static cli_path_sess_t *path_sess_get(void)
@@ -83,6 +112,15 @@ static cli_path_sess_t *path_sess_get(void)
     return 0;
 }
 
+/**
+ * @brief 初始化当前任务 FS 会话并将 CWD 置为 /
+ * @details 获取或分配会话槽后强制 CWD=`/`；表满则静默失败。
+ * @return 无
+ * @retval 无
+ * @note 保护：g_sess 无锁，单 CLI 任务独占
+ * @warning 多 CLI 任务并发写会话未定义
+ * @attention ❌ ISR；❌ block/switch
+ */
 void cli_path_session_init(void)
 {
     cli_path_sess_t *s = path_sess_get();
@@ -92,6 +130,19 @@ void cli_path_session_init(void)
     }
 }
 
+/**
+ * @brief 规范化绝对路径并折叠 . / ..
+ * @details 拒绝控制字符与过长组件；结果始终以 / 开头；纯计算不访问 FS。
+ * @param[in]  in     输入绝对路径（须以 / 开头）
+ * @param[out] out    输出缓冲
+ * @param[in]  out_sz 容量
+ * @return 0 成功；-1 非法
+ * @retval 0  合法
+ * @retval -1 非法/过长/空指针
+ * @note 纯计算，不访问 FS
+ * @warning 无
+ * @attention ✅ ISR；❌ block/switch
+ */
 int cli_path_normalize(const char *in, char *out, size_t out_sz)
 {
     const char *p;
@@ -162,6 +213,20 @@ int cli_path_normalize(const char *in, char *out, size_t out_sz)
     return 0;
 }
 
+/**
+ * @brief 将用户路径解析为规范化绝对路径
+ * @details 相对路径拼接当前任务 CWD；失败时可打印原因。
+ * @param[in]  user   用户路径；空表示 CWD
+ * @param[out] abs    输出绝对路径
+ * @param[in]  abs_sz 容量
+ * @param[in]  quiet  非 0 则失败不打印
+ * @return 0 成功；-1 失败
+ * @retval 0  成功
+ * @retval -1 失败
+ * @note 保护：读 g_sess 无锁（单任务）
+ * @warning 无
+ * @attention ❌ ISR；❌ block/switch
+ */
 int cli_path_resolve(const char *user, char *abs, size_t abs_sz, int quiet)
 {
     cli_path_sess_t *s = path_sess_get();
@@ -202,6 +267,18 @@ int cli_path_resolve(const char *user, char *abs, size_t abs_sz, int quiet)
     return 0;
 }
 
+/**
+ * @brief 取当前任务 CWD 副本
+ * @details 从会话槽拷贝 cwd 到 out。
+ * @param[out] out    缓冲
+ * @param[in]  out_sz 容量
+ * @return 0 成功；-1 无会话
+ * @retval 0  成功
+ * @retval -1 无会话/参数错
+ * @note 保护：g_sess 无锁
+ * @warning 无
+ * @attention ❌ ISR；❌ block/switch
+ */
 int cli_path_getcwd(char *out, size_t out_sz)
 {
     cli_path_sess_t *s = path_sess_get();
@@ -213,6 +290,17 @@ int cli_path_getcwd(char *out, size_t out_sz)
     return 0;
 }
 
+/**
+ * @brief 设置当前任务 CWD（须为已规范化绝对路径）
+ * @details 写入会话槽 cwd；调用方须已验证路径为目录。
+ * @param[in] abs 绝对路径
+ * @return 0 成功；-1 失败
+ * @retval 0  成功
+ * @retval -1 失败
+ * @note 保护：g_sess 无锁
+ * @warning 调用方须已验证路径为目录
+ * @attention ❌ ISR；❌ block/switch
+ */
 int cli_path_setcwd(const char *abs)
 {
     cli_path_sess_t *s = path_sess_get();
@@ -226,6 +314,17 @@ int cli_path_setcwd(const char *abs)
 
 /**
  * @brief 定位行内光标处的路径 token [start, end)
+ * @details 从 cursor 向左右扩展至空白边界，写出半开区间。
+ * @param[in]  line   行缓冲
+ * @param[in]  len    行长度
+ * @param[in]  cursor 光标位置
+ * @param[out] start  token 起始下标
+ * @param[out] end    token 结束下标（不含）
+ * @return 无
+ * @retval 无
+ * @note 无
+ * @warning 无
+ * @attention ✅ ISR；❌ block/switch
  * @internal
  */
 static void path_token_span(const char *line, int len, int cursor, int *start, int *end)
@@ -247,6 +346,15 @@ static void path_token_span(const char *line, int len, int cursor, int *start, i
 
 /**
  * @brief 判断 name 是否以 prefix 开头
+ * @details 逐字符比较 prefix；不要求 name 与 prefix 等长。
+ * @param[in] name   目录项名
+ * @param[in] prefix 前缀
+ * @return 1 匹配；0 否
+ * @retval 1 匹配
+ * @retval 0 否
+ * @note 无
+ * @warning 无
+ * @attention ✅ ISR；❌ block/switch
  * @internal
  */
 static int path_prefix_match(const char *name, const char *prefix)
@@ -261,6 +369,14 @@ static int path_prefix_match(const char *name, const char *prefix)
 
 /**
  * @brief 计算多串最长公共前缀长度
+ * @details 对 names[0..n) 求 LCP；n<=0 返回 0。
+ * @param[in] names 名称表
+ * @param[in] n     条目数
+ * @return 公共前缀字节数
+ * @retval >=0 长度
+ * @note 无
+ * @warning 无
+ * @attention ✅ ISR；❌ block/switch
  * @internal
  */
 static int path_lcp_len(char names[][CGRTOS_FS_MAX_NAME], int n)
@@ -286,6 +402,22 @@ static int path_lcp_len(char names[][CGRTOS_FS_MAX_NAME], int n)
     }
 }
 
+/**
+ * @brief 对行缓冲光标处路径 token 做 Tab 补全
+ * @details 单 Tab：唯一匹配补全（目录加 /）或多匹配最长公共前缀；双 Tab（list_all!=0）列出匹配项。
+ * @param[in,out] line      行缓冲（可写）
+ * @param[in]     line_cap  容量（含 NUL）
+ * @param[in,out] len       当前长度
+ * @param[in,out] cursor    光标位置（0..len）
+ * @param[in]     list_all  非 0=列出全部匹配
+ * @return 1=行已修改；0=无变化；-1=错误
+ * @retval 1  已补全
+ * @retval 0  无匹配或仅响铃
+ * @retval -1 错误
+ * @note vfs_* 内 g_fs_mtx；堆分配用 g_klock；不在持 FS 锁时 malloc
+ * @warning 持锁期间禁止 UART 阻塞；本函数在 readdir 循环外打印
+ * @attention ❌ ISR；✅ block/switch
+ */
 int cli_path_complete(char *line, int line_cap, int *len, int *cursor, int list_all)
 {
     int tok_s = 0, tok_e = 0;

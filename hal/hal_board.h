@@ -1,9 +1,9 @@
 /**
  * @file hal/hal_board.h
- * @brief 板级 MMIO 转发头（实际内容在 boards/<BOARD>/hal_board.h）
+ * @brief 板级 MMIO 转发头（实际内容在 boards/{BOARD}/hal_board.h）
  * @author Cong Zhou / Juilletioi
- * @version 5.2.0
- * @date 2026-07-23
+ * @version 5.3.0
+ * @date 2026-07-24
  * @copyright CG-RTOS
  *
  * @details

@@ -2,8 +2,8 @@
  * @file cli_vim.c
  * @brief POSIX vi 核心编辑器（Normal/Insert/Visual/Cmdline）
  * @author Cong Zhou / Juilletioi
- * @version 5.1.0
- * @date 2026-07-23
+ * @version 5.3.0
+ * @date 2026-07-24
  * @copyright CG-RTOS
  *
  * @details
@@ -33,79 +33,130 @@
 #include <string.h>
 
 #ifndef CGRTOS_VIM_UNDO_MAX
+/**
+ * @brief 撤销栈深度上限
+ * @warning 无运行时副作用（编译期常量）
+ */
 #define CGRTOS_VIM_UNDO_MAX 64
 #endif
 #ifndef CGRTOS_VIM_CLIP_MAX
+/**
+ * @brief 剪贴板最大字节数
+ * @warning 无运行时副作用（编译期常量）
+ */
 #define CGRTOS_VIM_CLIP_MAX 4096
 #endif
 #ifndef CGRTOS_VIM_PAT_MAX
+/**
+ * @brief 搜索模式最大长度
+ * @warning 无运行时副作用（编译期常量）
+ */
 #define CGRTOS_VIM_PAT_MAX 64
 #endif
 #ifndef CGRTOS_VIM_CMDLINE_MAX
+/**
+ * @brief 命令行（: / ?）缓冲最大长度
+ * @warning 无运行时副作用（编译期常量）
+ */
 #define CGRTOS_VIM_CMDLINE_MAX 96
 #endif
 
+/**
+ * @brief 文本区可见行数
+ * @warning 无运行时副作用（编译期常量）
+ */
 #define VIM_ROWS       22
+/**
+ * @brief 文本区可见列数
+ * @warning 无运行时副作用（编译期常量）
+ */
 #define VIM_COLS       80
+/**
+ * @brief 状态/消息行最大长度
+ * @warning 无运行时副作用（编译期常量）
+ */
 #define VIM_MSG_MAX    80
 
+/**
+ * @brief 编辑器模式
+ */
 typedef enum {
-    VIM_NORMAL = 0,
-    VIM_INSERT,
-    VIM_VISUAL,
-    VIM_CMDLINE
+    VIM_NORMAL = 0, /**< @brief Normal 模式 */
+    VIM_INSERT,     /**< @brief Insert 模式 */
+    VIM_VISUAL,     /**< @brief Visual 字符选择 */
+    VIM_CMDLINE     /**< @brief 冒号或搜索命令行模式 */
 } vim_mode_t;
 
+/**
+ * @brief 撤销记录类型
+ */
 typedef enum {
-    U_INSERT = 1,
-    U_DELETE
+    U_INSERT = 1, /**< @brief 曾插入文本（撤销时删除） */
+    U_DELETE      /**< @brief 曾删除文本（撤销时插回） */
 } vim_undo_kind_t;
 
+/**
+ * @brief 单条撤销记录
+ */
 typedef struct {
-    uint8_t        used;
-    vim_undo_kind_t kind;
-    size_t         pos;     /* 操作起始偏移 */
-    size_t         len;     /* 文本长度 */
-    char          *data;    /* 被删或插入的副本（heap） */
+    uint8_t         used; /**< @brief 槽是否有效 */
+    vim_undo_kind_t kind; /**< @brief 插入或删除 */
+    size_t          pos;  /**< @brief 操作起始字节偏移 */
+    size_t          len;  /**< @brief 文本长度 */
+    char           *data; /**< @brief 被删或插入的堆副本 */
 } vim_undo_t;
 
+/**
+ * @brief 编辑器完整状态（单实例 g_vim）
+ * @details 缓冲/undo/剪贴板仅 cli 任务访问；无锁。
+ */
 typedef struct {
-    char          *text;
-    size_t         len;
-    size_t         cap;
-    size_t        *loff;    /* 每行起始偏移；loff[nlines]=len */
-    int            nlines;
-    size_t         cur;     /* 字节光标 */
-    size_t         vanchor; /* Visual 锚点 */
-    int            toprow;  /* 视口首行 */
-    vim_mode_t     mode;
-    int            modified;
-    int            show_nu;
-    int            count;   /* 数字前缀 */
-    int            pending; /* 待操作符：'d','y',0 */
-    char           filename[CLI_FS_PATH_MAX];
-    char           msg[VIM_MSG_MAX];
-    char           cmdline[CGRTOS_VIM_CMDLINE_MAX];
-    int            cmdlen;
-    int            cmdkind; /* ':' '/' '?' */
-    char           pattern[CGRTOS_VIM_PAT_MAX];
-    int            search_fwd;
-    char          *clip;
-    size_t         clip_len;
-    int            clip_linewise;
-    vim_undo_t     undo[CGRTOS_VIM_UNDO_MAX];
-    int            undo_sp;
-    int            undo_count;
-    /* 上次改动（.） */
-    int            last_op; /* 0=无 1=ins 2=del_char 3=del_line 4=paste */
-    char          *last_ins;
-    size_t         last_ins_len;
-    int            quit;
+    char          *text;     /**< @brief 文本堆缓冲 */
+    size_t         len;      /**< @brief 当前字节长度 */
+    size_t         cap;      /**< @brief 缓冲容量 */
+    size_t        *loff;     /**< @brief 每行起始偏移；loff[nlines]=len */
+    int            nlines;   /**< @brief 行数 */
+    size_t         cur;      /**< @brief 字节光标 */
+    size_t         vanchor;  /**< @brief Visual 锚点 */
+    int            toprow;   /**< @brief 视口首行 */
+    vim_mode_t     mode;     /**< @brief 当前模式 */
+    int            modified; /**< @brief 脏标志 */
+    int            show_nu;  /**< @brief 是否显示行号 */
+    int            count;    /**< @brief 数字前缀计数 */
+    int            pending;  /**< @brief 待操作符：'d','y',0 */
+    char           filename[CLI_FS_PATH_MAX]; /**< @brief 当前文件绝对路径 */
+    char           msg[VIM_MSG_MAX];          /**< @brief 状态消息 */
+    char           cmdline[CGRTOS_VIM_CMDLINE_MAX]; /**< @brief 命令行内容 */
+    int            cmdlen;   /**< @brief 命令行长度 */
+    int            cmdkind;  /**< @brief 命令行种类：':'/'/'/'?' */
+    char           pattern[CGRTOS_VIM_PAT_MAX]; /**< @brief 最近搜索模式 */
+    int            search_fwd; /**< @brief 搜索方向：非 0 向前 */
+    char          *clip;     /**< @brief 剪贴板堆缓冲 */
+    size_t         clip_len; /**< @brief 剪贴板长度 */
+    int            clip_linewise; /**< @brief 行式 yank/paste */
+    vim_undo_t     undo[CGRTOS_VIM_UNDO_MAX]; /**< @brief 环形撤销栈 */
+    int            undo_sp;  /**< @brief 下一写入下标 */
+    int            undo_count; /**< @brief 有效撤销条数 */
+    int            last_op;  /**< @brief 上次改动：0无 1ins 2del_char 3del_line 4paste */
+    char          *last_ins; /**< @brief 上次插入文本（供 `.`） */
+    size_t         last_ins_len; /**< @brief last_ins 长度 */
+    int            quit;     /**< @brief 非 0 请求退出主循环 */
 } vim_t;
 
 /** @brief 编辑器全局状态：cli 任务独占，无锁 */
 static vim_t g_vim;
 
+/**
+ * @brief 设置状态栏消息
+ * @details 拷贝到 g_vim.msg；s 为 NULL 则清空。
+ * @param[in] s 消息；可为 NULL
+ * @return 无
+ * @retval 无
+ * @note 无
+ * @warning 无
+ * @attention ❌ ISR；❌ block/switch
+ * @internal
+ */
 static void vim_set_msg(const char *s)
 {
     if (!s) {
@@ -116,6 +167,17 @@ static void vim_set_msg(const char *s)
     g_vim.msg[VIM_MSG_MAX - 1] = 0;
 }
 
+/**
+ * @brief 按换行重建行偏移表 loff
+ * @details 统计行数、分配 loff、写入各行起点与结尾哨兵；失败置错误消息。
+ * @return 0 成功；-1 内存不足
+ * @retval 0 成功
+ * @retval -1 失败
+ * @note 可调用 cgrtos_malloc/free
+ * @warning 无
+ * @attention ❌ ISR；✅ block/switch
+ * @internal
+ */
 static int vim_rebuild_lines(void)
 {
     size_t i;
@@ -148,6 +210,19 @@ static int vim_rebuild_lines(void)
     return 0;
 }
 
+/**
+ * @brief 字节偏移转行列
+ * @details 根据 loff 定位行，列不超过该行可视末尾（不含换行）。
+ * @param[in]  off 字节偏移
+ * @param[out] row 行号（0 起）
+ * @param[out] col 列号（0 起）
+ * @return 无
+ * @retval 无
+ * @note 无
+ * @warning 无
+ * @attention ❌ ISR；❌ block/switch
+ * @internal
+ */
 static void vim_off_to_rc(size_t off, int *row, int *col)
 {
     int r;
@@ -182,6 +257,18 @@ static void vim_off_to_rc(size_t off, int *row, int *col)
     *col = 0;
 }
 
+/**
+ * @brief 行列转字节偏移
+ * @details 夹紧到合法行范围；列超过行长则落到行尾（不含换行）。
+ * @param[in] row 行号
+ * @param[in] col 列号
+ * @return 对应字节偏移
+ * @retval >=0 偏移
+ * @note 无
+ * @warning 无
+ * @attention ❌ ISR；❌ block/switch
+ * @internal
+ */
 static size_t vim_rc_to_off(int row, int col)
 {
     size_t start, end, maxcol;
@@ -209,6 +296,18 @@ static size_t vim_rc_to_off(int row, int col)
     return start + (size_t)col;
 }
 
+/**
+ * @brief 确保文本缓冲容量不少于 need
+ * @details 指数扩容至上限 CGRTOS_FS_MAX_FILE_BYTES+1；在无 FS 锁下 malloc。
+ * @param[in] need 所需容量
+ * @return 0 成功；-1 失败
+ * @retval 0 成功
+ * @retval -1 过大或 OOM
+ * @note 无
+ * @warning 禁止在持 g_fs_mtx 时调用
+ * @attention ❌ ISR；✅ block/switch
+ * @internal
+ */
 static int vim_ensure_cap(size_t need)
 {
     char *nbuf;
@@ -242,6 +341,16 @@ static int vim_ensure_cap(size_t need)
     return 0;
 }
 
+/**
+ * @brief 清空撤销栈并释放各条 data
+ * @details 遍历 undo 槽 free；重置 undo_sp/undo_count。
+ * @return 无
+ * @retval 无
+ * @note 无
+ * @warning 无
+ * @attention ❌ ISR；✅ block/switch
+ * @internal
+ */
 static void vim_undo_clear(void)
 {
     for (int i = 0; i < CGRTOS_VIM_UNDO_MAX; i++) {
@@ -253,6 +362,21 @@ static void vim_undo_clear(void)
     g_vim.undo_count = 0;
 }
 
+/**
+ * @brief 压入一条撤销记录
+ * @details 拷贝 data 到堆；覆盖环形栈当前位置并前进 sp。
+ * @param[in] kind 记录类型
+ * @param[in] pos  起始偏移
+ * @param[in] data 文本；len=0 可为 NULL
+ * @param[in] len  长度
+ * @return 0 成功；-1 失败
+ * @retval 0 成功
+ * @retval -1 参数错或 OOM
+ * @note 无
+ * @warning 无
+ * @attention ❌ ISR；✅ block/switch
+ * @internal
+ */
 static int vim_undo_push(vim_undo_kind_t kind, size_t pos, const char *data, size_t len)
 {
     vim_undo_t *u;
@@ -284,6 +408,20 @@ static int vim_undo_push(vim_undo_kind_t kind, size_t pos, const char *data, siz
     return 0;
 }
 
+/**
+ * @brief 从缓冲删除 n 字节
+ * @details 可选记录 U_DELETE；memmove 收缩；修正 cur；重建行表。
+ * @param[in] pos 起始偏移
+ * @param[in] n 字节数
+ * @param[in] record_undo 非 0 则入撤销栈
+ * @return 0 成功；-1 失败
+ * @retval 0 成功
+ * @retval -1 undo/行表失败
+ * @note 无
+ * @warning 无
+ * @attention ❌ ISR；✅ block/switch
+ * @internal
+ */
 static int vim_buf_delete(size_t pos, size_t n, int record_undo)
 {
     if (pos > g_vim.len || n == 0) {
@@ -312,6 +450,21 @@ static int vim_buf_delete(size_t pos, size_t n, int record_undo)
     return vim_rebuild_lines();
 }
 
+/**
+ * @brief 在缓冲 pos 处插入 n 字节
+ * @details 检查文件大小上限、扩容、可选 U_INSERT、memmove/memcpy；cur 移到插入后；重建行表。
+ * @param[in] pos 插入点
+ * @param[in] data 数据
+ * @param[in] n 长度
+ * @param[in] record_undo 非 0 则入撤销栈
+ * @return 0 成功；-1 失败
+ * @retval 0 成功
+ * @retval -1 超限/OOM/undo 失败
+ * @note 无
+ * @warning 无
+ * @attention ❌ ISR；✅ block/switch
+ * @internal
+ */
 static int vim_buf_insert(size_t pos, const char *data, size_t n, int record_undo)
 {
     if (!data && n) {
@@ -342,6 +495,17 @@ static int vim_buf_insert(size_t pos, const char *data, size_t n, int record_und
     return vim_rebuild_lines();
 }
 
+/**
+ * @brief 执行一次撤销
+ * @details 弹出最近记录：U_INSERT 则删除，U_DELETE 则插回；更新消息。
+ * @return 0 成功；-1 无记录或失败
+ * @retval 0 成功
+ * @retval -1 已到最早或失败
+ * @note 无
+ * @warning 无
+ * @attention ❌ ISR；✅ block/switch
+ * @internal
+ */
 static int vim_do_undo(void)
 {
     vim_undo_t *u;
@@ -381,6 +545,20 @@ static int vim_do_undo(void)
     return 0;
 }
 
+/**
+ * @brief 设置剪贴板内容
+ * @details 堆分配副本替换旧 clip；记录长度与是否行式。
+ * @param[in] data 数据
+ * @param[in] n 长度
+ * @param[in] linewise 非 0=行式
+ * @return 0 成功；-1 失败
+ * @retval 0 成功
+ * @retval -1 过大或 OOM
+ * @note 无
+ * @warning 无
+ * @attention ❌ ISR；✅ block/switch
+ * @internal
+ */
 static int vim_clip_set(const char *data, size_t n, int linewise)
 {
     char *p;
@@ -406,6 +584,16 @@ static int vim_clip_set(const char *data, size_t n, int linewise)
     return 0;
 }
 
+/**
+ * @brief 调整 toprow 使光标行落在可见区
+ * @details 光标行在视口上方/下方时滚动，保证 toprow>=0。
+ * @return 无
+ * @retval 无
+ * @note 无
+ * @warning 无
+ * @attention ❌ ISR；❌ block/switch
+ * @internal
+ */
 static void vim_scroll_into_view(void)
 {
     int row, col;
@@ -422,6 +610,16 @@ static void vim_scroll_into_view(void)
     }
 }
 
+/**
+ * @brief 全屏重绘编辑器界面
+ * @details 清屏后绘制可见行、状态栏、消息/命令行，并定位光标；可能阻塞于 UART。
+ * @return 无
+ * @retval 无
+ * @note 使用 ANSI CSI
+ * @warning 无
+ * @attention ❌ ISR；✅ block/switch
+ * @internal
+ */
 static void vim_draw(void)
 {
     int row, col;
@@ -506,6 +704,18 @@ static void vim_draw(void)
     }
 }
 
+/**
+ * @brief 加载或创建文件到编辑器缓冲
+ * @details 重置 g_vim；已存在则先 malloc 再 open/read；不存在则 CREAT 空缓冲；再建行表。
+ * @param[in] abs 绝对路径
+ * @return 0 成功；-1 失败
+ * @retval 0 成功
+ * @retval -1 目录/过大/IO/OOM
+ * @note 禁止持锁时 printf；先 malloc 再 vfs
+ * @warning 失败时可能留下部分状态，调用方应 vim_free_all
+ * @attention ❌ ISR；✅ block/switch
+ * @internal
+ */
 static int vim_load(const char *abs)
 {
     cgrtos_stat_t st;
@@ -583,6 +793,18 @@ static int vim_load(const char *abs)
     return 0;
 }
 
+/**
+ * @brief 将缓冲写回文件
+ * @details path 空则用 filename；解析绝对路径后 TRUNC 写入；成功清 dirty。
+ * @param[in] path 目标路径；NULL/空用当前文件名
+ * @return 0 成功；-1 失败
+ * @retval 0 成功
+ * @retval -1 无文件名/IO 失败
+ * @note 无
+ * @warning 无
+ * @attention ❌ ISR；✅ block/switch
+ * @internal
+ */
 static int vim_save(const char *path)
 {
     const char *p = path && path[0] ? path : g_vim.filename;
@@ -621,6 +843,16 @@ static int vim_save(const char *path)
     return 0;
 }
 
+/**
+ * @brief 释放编辑器全部堆资源并清零状态
+ * @details 清空 undo、text、loff、clip、last_ins 后 memset g_vim。
+ * @return 无
+ * @retval 无
+ * @note 无
+ * @warning 无
+ * @attention ❌ ISR；✅ block/switch
+ * @internal
+ */
 static void vim_free_all(void)
 {
     vim_undo_clear();
@@ -631,6 +863,17 @@ static void vim_free_all(void)
     memset(&g_vim, 0, sizeof(g_vim));
 }
 
+/**
+ * @brief 光标左移 n 字节
+ * @details 不越过缓冲起点。
+ * @param[in] n 步数
+ * @return 无
+ * @retval 无
+ * @note 无
+ * @warning 无
+ * @attention ❌ ISR；❌ block/switch
+ * @internal
+ */
 static void vim_move_left(int n)
 {
     while (n-- > 0 && g_vim.cur > 0) {
@@ -638,6 +881,17 @@ static void vim_move_left(int n)
     }
 }
 
+/**
+ * @brief 光标右移 n 字节（不跨行）
+ * @details 遇换行则停止，保持在行内。
+ * @param[in] n 步数
+ * @return 无
+ * @retval 无
+ * @note 无
+ * @warning 无
+ * @attention ❌ ISR；❌ block/switch
+ * @internal
+ */
 static void vim_move_right(int n)
 {
     while (n-- > 0 && g_vim.cur < g_vim.len) {
@@ -648,6 +902,17 @@ static void vim_move_right(int n)
     }
 }
 
+/**
+ * @brief 光标下移 n 行（尽量保持列）
+ * @details 换算行列后夹紧到末行，再 rc_to_off。
+ * @param[in] n 行数
+ * @return 无
+ * @retval 无
+ * @note 无
+ * @warning 无
+ * @attention ❌ ISR；❌ block/switch
+ * @internal
+ */
 static void vim_move_down(int n)
 {
     int row, col;
@@ -659,6 +924,17 @@ static void vim_move_down(int n)
     g_vim.cur = vim_rc_to_off(row, col);
 }
 
+/**
+ * @brief 光标上移 n 行（尽量保持列）
+ * @details 换算行列后夹紧到首行，再 rc_to_off。
+ * @param[in] n 行数
+ * @return 无
+ * @retval 无
+ * @note 无
+ * @warning 无
+ * @attention ❌ ISR；❌ block/switch
+ * @internal
+ */
 static void vim_move_up(int n)
 {
     int row, col;
@@ -670,12 +946,35 @@ static void vim_move_up(int n)
     g_vim.cur = vim_rc_to_off(row, col);
 }
 
+/**
+ * @brief 判断字符是否为“词”字符
+ * @details 字母数字与下划线视为词字符。
+ * @param[in] c 字符
+ * @return 非 0=是词字符
+ * @retval 非 0 是
+ * @retval 0 否
+ * @note 无
+ * @warning 无
+ * @attention ✅ ISR；❌ block/switch
+ * @internal
+ */
 static int vim_is_word(char c)
 {
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
            (c >= '0' && c <= '9') || c == '_';
 }
 
+/**
+ * @brief 向前跳到下一词首（w）
+ * @details 跳过当前词/非词段及空白，重复 n 次。
+ * @param[in] n 次数
+ * @return 无
+ * @retval 无
+ * @note 无
+ * @warning 无
+ * @attention ❌ ISR；❌ block/switch
+ * @internal
+ */
 static void vim_word_fwd(int n)
 {
     while (n-- > 0) {
@@ -702,6 +1001,17 @@ static void vim_word_fwd(int n)
     }
 }
 
+/**
+ * @brief 跳到词尾（e）
+ * @details 前进到当前或后续词的最后一个字符，重复 n 次。
+ * @param[in] n 次数
+ * @return 无
+ * @retval 无
+ * @note 无
+ * @warning 无
+ * @attention ❌ ISR；❌ block/switch
+ * @internal
+ */
 static void vim_word_end(int n)
 {
     while (n-- > 0) {
@@ -730,6 +1040,17 @@ static void vim_word_end(int n)
     }
 }
 
+/**
+ * @brief 向后跳到词首（b）
+ * @details 回退跳过空白后落到词首，重复 n 次。
+ * @param[in] n 次数
+ * @return 无
+ * @retval 无
+ * @note 无
+ * @warning 无
+ * @attention ❌ ISR；❌ block/switch
+ * @internal
+ */
 static void vim_word_back(int n)
 {
     while (n-- > 0) {
@@ -756,6 +1077,16 @@ static void vim_word_back(int n)
     }
 }
 
+/**
+ * @brief 移到当前行首（0）
+ * @details cur = loff[row]。
+ * @return 无
+ * @retval 无
+ * @note 无
+ * @warning 无
+ * @attention ❌ ISR；❌ block/switch
+ * @internal
+ */
 static void vim_line_begin(void)
 {
     int row, col;
@@ -764,6 +1095,16 @@ static void vim_line_begin(void)
     g_vim.cur = g_vim.loff[row];
 }
 
+/**
+ * @brief 移到当前行首个非空白（^）
+ * @details 跳过行首空格/制表符。
+ * @return 无
+ * @retval 无
+ * @note 无
+ * @warning 无
+ * @attention ❌ ISR；❌ block/switch
+ * @internal
+ */
 static void vim_line_first_nonblank(void)
 {
     int row, col;
@@ -781,6 +1122,16 @@ static void vim_line_first_nonblank(void)
     g_vim.cur = p;
 }
 
+/**
+ * @brief 移到当前行尾（$）
+ * @details 落在换行前一字节；空行则行首。
+ * @return 无
+ * @retval 无
+ * @note 无
+ * @warning 无
+ * @attention ❌ ISR；❌ block/switch
+ * @internal
+ */
 static void vim_line_end(void)
 {
     int row, col;
@@ -794,6 +1145,18 @@ static void vim_line_end(void)
     g_vim.cur = end;
 }
 
+/**
+ * @brief 删除自当前行起 n 行（dd）
+ * @details 行式写入剪贴板后 buf_delete；记录 last_op=3。
+ * @param[in] n 行数；<1 视为 1
+ * @return 0 成功；-1 失败
+ * @retval 0 成功
+ * @retval -1 clip/删除失败
+ * @note 无
+ * @warning 无
+ * @attention ❌ ISR；✅ block/switch
+ * @internal
+ */
 static int vim_delete_lines(int n)
 {
     int row, col;
@@ -822,6 +1185,18 @@ static int vim_delete_lines(int n)
     return 0;
 }
 
+/**
+ * @brief 行式 yank 自当前行起 n 行（yy）
+ * @details 仅写入剪贴板，不改缓冲。
+ * @param[in] n 行数；<1 视为 1
+ * @return 0 成功；-1 失败
+ * @retval 0 成功
+ * @retval -1 clip 失败
+ * @note 无
+ * @warning 无
+ * @attention ❌ ISR；✅ block/switch
+ * @internal
+ */
 static int vim_yank_lines(int n)
 {
     int row, col;
@@ -839,6 +1214,18 @@ static int vim_yank_lines(int n)
     return vim_clip_set(g_vim.text + a, b - a, 1);
 }
 
+/**
+ * @brief 粘贴剪贴板（p/P）
+ * @details 行式按行边界插入；字符式可选在光标后；记录 last_op=4。
+ * @param[in] after 非 0=之后（p）；0=之前（P）
+ * @return 0 成功；-1 空寄存器或插入失败
+ * @retval 0 成功
+ * @retval -1 失败
+ * @note 无
+ * @warning 无
+ * @attention ❌ ISR；✅ block/switch
+ * @internal
+ */
 static int vim_paste(int after)
 {
     size_t pos = g_vim.cur;
@@ -865,6 +1252,19 @@ static int vim_paste(int after)
     return 0;
 }
 
+/**
+ * @brief 按 pattern 搜索并移动光标
+ * @details 正向/反向线性扫描；绕回时可选提示；未找到置消息。
+ * @param[in] fwd 非 0 向前
+ * @param[in] wrap_msg 绕回时是否提示
+ * @return 0 找到；-1 无模式或未找到
+ * @retval 0 找到
+ * @retval -1 失败
+ * @note 无
+ * @warning 无
+ * @attention ❌ ISR；❌ block/switch
+ * @internal
+ */
 static int vim_search(int fwd, int wrap_msg)
 {
     size_t i;
@@ -931,6 +1331,17 @@ static int vim_search(int fwd, int wrap_msg)
     return -1;
 }
 
+/**
+ * @brief 执行 `:` 命令行
+ * @details 支持 q/q!/wq/w/e/set nu|nonu 等；脏缓冲 :q 拒绝。
+ * @return 0 成功；-1 错误（已设消息）
+ * @retval 0 成功或空命令
+ * @retval -1 错误
+ * @note 无
+ * @warning :q 在 dirty 时拒绝；:e 同
+ * @attention ❌ ISR；✅ block/switch
+ * @internal
+ */
 static int vim_ex_run(void)
 {
     char *p = g_vim.cmdline;
@@ -1025,6 +1436,17 @@ static int vim_ex_run(void)
     return -1;
 }
 
+/**
+ * @brief 进入命令行模式
+ * @details 设置 mode=CMDLINE、cmdkind，清空 cmdline 与消息。
+ * @param[in] kind 种类字符（冒号 / 斜杠 / 问号）
+ * @return 无
+ * @retval 无
+ * @note 无
+ * @warning 无
+ * @attention ❌ ISR；❌ block/switch
+ * @internal
+ */
 static void vim_enter_cmdline(int kind)
 {
     g_vim.mode = VIM_CMDLINE;
@@ -1034,6 +1456,18 @@ static void vim_enter_cmdline(int kind)
     g_vim.msg[0] = 0;
 }
 
+/**
+ * @brief 计算 Visual 选区 [a,b) 字节范围
+ * @details 以 vanchor 与 cur 排序；末界按字符式含当前字符。
+ * @param[out] a 起始偏移
+ * @param[out] b 结束偏移（半开，已 +1 含当前）
+ * @return 无
+ * @retval 无
+ * @note 无
+ * @warning 无
+ * @attention ❌ ISR；❌ block/switch
+ * @internal
+ */
 static void vim_visual_bounds(size_t *a, size_t *b)
 {
     *a = g_vim.vanchor;
@@ -1048,6 +1482,17 @@ static void vim_visual_bounds(size_t *a, size_t *b)
     }
 }
 
+/**
+ * @brief 重复上次改动（.）
+ * @details 依 last_op 重放插入/删字符/删行/粘贴。
+ * @return 0 成功；-1 无上次命令或失败
+ * @retval 0 成功
+ * @retval -1 失败
+ * @note 无
+ * @warning 无
+ * @attention ❌ ISR；✅ block/switch
+ * @internal
+ */
 static int vim_repeat_last(void)
 {
     if (g_vim.last_op == 1 && g_vim.last_ins && g_vim.last_ins_len) {
@@ -1069,6 +1514,18 @@ static int vim_repeat_last(void)
     return -1;
 }
 
+/**
+ * @brief 记住最近一次插入文本供 `.`
+ * @details 释放旧 last_ins，拷贝 s，置 last_op=1。
+ * @param[in] s 插入串
+ * @param[in] n 长度
+ * @return 无
+ * @retval 无
+ * @note 无
+ * @warning 无
+ * @attention ❌ ISR；✅ block/switch
+ * @internal
+ */
 static void vim_remember_insert(const char *s, size_t n)
 {
     cgrtos_free(g_vim.last_ins);
@@ -1087,6 +1544,16 @@ static void vim_remember_insert(const char *s, size_t n)
     g_vim.last_ins_len = n;
 }
 
+/**
+ * @brief 阻塞等待下一 UART 字符
+ * @details pollc 无数据则 yield，直到读到字节。
+ * @return 输入字节（0..255）
+ * @retval >=0 字符码
+ * @note 无
+ * @warning 无
+ * @attention ❌ ISR；✅ block/switch
+ * @internal
+ */
 static int vim_pollc(void)
 {
     for (;;) {
@@ -1098,9 +1565,22 @@ static int vim_pollc(void)
     }
 }
 
+/** @brief Insert 会话累计文本（供 `.` 重复） */
 static char g_ins_acc[256];
+/** @brief g_ins_acc 当前长度 */
 static int  g_ins_acc_len;
 
+/**
+ * @brief 处理 Insert 模式按键
+ * @details Esc 回 Normal 并记住插入；Ctrl-C 中断；BS 删前字符；可打印/换行/Tab 插入。
+ * @param[in] ch 输入字符
+ * @return 无
+ * @retval 无
+ * @note 无
+ * @warning 无
+ * @attention ❌ ISR；✅ block/switch
+ * @internal
+ */
 static void vim_handle_insert(int ch)
 {
     if (ch == 0x1B) {
@@ -1148,6 +1628,17 @@ static void vim_handle_insert(int ch)
     }
 }
 
+/**
+ * @brief 处理 Cmdline 模式按键
+ * @details 编辑 cmdline；Enter 执行 : 或发起搜索；Esc/Ctrl-C 取消。
+ * @param[in] ch 输入字符
+ * @return 无
+ * @retval 无
+ * @note 无
+ * @warning 无
+ * @attention ❌ ISR；✅ block/switch
+ * @internal
+ */
 static void vim_handle_cmdline(int ch)
 {
     if (ch == 0x1B || ch == 0x03) {
@@ -1187,6 +1678,17 @@ static void vim_handle_cmdline(int ch)
     }
 }
 
+/**
+ * @brief 处理 Visual 模式按键
+ * @details 移动扩展选区；d/x 删除并 yank；y yank；Esc/Ctrl-C 退出。
+ * @param[in] ch 输入字符
+ * @return 无
+ * @retval 无
+ * @note 无
+ * @warning 无
+ * @attention ❌ ISR；✅ block/switch
+ * @internal
+ */
 static void vim_handle_visual(int ch)
 {
     size_t a, b;
@@ -1273,6 +1775,17 @@ static void vim_handle_visual(int ch)
     }
 }
 
+/**
+ * @brief 处理 Normal 模式按键
+ * @details 数字前缀、运动、i/a/o、x/dd/yy/p、u、./v、:/?/n 等；详见 MODULE_CLI_VIM.md。
+ * @param[in] ch 输入字符
+ * @return 无
+ * @retval 无
+ * @note 无
+ * @warning 无
+ * @attention ❌ ISR；✅ block/switch
+ * @internal
+ */
 static void vim_handle_normal(int ch)
 {
     int n = g_vim.count > 0 ? g_vim.count : 1;
@@ -1496,9 +2009,14 @@ static void vim_handle_normal(int ch)
 
 /**
  * @brief 进入编辑器主循环
+ * @details vim_load 后循环 poll 按键并按模式分发，每步重绘；退出时清屏并 free。
  * @param[in] abs 已解析绝对路径
  * @return 0 正常退出；-1 打开失败
- * @attention ❌ ISR；✅ 阻塞
+ * @retval 0 正常退出
+ * @retval -1 打开失败
+ * @note 吞掉部分 ANSI 方向键映射为 hjkl
+ * @warning 独占 UART 直至退出
+ * @attention ❌ ISR；✅ block/switch
  * @internal
  */
 static int vim_edit_abs(const char *abs)
@@ -1583,6 +2101,17 @@ static int vim_edit_abs(const char *abs)
     return 0;
 }
 
+/**
+ * @brief 尝试分发 vi/vim/edit 命令并进入编辑器
+ * @details 识别前缀后解析路径，调用 vim_edit_abs；接管 UART 直至退出。
+ * @param[in] line 已 trim 命令行
+ * @return 1=已处理；0=非本命令
+ * @retval 1 已处理
+ * @retval 0 未识别
+ * @note 编辑器状态单任务独占；load/save 短持 g_fs_mtx
+ * @warning 脏缓冲 :q 拒绝；禁止在持 FS 锁时阻塞 UART
+ * @attention ❌ ISR；✅ block/switch
+ */
 int cli_vim_try_handle(char *line)
 {
     const char *arg = 0;
@@ -1616,6 +2145,15 @@ int cli_vim_try_handle(char *line)
     return 1;
 }
 
+/**
+ * @brief 向 help 追加 vim 说明
+ * @details 打印一行 vi|vim|edit 用法提示。
+ * @return 无
+ * @retval 无
+ * @note 无
+ * @warning 无
+ * @attention ❌ ISR；✅ block/switch
+ */
 void cli_vim_help(void)
 {
     cgrtos_printf("  vi|vim|edit <file>  POSIX vi (Esc/:w/:q); Tab path complete\n");

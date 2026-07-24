@@ -1,7 +1,7 @@
 # Doxyfile — CG-RTOS API documentation
 PROJECT_NAME           = "CG-RTOS"
-PROJECT_NUMBER         = 4.7.0
-PROJECT_BRIEF          = "RISC-V64 SMP multi-policy RTOS for Nuclei UX900"
+PROJECT_NUMBER           = 5.3.0
+PROJECT_BRIEF          = "Multi-arch SMP multi-policy RTOS (RISC-V + AArch64)"
 OUTPUT_DIRECTORY       = docs/doxygen
 CREATE_SUBDIRS         = NO
 OUTPUT_LANGUAGE        = Chinese
@@ -11,9 +11,11 @@ EXTRACT_LOCAL_CLASSES  = YES
 OPTIMIZE_OUTPUT_FOR_C  = YES
 TYPEDEF_HIDES_STRUCT   = YES
 RECURSIVE              = YES
-INPUT                  = kernel arch/riscv hal cli startup.S docs/ARCHITECTURE.md docs/USER_GUIDE.md docs/HAL.md docs/MODULE_CLI_VIM.md
+INPUT                  = kernel arch/riscv arch/arm64 boards hal cli demo tests \
+                         docs/ARCHITECTURE.md docs/USER_GUIDE.md docs/HAL.md \
+                         docs/PORTING.md docs/SCRIPTS.md docs/MODULE_CLI_VIM.md
 FILE_PATTERNS          = *.c *.h *.S *.md
-EXCLUDE_PATTERNS       = */tests/* */demo/*
+EXCLUDE_PATTERNS       = */build/* */sdk/* */docs/doxygen/*
 USE_MDFILE_AS_MAINPAGE = docs/ARCHITECTURE.md
 GENERATE_HTML          = YES
 GENERATE_LATEX         = NO
@@ -26,8 +28,9 @@ DOT_IMAGE_FORMAT       = svg
 INTERACTIVE_SVG        = YES
 DOT_GRAPH_MAX_NODES    = 80
 MAX_DOT_GRAPH_DEPTH    = 3
-QUIET                  = NO
+QUIET                  = YES
 WARN_IF_UNDOCUMENTED   = NO
+WARN_IF_DOC_ERROR      = YES
 GENERATE_TREEVIEW      = YES
 DISABLE_INDEX          = NO
 SEARCHENGINE           = YES
@@ -38,4 +41,6 @@ REFERENCED_BY_RELATION = YES
 REFERENCES_RELATION    = YES
 STRIP_FROM_PATH        = /home/cong/cgrtos
 WARN_NO_PARAMDOC       = NO
+WARN_LOGFILE           = docs/doxygen/warnings.log
+DOT_GRAPH_MAX_NODES    = 120
 # Prefer header docs when both .h/.c document the same symbol

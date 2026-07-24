@@ -2,8 +2,8 @@
  * @file test_cases.c
  * @brief 功能测试用例实现与 CLI/自动化套件运行器
  * @author Cong Zhou / Juilletioi
- * @version 5.0.0
- * @date 2026-07-22
+ * @version 5.3.0
+ * @date 2026-07-24
  * @copyright CG-RTOS
  *
  * @details
@@ -115,12 +115,13 @@ static void notify_waiter(void *arg)
 
 /**
  * @brief 软定时器测试回调：递增 g_timer_fires
+ * @details 由定时器守护任务调用；仅递增全局计数，供 case_timer / case_hooks / case_isr 断言。
  * @param[in] arg 未使用
  * @return 无
  * @retval 无
  * @note 供 case_timer / case_hooks / case_isr 复用
  * @warning 无
- * @attention ✅ 定时器 daemon 上下文；❌ 非 ISR 直调
+ * @attention ✅ 定时器 daemon（非 ISR 直调）；❌ block/switch（须短小）
  * @internal
  */
 static void timer_cb(void *arg)
@@ -137,7 +138,7 @@ static void timer_cb(void *arg)
  * @retval 无
  * @note 由 case_sched / case_m4_safe 创建
  * @warning 无
- * @attention ❌ ISR；✅ yield/delay
+ * @attention ❌ ISR；✅ block/switch（yield/delay）
  * @internal
  */
 static void cfs_worker(void *arg)
@@ -161,7 +162,7 @@ static void cfs_worker(void *arg)
  * @retval 无
  * @note 由 case_sched / case_m5_perf / case_sched_m1 创建
  * @warning 单核与多核 MC-EDF 行为不同
- * @attention ❌ ISR；✅ delay/set_deadline
+ * @attention ❌ ISR；✅ block/switch（delay/set_deadline）
  * @internal
  */
 static void edf_worker(void *arg)
@@ -210,6 +211,7 @@ static void edf_worker(void *arg)
 
 /**
  * @brief Hybrid 调度 RT 侧：notify_wait 计数 g_hybrid_rt_hits
+ * @details 循环阻塞于 task_notify_wait(500ms)；每次成功递增 g_hybrid_rt_hits，验证 RT 不被 CFS hog 饿死。
  * @param[in] arg 未使用
  * @return 无（永不返回）
  * @retval 无
@@ -231,12 +233,13 @@ static void hybrid_rt_worker(void *arg)
 
 /**
  * @brief Hybrid 调度 CFS hog：短窗口内 busy+yield 占 CPU
+ * @details 约 200ms 内做短忙等后 yield，结束后永久 delay；用于制造 CFS 侧负载。
  * @param[in] arg 未使用
  * @return 无（永不返回）
  * @retval 无
  * @note 绑核 1 与 RT 任务分离
  * @warning 无
- * @attention ❌ ISR；✅ yield
+ * @attention ❌ ISR；✅ block/switch（yield）
  * @internal
  */
 static void hybrid_cfs_hog(void *arg)
@@ -258,12 +261,13 @@ static void hybrid_cfs_hog(void *arg)
 
 /**
  * @brief RR 测试工作线程：yield + 40ms delay 循环
+ * @details 无限循环中交替 cgrtos_task_yield 与 delay_ms(40)，制造可抢占的 RR 就绪负载。
  * @param[in] arg 未使用
  * @return 无（永不返回）
  * @retval 无
  * @note 供 case_task / case_sched / case_sched_m1 复用
  * @warning 无
- * @attention ❌ ISR；✅ delay/yield
+ * @attention ❌ ISR；✅ block/switch（delay/yield）
  * @internal
  */
 static void rr_worker(void *arg)
@@ -283,7 +287,7 @@ static void rr_worker(void *arg)
  * @retval 无
  * @note 由 case_smp 创建并 set_affinity(1)
  * @warning 次核未 online 时软跳过
- * @attention ❌ ISR；✅ delay
+ * @attention ❌ ISR；✅ block/switch（delay）
  * @internal
  */
 static void aff_worker(void *arg)
@@ -300,12 +304,13 @@ static void aff_worker(void *arg)
 
 /**
  * @brief 负载均衡测试工作线程：统计在 core1 上的执行次数
+ * @details 约 80ms 窗口内若 arch_cpu_id()==1 则递增 g_lb_seen_core1，短忙等后 yield；结束永久 delay。
  * @param[in] arg 未使用
  * @return 无（永不返回）
  * @retval 无
  * @note 与 cgrtos_sched_load_balance 配合
  * @warning 无
- * @attention ❌ ISR；✅ yield
+ * @attention ❌ ISR；✅ block/switch（yield）
  * @internal
  */
 static void lb_worker(void *arg)
@@ -327,6 +332,7 @@ static void lb_worker(void *arg)
 
 /**
  * @brief Idle 钩子测试：递增 g_hook_idle
+ * @details 由 idle 任务钩子路径调用；每次进入递增计数，供 case_hooks 断言钩子已触发。
  * @return 无
  * @retval 无
  * @note 由 case_hooks 注册
@@ -341,11 +347,12 @@ static void idle_hook_fn(void)
 
 /**
  * @brief Tick 钩子测试：递增 g_hook_ticks
+ * @details 由系统 tick 钩子路径调用；每次 tick 递增计数，供 case_hooks 断言。
  * @return 无
  * @retval 无
  * @note 由 case_hooks 注册
- * @warning 无
- * @attention ✅ tick ISR 上下文；❌ 须保持短小
+ * @warning 须保持短小，勿在钩子内阻塞
+ * @attention ✅ tick ISR；❌ block/switch（须短小）
  * @internal
  */
 static void tick_hook_fn(void)
@@ -429,6 +436,7 @@ static void irq_test_handler(uint32_t irq, void *arg)
  * @note 通过 expect() 累计结果
  * @warning 时间断言含 QEMU 容差
  * @attention ❌ ISR；✅ 阻塞 delay API
+ * @internal
  */
 static void case_delay(void)
 {
@@ -496,7 +504,8 @@ static void case_delay(void)
  * @retval 无
  * @note 可能大量分配；结束后尽量 reclaim
  * @warning OOM 循环依赖 CONFIG_HEAP_SIZE
- * @attention ❌ ISR；✅ 堆 API
+ * @attention ❌ ISR；✅ block/switch（堆 API）
+ * @internal
  */
 static void case_mem(void)
 {
@@ -646,11 +655,13 @@ static void case_mem(void)
 
 /**
  * @brief 测试用例 sem — 信号量 create/take/give/ISR/delete
+ * @details 创建计数与二进制信号量；验证 timeout、give/take、give_from_isr 与 delete。
  * @return 无
  * @retval 无
  * @note 含二进制信号量与 timeout
  * @warning 无
  * @attention ❌ ISR；✅ 阻塞 take
+ * @internal
  */
 static void case_sem(void)
 {
@@ -670,11 +681,13 @@ static void case_sem(void)
 
 /**
  * @brief 测试用例 mutex — lock/unlock/递归/查询/delete
+ * @details 验证递归计数、holder 查询、解锁后 holder 清空，以及额外 8 层深度递归。
  * @return 无
  * @retval 无
  * @note 含 8 层深度递归
  * @warning 无
  * @attention ❌ ISR；✅ 阻塞 lock
+ * @internal
  */
 static void case_mutex(void)
 {
@@ -718,7 +731,7 @@ static task_id_t g_del_holder_id;
  * @retval 无
  * @note 与 del_waiter_task 配对
  * @warning 无
- * @attention ❌ ISR；✅ mutex/delay/delete
+ * @attention ❌ ISR；✅ block/switch（mutex/delay/delete）
  * @internal
  */
 static void del_holder_task(void *arg)
@@ -738,6 +751,7 @@ static void del_holder_task(void *arg)
 
 /**
  * @brief 安全删除测试：阻塞等锁，holder 自删后应获得锁
+ * @details 对 g_del_mtx 阻塞 lock（最长 800ms）；成功则置 g_del_waiter_got=1 并 unlock，验证 force_release handoff。
  * @param[in] arg 未使用
  * @return 无（永不返回）
  * @retval 无
@@ -761,11 +775,13 @@ static void del_waiter_task(void *arg)
 
 /**
  * @brief 测试用例 safety — stats/非法 delete/栈检测/持锁自删 handoff
+ * @details 校验 runtime stats、非法 task_delete、栈水位；再创建 dhold/dwait 验证持锁自删 handoff。
  * @return 无
  * @retval 无
  * @note 创建 dhold/dwait 任务并 suspend/resume 调度
  * @warning 依赖单核 affinity 绑定
  * @attention ❌ ISR；✅ 多任务阻塞
+ * @internal
  */
 static void case_safety(void)
 {
@@ -816,10 +832,13 @@ static void case_safety(void)
 
 /**
  * @brief 测试用例 queue — send/receive/ISR/messages_waiting/delete
+ * @details 创建队列后验证非阻塞 send/recv、messages_waiting，以及 FromISR 收发与 delete。
  * @return 无
  * @retval 无
+ * @note 元素类型为 uint32_t，深度 4
  * @warning 无
- * @attention ❌ ISR；✅ 队列 API
+ * @attention ❌ ISR；✅ block/switch（队列 API）
+ * @internal
  */
 static void case_queue(void)
 {
@@ -838,10 +857,13 @@ static void case_queue(void)
 
 /**
  * @brief 测试用例 event — set/wait/clear/wait_all/timeout/ISR/delete
+ * @details 覆盖 get/set/clear、wait_bits（含 wait_all 与 timeout）、set_from_isr 与 delete。
  * @return 无
  * @retval 无
+ * @note wait_all 退出时按 clear-on-exit 清位
  * @warning 无
  * @attention ❌ ISR；✅ wait_bits 阻塞
+ * @internal
  */
 static void case_event(void)
 {
@@ -873,12 +895,13 @@ static volatile uint32_t g_preempt_lo_spins;
 
 /**
  * @brief 抢占测试高优先级任务：置位 g_preempt_hi 后 idle
+ * @details 启动后立即递增 g_preempt_hi，随后永久 delay_ms(1000)，供低优先级忙等被抢占时观测。
  * @param[in] arg 未使用
  * @return 无（永不返回）
  * @retval 无
  * @note prio=20 vs 测试任务 busy loop
  * @warning 无
- * @attention ❌ ISR；✅ delay
+ * @attention ❌ ISR；✅ block/switch（delay）
  * @internal
  */
 static void preempt_hi_task(void *arg)
@@ -892,11 +915,13 @@ static void preempt_hi_task(void *arg)
 
 /**
  * @brief 测试用例 preempt — 高优先级抢占 busy 低优先级
+ * @details 创建 prio=20 的 preempt_hi_task，本任务 busy+yield 直至 g_preempt_hi 置位，断言抢占发生。
  * @return 无
  * @retval 无
  * @note 低优先级忙等+yield 直至 hi 运行
  * @warning 无
- * @attention ❌ ISR；✅ 创建/删除任务
+ * @attention ❌ ISR；✅ block/switch（创建/删除任务）
+ * @internal
  */
 static void case_preempt(void)
 {
@@ -918,10 +943,13 @@ static void case_preempt(void)
 
 /**
  * @brief 测试用例 streambuf — 流缓冲 create/send/recv/reset/delete
+ * @details 发送 "hello-stream"，校验 bytes_available 与 recv 内容，再 reset/delete。
  * @return 无
  * @retval 无
+ * @note 触发水位 4，容量 64
  * @warning 无
- * @attention ❌ ISR；✅ stream API
+ * @attention ❌ ISR；✅ block/switch（stream API）
+ * @internal
  */
 static void case_streambuf(void)
 {
@@ -940,10 +968,13 @@ static void case_streambuf(void)
 
 /**
  * @brief 测试用例 msgbuf — 消息缓冲分帧 send/recv/delete
+ * @details 连续发送两帧 "alpha"/"beta!"，按帧 recv 校验长度与首字节，再 delete。
  * @return 无
  * @retval 无
+ * @note 容量 128 字节（含帧头开销）
  * @warning 无
- * @attention ❌ ISR；✅ message buffer API
+ * @attention ❌ ISR；✅ block/switch（message buffer API）
+ * @internal
  */
 static void case_msgbuf(void)
 {
@@ -963,10 +994,13 @@ static void case_msgbuf(void)
 
 /**
  * @brief 测试用例 qset — 队列集 add/select/receive
+ * @details 将两队列加入 set，向 q2 发送后 select 应返回 q2，再 receive 校验数据。
  * @return 无
  * @retval 无
+ * @note select 超时 50ms
  * @warning 无
  * @attention ❌ ISR；✅ queue set 阻塞 select
+ * @internal
  */
 static void case_qset(void)
 {
@@ -989,11 +1023,13 @@ static void case_qset(void)
 
 /**
  * @brief 测试用例 fs — RAM 文件系统 mkdir/open/read/write/stat/readdir
+ * @details 覆盖写读、rename、statfs/sync、unlink/rmdir 与 format 后重建冒烟。
  * @return 无
  * @retval 无
  * @note 每次 cgrtos_fs_init 重置卷
  * @warning 无
  * @attention ❌ ISR；✅ FS 阻塞路径
+ * @internal
  */
 static void case_fs(void)
 {
@@ -1043,9 +1079,10 @@ static void case_fs(void)
  * @details 验证 vfs_init/mount 列表、路径路由到 RAM 后端、以及 umount 根保护。
  * @return 无
  * @retval 无
- * @note 依赖 CONFIG_USE_VFS=1
+ * @note 依赖 CONFIG_USE_VFS=1；关闭时 expect vfs_skipped
  * @warning 无
  * @attention ❌ ISR；✅ 可能阻塞
+ * @internal
  */
 static void case_vfs(void)
 {
@@ -1084,10 +1121,13 @@ static void case_vfs(void)
 
 /**
  * @brief 测试用例 notify — task notify / notify_wait
+ * @details 创建 notify_waiter，发送 eSetValueWithOverwrite(0xA5)，断言 g_notify_got。
  * @return 无
  * @retval 无
+ * @note 依赖 notify_waiter 辅助任务
  * @warning 无
- * @attention ❌ ISR；✅ 创建任务与 notify
+ * @attention ❌ ISR；✅ block/switch（创建任务与 notify）
+ * @internal
  */
 static void case_notify(void)
 {
@@ -1102,10 +1142,13 @@ static void case_notify(void)
 
 /**
  * @brief 测试用例 timer — 软定时器 start/stop/change/reset/delete
+ * @details 周期定时器触发 ≥2 次后改周期、stop 验证不再递增，再 reset/delete。
  * @return 无
  * @retval 无
+ * @note 回调为 timer_cb，递增 g_timer_fires
  * @warning 时间断言含 tick 容差
- * @attention ❌ ISR；✅ timer API
+ * @attention ❌ ISR；✅ block/switch（timer API）
+ * @internal
  */
 static void case_timer(void)
 {
@@ -1126,10 +1169,13 @@ static void case_timer(void)
 
 /**
  * @brief 测试用例 task — 生命周期 suspend/resume/prio/stack/delete
+ * @details 创建 RR 任务后校验 state、suspend/resume、set_priority、栈水位与 delete。
  * @return 无
  * @retval 无
+ * @note worker 为 rr_worker
  * @warning 无
- * @attention ❌ ISR；✅ 任务管理 API
+ * @attention ❌ ISR；✅ block/switch（任务管理 API）
+ * @internal
  */
 static void case_task(void)
 {
@@ -1154,6 +1200,7 @@ static void case_task(void)
  * @note 多核时 EDF 软亲和 0xFF
  * @warning QEMU 时间 skew 影响比例断言
  * @attention ❌ ISR；✅ 长时阻塞与多任务
+ * @internal
  */
 static void case_sched(void)
 {
@@ -1230,12 +1277,13 @@ static volatile tick_t g_m1_dl_under_lock;
 
 /**
  * @brief Module1 PT 测试低优先级 worker（可选高抢占阈值）
+ * @details 若启用 PREEMPT_THRESH 则 set_preempt_threshold(20)；约 40 tick 内递增 g_m1_lo_hits。
  * @param[in] arg 未使用
  * @return 无（永不返回）
  * @retval 无
  * @note CONFIG_USE_PREEMPT_THRESH 下 set_preempt_threshold(20)
  * @warning 无
- * @attention ❌ ISR；✅ 纯计算循环
+ * @attention ❌ ISR；✅ block/switch（纯计算循环）
  * @internal
  */
 static void m1_lo_worker(void *arg)
@@ -1259,11 +1307,13 @@ static void m1_lo_worker(void *arg)
 
 /**
  * @brief Module1 PT 测试高优先级 worker
+ * @details 约 40 tick 内递增 g_m1_hi_hits；在 lo 阈值抑制解除前可能无法推进。
  * @param[in] arg 未使用
  * @return 无（永不返回）
  * @retval 无
+ * @note 与 m1_lo_worker 同核对跑验证抢占阈值
  * @warning 无
- * @attention ❌ ISR
+ * @attention ❌ ISR；✅ block/switch（纯计算后 delay）
  * @internal
  */
 static void m1_hi_worker(void *arg)
@@ -1284,8 +1334,9 @@ static void m1_hi_worker(void *arg)
  * @param[in] arg 未使用
  * @return 无（任务退出）
  * @retval 无
+ * @note 供 case_sched_m1 验证退出后状态为 Deleted/Invalid/Terminated
  * @warning 无
- * @attention ❌ ISR
+ * @attention ❌ ISR；❌ 不主动阻塞
  * @internal
  */
 static void m1_exit_worker(void *arg)
@@ -1298,12 +1349,13 @@ static void m1_exit_worker(void *arg)
 #if CONFIG_USE_DPCP && CONFIG_USE_EDF
 /**
  * @brief Module1 DPCP 测试：持锁期间 deadline 应被天花板压低
+ * @details 先设较远 deadline，再 lock DPCP 互斥并采样 self->deadline 到 g_m1_dl_under_lock。
  * @param[in] arg 未使用
  * @return 无（永不返回）
  * @retval 无
  * @note 写入 g_m1_dl_under_lock 供断言
  * @warning 需 CONFIG_USE_DPCP && CONFIG_USE_EDF
- * @attention ❌ ISR；✅ mutex/deadline
+ * @attention ❌ ISR；✅ block/switch（mutex/deadline）
  * @internal
  */
 static void m1_dpcp_worker(void *arg)
@@ -1329,11 +1381,12 @@ static volatile int g_m2_isr_hits;
 
 /**
  * @brief Module2 ISR API 守卫钩子：递增 g_m2_isr_hits
+ * @details 由 cgrtos_set_isr_api_hook 注册；在 ISR API 守卫路径被调用时计数。
  * @return 无
  * @retval 无
  * @note 配合 cgrtos_set_isr_api_hook
  * @warning 无
- * @attention ✅ 钩子上下文
+ * @attention ✅ ISR API 钩子路径；❌ block/switch
  * @internal
  */
 static void m2_isr_hook(void)
@@ -1343,10 +1396,13 @@ static void m2_isr_hook(void)
 
 /**
  * @brief 测试用例 m2_ipc — 超时/死锁检测/ISR 守卫（module2）
+ * @details 验证 sem timeout、可选死锁检测递归锁路径、ISR API 守卫钩子与错误码区分。
  * @return 无
  * @retval 无
+ * @note 部分子测受 CONFIG_DETECT_DEADLOCK / CONFIG_ISR_API_GUARD 门控
  * @warning 部分子测受 Kconfig 门控
- * @attention ❌ ISR；✅ IPC API
+ * @attention ❌ ISR；✅ block/switch（IPC API）
+ * @internal
  */
 static void case_m2_ipc(void)
 {
@@ -1389,10 +1445,13 @@ static uint8_t g_m3_pool_storage[64 * 8];
 
 /**
  * @brief 测试用例 m3_mem — 固定池 mempool 与 double-free（module3）
+ * @details 创建 8 块×64B 池，alloc/free/free_count/delete；再验证堆 double-free 安全吞掉。
  * @return 无
  * @retval 无
+ * @note 使用静态 g_m3_pool_storage
  * @warning 无
- * @attention ❌ ISR；✅ 池/堆 API
+ * @attention ❌ ISR；✅ block/switch（池/堆 API）
+ * @internal
  */
 static void case_m3_mem(void)
 {
@@ -1418,11 +1477,12 @@ static volatile int g_m4_create_hits;
 
 /**
  * @brief Module4 任务创建钩子：递增 g_m4_create_hits
+ * @details 由 cgrtos_set_task_create_hook 注册；每次 task_create 成功路径递增计数。
  * @return 无
  * @retval 无
  * @note 配合 cgrtos_set_task_create_hook
  * @warning 无
- * @attention ✅ 钩子上下文
+ * @attention ✅ 任务创建钩子（非 ISR）；❌ block/switch
  * @internal
  */
 static void m4_create_hook(void)
@@ -1432,10 +1492,13 @@ static void m4_create_hook(void)
 
 /**
  * @brief 测试用例 m4_safe — 创建钩子/watchdog/MPU API（module4）
+ * @details 可选验证 task_create_hook；调用 watchdog_kick 与 mpu_init 冒烟。
  * @return 无
  * @retval 无
+ * @note CONFIG_USE_HOOKS 门控钩子段
  * @warning CONFIG_USE_HOOKS 门控部分断言
- * @attention ❌ ISR
+ * @attention ❌ ISR；❌ 主体不长时间阻塞
+ * @internal
  */
 static void case_m4_safe(void)
 {
@@ -1457,10 +1520,13 @@ static void case_m4_safe(void)
 
 /**
  * @brief 测试用例 m5_perf — EDF 进度与 sched_ready_count（module5）
+ * @details 创建短周期 EDF worker 断言有进度；校验 ready_count；可选清空 idle_sleep_hook。
  * @return 无
  * @retval 无
+ * @note CONFIG_USE_EDF 关闭时软跳过 EDF 段
  * @warning 无
- * @attention ❌ ISR；✅ EDF 任务
+ * @attention ❌ ISR；✅ block/switch（EDF 任务）
+ * @internal
  */
 static void case_m5_perf(void)
 {
@@ -1482,10 +1548,13 @@ static void case_m5_perf(void)
 
 /**
  * @brief 测试用例 m6_dbg — klog 级别与 task_list_export（module6）
+ * @details 设置日志级别、导出任务表；可选 objects_stats 与 trace_export。
  * @return 无
  * @retval 无
+ * @note 受 CONFIG_USE_OBJ_QUERY / CONFIG_USE_TRACE 门控
  * @warning 无
- * @attention ❌ ISR
+ * @attention ❌ ISR；❌ 不阻塞
+ * @internal
  */
 static void case_m6_dbg(void)
 {
@@ -1526,10 +1595,13 @@ static void case_m6_dbg(void)
 
 /**
  * @brief 测试用例 sched_m1 — 抢占阈值/DPCP/exit/sched-stats（module1）
+ * @details 按 Kconfig 分支验证 PT 抑制抢占、任务 return 退出、调度统计与 DPCP 天花板。
  * @return 无
  * @retval 无
+ * @note 大量子项可软跳过（disabled expect）
  * @warning 大量 Kconfig 分支软跳过
- * @attention ❌ ISR；✅ 多任务长时间运行
+ * @attention ❌ ISR；✅ block/switch（多任务长时间运行）
+ * @internal
  */
 static void case_sched_m1(void)
 {
@@ -1611,11 +1683,13 @@ static void case_sched_m1(void)
 
 /**
  * @brief 测试用例 smp — 次核 online/affinity/load balance
+ * @details 等待 g_secondary_online；测亲和跑核 1；多核时创建 lb_worker 并显式 load_balance。
  * @return 无
  * @retval 无
  * @note 单核构建软跳过 aff/lb
  * @warning 次核未 online 时断言放宽
- * @attention ❌ ISR；✅ SMP 调度 API
+ * @attention ❌ ISR；✅ block/switch（SMP 调度 API）
+ * @internal
  */
 static void case_smp(void)
 {
@@ -1691,10 +1765,13 @@ static void case_smp(void)
 
 /**
  * @brief 测试用例 hooks — idle/tick 钩子与静态 IPC/timer 回收
+ * @details 注册 idle/tick 钩子断言触发；再测 static sem/mutex/queue/event 与 timer 槽回收。
  * @return 无
  * @retval 无
+ * @note CONFIG_USE_HOOKS 门控 tick/idle 段
  * @warning CONFIG_USE_HOOKS 门控 tick/idle 段
- * @attention ❌ ISR；✅ 钩子注册
+ * @attention ❌ ISR；✅ block/switch（钩子注册）
+ * @internal
  */
 static void case_hooks(void)
 {
@@ -1743,10 +1820,13 @@ static void case_hooks(void)
 
 /**
  * @brief 测试用例 critical — 临界区标志/yield/stats_dump
+ * @details enter/exit_critical 校验 in_critical；再 yield 与 stats_dump 冒烟。
  * @return 无
  * @retval 无
+ * @note 不创建额外任务
  * @warning 无
- * @attention ❌ ISR；✅ enter/exit_critical
+ * @attention ❌ ISR；✅ block/switch（enter/exit_critical）
+ * @internal
  */
 static void case_critical(void)
 {
@@ -1770,7 +1850,8 @@ static void case_critical(void)
  * @retval 无
  * @note 覆盖 stream/message/timer FromISR，与 ipc.c 队列/事件互补
  * @warning 依赖 CONFIG_USE_HOOKS 与 tick 驱动
- * @attention ❌ 用例主体在任务上下文；✅ 子路径在 tick ISR
+ * @attention ❌ ISR（用例主体在任务上下文）；✅ block/switch（子路径经 tick ISR）
+ * @internal
  */
 static void case_isr(void)
 {
@@ -1856,7 +1937,8 @@ static void case_isr(void)
  * @retval 无
  * @note 使用 irq_test_handler 验证 dispatch 计数
  * @warning 不依赖真实外设触发，仅软件 dispatch
- * @attention ❌ 任务上下文；✅ 测试 FromISR 临界区 API
+ * @attention ❌ ISR（任务上下文驱动）；✅ block/switch（测试 FromISR 临界区 API）
+ * @internal
  */
 static void case_irq(void)
 {
@@ -1917,6 +1999,7 @@ static void case_irq(void)
  * @note 冻结后 hal_device_register 须返回 HAL_ERR_STATE
  * @warning bogus 设备仅用于负测，不挂入真实驱动
  * @attention ❌ ISR；❌ 不阻塞
+ * @internal
  */
 static void case_hal(void)
 {
@@ -2022,10 +2105,15 @@ static const test_case_t g_cases[] = {
     { "hal",       "HAL registry/errors/console/irqc/ipi",    case_hal },
 };
 
+/**
+ * @brief 功能用例表条目数
+ * @warning 依赖 g_cases[] 静态表；勿在表外手动改此值
+ */
 #define N_CASES ((int)(sizeof(g_cases) / sizeof(g_cases[0])))
 
 /**
  * @brief 比较两个 C 字符串是否相等
+ * @details 逐字符比较直至遇 '\0'；任一指针为 NULL 则返回 0。区分大小写。
  * @param[in] a 字符串 a；NULL 视为不等
  * @param[in] b 字符串 b；NULL 视为不等
  * @return 1 相等；0 不等
@@ -2033,7 +2121,7 @@ static const test_case_t g_cases[] = {
  * @retval 0 不等或任一为空
  * @note 区分大小写
  * @warning 无
- * @attention ✅ 任意上下文；❌ 不阻塞
+ * @attention ✅ ISR；❌ block/switch
  * @internal
  */
 static int str_eq(const char *a, const char *b)
@@ -2050,6 +2138,7 @@ static int str_eq(const char *a, const char *b)
 
 /**
  * @brief 打印 pass/fail 汇总；可选输出套件通过/失败标记
+ * @details 输出 Results 行；suite_marker 非零时再打印 TEST_SUITE_PASSED/FAILED。
  * @param[in] suite_marker 非零时输出 TEST_SUITE_PASSED/FAILED 标记
  * @return 无
  * @retval 无
@@ -2073,6 +2162,7 @@ static void print_results(int suite_marker)
 
 /**
  * @brief 清零全局 pass/fail 计数器
+ * @details 将 g_pass、g_fail 置 0；不修改用例表。
  * @return 无
  * @retval 无
  * @note 与 test_cases.h 声明一致
@@ -2087,6 +2177,7 @@ void test_cases_reset(void)
 
 /**
  * @brief 读取当前通过计数
+ * @details 返回自上次 reset 以来的 [PASS] 累计次数（g_pass）。
  * @return 累计 [PASS] 次数
  * @retval >=0 通过数
  * @note 只读 g_pass
@@ -2100,6 +2191,7 @@ int test_cases_pass_count(void)
 
 /**
  * @brief 读取当前失败计数
+ * @details 返回自上次 reset 以来的 [FAIL] 累计次数（g_fail）。
  * @return 累计 [FAIL] 次数
  * @retval >=0 失败数
  * @note 只读 g_fail
@@ -2131,6 +2223,7 @@ const test_case_t *test_cases_get(int *count)
 
 /**
  * @brief 打印全部可用用例名与一行帮助
+ * @details 遍历 g_cases[] 打印 name/help，并附加合成名 stress 与 all 的说明。
  * @return 无
  * @retval 无
  * @note CLI `help` 可调用

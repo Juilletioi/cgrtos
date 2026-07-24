@@ -2,8 +2,8 @@
  * @file cli_fs.h
  * @brief CLI 文件系统命令（VFS 之上；可由 CONFIG_CLI_FS 裁剪）
  * @author Cong Zhou / Juilletioi
- * @version 5.0.0
- * @date 2026-07-22
+ * @version 5.3.0
+ * @date 2026-07-24
  * @copyright CG-RTOS
  */
 #ifndef CLI_FS_H
@@ -12,6 +12,10 @@
 #include "../kernel/cgrtos.h"
 
 #ifndef CONFIG_CLI_FS
+/**
+ * @brief 默认启用 CLI 文件系统命令
+ * @warning 无运行时副作用（编译期常量）
+ */
 #define CONFIG_CLI_FS 1
 #endif
 
@@ -24,7 +28,7 @@
  * @retval 无
  * @note 在 cli_task 启动时调用一次
  * @warning 无
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ ISR；❌ block/switch
  */
 void cli_fs_session_init(void);
 
@@ -37,7 +41,7 @@ void cli_fs_session_init(void);
  * @retval 0 未识别为 FS 命令
  * @note 所有文件操作走 vfs_*，不耦合 LittleFS/FatFS
  * @warning mkfs / rm -r 会交互确认；长 IO 可用 Ctrl-C 中止
- * @attention ❌ ISR；✅ 可能阻塞
+ * @attention ❌ ISR；✅ block/switch
  */
 int cli_fs_try_handle(char *line);
 
@@ -48,18 +52,51 @@ int cli_fs_try_handle(char *line);
  * @retval 无
  * @note 无
  * @warning 无
- * @attention ❌ ISR；✅ 可能阻塞 printf
+ * @attention ❌ ISR；✅ block/switch
  */
 void cli_fs_help(void);
 
 #else
 
+/**
+ * @brief CONFIG_CLI_FS=0 时的空实现：会话初始化占位
+ * @details 无操作。
+ * @return 无
+ * @retval 无
+ * @note 无
+ * @warning 无
+ * @attention ❌ ISR；❌ block/switch
+ * @internal
+ */
 static inline void cli_fs_session_init(void) {}
+
+/**
+ * @brief CONFIG_CLI_FS=0 时的空实现：不处理任何命令
+ * @details 始终返回 0，表示未识别。
+ * @param[in] line 命令行（忽略）
+ * @return 始终 0
+ * @retval 0 未处理
+ * @note 无
+ * @warning 无
+ * @attention ❌ ISR；❌ block/switch
+ * @internal
+ */
 static inline int cli_fs_try_handle(char *line)
 {
     (void)line;
     return 0;
 }
+
+/**
+ * @brief CONFIG_CLI_FS=0 时的空实现：不追加帮助
+ * @details 无操作。
+ * @return 无
+ * @retval 无
+ * @note 无
+ * @warning 无
+ * @attention ❌ ISR；❌ block/switch
+ * @internal
+ */
 static inline void cli_fs_help(void) {}
 
 #endif /* CONFIG_CLI_FS */

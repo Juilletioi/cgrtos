@@ -20,12 +20,13 @@ extern cgrtos_event_group_t g_egs[CGRTOS_MAX_EVENT];
 
 /**
  * @brief 统计等待链长度
+ * @details 沿 next 指针遍历等待队列，上限为 CONFIG_MAX_TASKS 以防环。
  * @param[in] head 等待队列头
  * @return 节点数
  * @retval >=0 长度
- * @note @internal
+ * @note 仅在临界区内调用
  * @warning 调用方须已持临界区
- * @attention @internal ❌ ISR；❌ 不阻塞
+ * @attention ❌ ISR；❌ block/switch
  * @internal
  */
 static uint32_t waitq_len(cgrtos_task_t *volatile head)
@@ -48,7 +49,7 @@ static uint32_t waitq_len(cgrtos_task_t *volatile head)
  * @retval -1 out 为空
  * @note 短临界区
  * @warning 无
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ ISR；❌ block/switch
  */
 int cgrtos_objects_stats_get(cgrtos_objects_stats_t *out)
 {
@@ -120,7 +121,7 @@ int cgrtos_objects_stats_get(cgrtos_objects_stats_t *out)
  * @retval >=0 条数
  * @note 无
  * @warning 截断时仅填 max 条
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ ISR；❌ block/switch
  */
 uint32_t cgrtos_sem_list_export(cgrtos_sem_info_t *out, uint32_t max)
 {
@@ -144,13 +145,14 @@ uint32_t cgrtos_sem_list_export(cgrtos_sem_info_t *out, uint32_t max)
 
 /**
  * @brief 导出互斥量对象摘要
+ * @details 扫描互斥量池，填充 handle/owner_id/recursive/waiters。
  * @param[out] out 输出数组；NULL 仅计数
  * @param[in]  max 容量
  * @return 条数
  * @retval >=0 条数
  * @note 无
  * @warning 无
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ ISR；❌ block/switch
  */
 uint32_t cgrtos_mutex_list_export(cgrtos_mutex_info_t *out, uint32_t max)
 {
@@ -174,13 +176,14 @@ uint32_t cgrtos_mutex_list_export(cgrtos_mutex_info_t *out, uint32_t max)
 
 /**
  * @brief 导出队列对象摘要
+ * @details 扫描队列池，填充 handle/len/item_sz/count 与收发等待数。
  * @param[out] out 输出数组；NULL 仅计数
  * @param[in]  max 容量
  * @return 条数
  * @retval >=0 条数
  * @note 无
  * @warning 无
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ ISR；❌ block/switch
  */
 uint32_t cgrtos_queue_list_export(cgrtos_queue_info_t *out, uint32_t max)
 {
@@ -211,7 +214,7 @@ uint32_t cgrtos_queue_list_export(cgrtos_queue_info_t *out, uint32_t max)
  * @retval 无
  * @note CLI/调试
  * @warning UART 可能阻塞
- * @attention ❌ ISR；✅ 可能阻塞
+ * @attention ❌ ISR；✅ block/switch
  */
 void cgrtos_objects_dump(void)
 {
@@ -230,6 +233,16 @@ void cgrtos_objects_dump(void)
 
 #else /* !CONFIG_USE_OBJ_QUERY */
 
+/**
+ * @brief 填充对象池占用快照（功能未启用时的空实现）
+ * @details 若 out 非空则清零并返回 -1，表示 OBJ_QUERY 未编译。
+ * @param[out] out 输出缓冲；可为 NULL
+ * @return 始终 -1
+ * @retval -1 CONFIG_USE_OBJ_QUERY 关闭
+ * @note 链接占位，保持 API 可用
+ * @warning 无有效统计
+ * @attention ❌ ISR；❌ block/switch
+ */
 int cgrtos_objects_stats_get(cgrtos_objects_stats_t *out)
 {
     if (out) {
@@ -237,24 +250,70 @@ int cgrtos_objects_stats_get(cgrtos_objects_stats_t *out)
     }
     return -1;
 }
+
+/**
+ * @brief 导出信号量摘要（功能未启用时的空实现）
+ * @details 忽略参数，返回 0。
+ * @param[out] out 未使用
+ * @param[in]  max 未使用
+ * @return 0
+ * @retval 0 无对象
+ * @note CONFIG_USE_OBJ_QUERY 关闭
+ * @warning 无
+ * @attention ❌ ISR；❌ block/switch
+ */
 uint32_t cgrtos_sem_list_export(cgrtos_sem_info_t *out, uint32_t max)
 {
     (void)out;
     (void)max;
     return 0;
 }
+
+/**
+ * @brief 导出互斥量摘要（功能未启用时的空实现）
+ * @details 忽略参数，返回 0。
+ * @param[out] out 未使用
+ * @param[in]  max 未使用
+ * @return 0
+ * @retval 0 无对象
+ * @note CONFIG_USE_OBJ_QUERY 关闭
+ * @warning 无
+ * @attention ❌ ISR；❌ block/switch
+ */
 uint32_t cgrtos_mutex_list_export(cgrtos_mutex_info_t *out, uint32_t max)
 {
     (void)out;
     (void)max;
     return 0;
 }
+
+/**
+ * @brief 导出队列摘要（功能未启用时的空实现）
+ * @details 忽略参数，返回 0。
+ * @param[out] out 未使用
+ * @param[in]  max 未使用
+ * @return 0
+ * @retval 0 无对象
+ * @note CONFIG_USE_OBJ_QUERY 关闭
+ * @warning 无
+ * @attention ❌ ISR；❌ block/switch
+ */
 uint32_t cgrtos_queue_list_export(cgrtos_queue_info_t *out, uint32_t max)
 {
     (void)out;
     (void)max;
     return 0;
 }
+
+/**
+ * @brief 打印对象池占用（功能未启用时的空实现）
+ * @details 无操作。
+ * @return 无
+ * @retval 无
+ * @note CONFIG_USE_OBJ_QUERY 关闭
+ * @warning 无
+ * @attention ❌ ISR；❌ block/switch
+ */
 void cgrtos_objects_dump(void) {}
 
 #endif /* CONFIG_USE_OBJ_QUERY */

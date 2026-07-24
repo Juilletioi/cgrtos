@@ -1,6 +1,6 @@
 # 多 CPU / 多板级移植指南
 
-CG-RTOS 通过 **板级 BSP**（`boards/<BOARD>/`）+ **架构实现**（`arch/<ARCH>/`）+ **CPU 移植头**（`kernel/arch_port.h`）支持多架构。内核业务代码不得直接写 CSR / DAIF / `svc` / `ecall`。
+CG-RTOS 通过 **板级 BSP**（`boards/{BOARD}/`）+ **架构实现**（`arch/<ARCH>/`）+ **CPU 移植头**（`kernel/arch_port.h`）支持多架构。内核业务代码不得直接写 CSR / DAIF / `svc` / `ecall`。
 
 ## 分层
 
@@ -19,7 +19,7 @@ arch/<ARCH>  drv_timer / drv_irqc / drv_uart / drv_ipi
    │         │
    └────┬────┘
         ▼
- boards/<BOARD>/hal_board.h + board.mk + link.lds
+ boards/{BOARD}/hal_board.h + board.mk + link.lds
 ```
 
 ## 已支持并在 QEMU 可跑
@@ -48,7 +48,7 @@ export LD_LIBRARY_PATH=/home/cong/cgrtos-tools/root/usr/lib/x86_64-linux-gnu:$LD
 ./scripts/cgrtos.sh demo --board qemu_virt_a64 --cores 1 --cpu cortex-a72
 ```
 
-对象文件在 `build/<BOARD>/`；固件仍输出到仓库根目录 `cgrtos.elf` / `cgrtos.bin`。
+对象文件在 `build/{BOARD}/`；固件仍输出到仓库根目录 `cgrtos.elf` / `cgrtos.bin`。
 
 ## 必实现：`arch_port.h` API
 
@@ -80,7 +80,7 @@ Trap 入口（RISC-V `startup.S`）：`arch_handle_timer` / `ipi` / `external` /
 
 ```
 boards/<board>/
-  hal_board.h   # MMIO / IRQ 号 / HAL_BOARD_NAME
+  hal_board.h   # MMIO / IRQ 号 / HAL_BOARD
   board.mk      # BOARD_ARCH、CROSS、QEMU、TIMER_HZ、UART、DELAY_BUSY_US
   link.lds      # RAM ORIGIN / LENGTH
 arch/<arch>/startup.S   # 默认启动与向量（可用 BOARD_STARTUP 覆盖）

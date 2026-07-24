@@ -2,8 +2,8 @@
  * @file hal_core.c
  * @brief HAL 设备注册表、锁与用户 API 分发实现
  * @author Cong Zhou / Juilletioi
- * @version 5.0.0
- * @date 2026-07-22
+ * @version 5.3.0
+ * @date 2026-07-24
  * @copyright CG-RTOS
  *
  * @details
@@ -31,22 +31,31 @@
 #include "hal_drv.h"
 #include "../kernel/cgrtos.h"
 
+/** @brief 全局设备注册表槽位（静态指针数组）。 */
 static hal_device_t *g_devs[HAL_DEVICE_MAX];
+/** @brief 当前已注册设备数量。 */
 static int g_dev_count;
+/** @brief 注册表冻结标志（非 0 后禁止再 register）。 */
 static volatile uint8_t g_registry_frozen;
+/** @brief 板级 hal_board_init 完成标志（幂等门闩）。 */
 static volatile uint8_t g_board_inited;
 
-/** 每类缓存，避免热路径反复线性查找 */
+/** @brief 每类首注册设备缓存，避免热路径反复线性查找。 */
 static hal_device_t *g_by_class[HAL_DEV_CLASS_MAX];
 
+/** @brief 保护注册表写路径的自旋锁。 */
 static spinlock_t g_reg_lock;
+/** @brief 串行化控制台输出的自旋锁（非 g_klock）。 */
 static spinlock_t g_console_lock;
+/** @brief 保护 IRQC priority/enable RMW 的自旋锁。 */
 static spinlock_t g_irqc_cfg_lock;
 
-/* 控制台锁持有者保存的 mstatus（每核一份，支持不同核交错 lock/unlock 配对） */
+/** @brief 控制台锁持有者保存的 mstatus（每核一份）。 */
 static uint64_t g_console_irq_saved[CONFIG_MAX_CORES];
-static uint8_t g_console_lock_nest[CONFIG_MAX_CORES]; /* 仅诊断：应为 0/1 */
+/** @brief 控制台锁嵌套诊断计数（应为 0/1）。 */
+static uint8_t g_console_lock_nest[CONFIG_MAX_CORES];
 
+/** @brief IRQC 配置锁路径保存的 mstatus（每核一份）。 */
 static uint64_t g_irqc_irq_saved[CONFIG_MAX_CORES];
 
 /**
@@ -455,8 +464,8 @@ hal_status_t hal_board_init(void)
  * @return 无
  * @retval 无
  * @note 与 hal_console_unlock 成对调用
- * @warning 持锁期间禁止 yield / 再取 g_klock / 长时间阻塞
- * @attention ❌ ISR；❌ 不阻塞
+ * @warning 持锁期间禁止 yield / 再取 g_klock / 长时间阻塞；不可重入
+ * @attention ❌ ISR 勿与任务争锁；❌ block/switch
  */
 void hal_console_lock(void)
 {
@@ -480,7 +489,7 @@ void hal_console_lock(void)
  * @retval 无
  * @note 必须与 hal_console_lock 同核配对
  * @warning 未持锁时调用行为未定义
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ ISR 勿误释放；❌ block/switch
  */
 void hal_console_unlock(void)
 {
@@ -602,7 +611,7 @@ void hal_console_putc_unlocked(char c)
  * @retval 无
  * @note SMP 下整字符输出原子
  * @warning 持锁期间禁止 yield
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ✅ ISR；❌ block/switch（持锁勿长时间占用/yield）
  */
 void hal_console_putc(char c)
 {
@@ -619,7 +628,7 @@ void hal_console_putc(char c)
  * @retval -1 无数据或设备不可用
  * @note 不 yield，仅单次 poll
  * @warning 持锁期间禁止 yield
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ✅ ISR；❌ 不阻塞
  */
 int hal_console_pollc(void)
 {
@@ -667,7 +676,7 @@ char hal_console_getc(void)
  * @retval 无
  * @note SMP 下整串不会半行交错
  * @warning 持锁期间禁止 yield
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ✅ ISR；❌ block/switch（持锁勿长时间占用/yield）
  */
 void hal_console_puts(const char *s)
 {
@@ -692,7 +701,7 @@ void hal_console_puts(const char *s)
  * @retval HAL_ERR_PARAM buf 为 NULL 且 len>0
  * @note 与 hal_console_puts 相同锁策略
  * @warning 持锁期间禁止 yield
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ✅ ISR；❌ block/switch（持锁勿长时间占用/yield）
  */
 int hal_console_write(const void *buf, size_t len)
 {

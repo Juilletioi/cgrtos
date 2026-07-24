@@ -4,11 +4,8 @@
 
 生成 API 文档 / SDK：
 
-```bash
-./scripts/cgrtos.sh sdk    # docs/doxygen + 打包 sdk/
-# 或仅 HTML：
-./scripts/cgrtos.sh docs
-```
+命令：`./scripts/cgrtos.sh sdk`（打包）或 `./scripts/cgrtos.sh docs`（仅 HTML）。
+
 ---
 
 ## 1. 总体结构
@@ -54,7 +51,7 @@ flowchart TB
 | 调度 | `kernel/scheduler.c` | 就绪队列、tick、切换、均衡 |
 | 任务 | `kernel/task.c` | 创建/删除/延时/通知/idle |
 | IPC | `kernel/ipc.c` | 信号量/互斥/队列/事件 |
-| 板级 | `boards/<BOARD>/` | MMIO、QEMU、链接脚本 |
+| 板级 | `boards/{BOARD}/` | MMIO、QEMU、链接脚本 |
 | 驱动 | `arch/<ARCH>/*.c` | timer / irqc / uart / ipi（`drv_*_device`） |
 | 流缓冲 | `kernel/stream_buffer.c` | StreamBuffer / MessageBuffer |
 | QueueSet | `kernel/queue_set.c` | 多对象 select |

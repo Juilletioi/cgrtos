@@ -2,8 +2,8 @@
  * @file ipic.c
  * @brief CLINT MSIP 核间中断驱动（纯硬件层）+ IPI trap 入口
  * @author Cong Zhou / Juilletioi
- * @version 5.0.0
- * @date 2026-07-22
+ * @version 5.3.0
+ * @date 2026-07-24
  * @copyright CG-RTOS
  *
  * @details
@@ -30,7 +30,7 @@ void board_ipi_clear(uint8_t hart);
  * @retval HAL_OK 成功
  * @note 由 HAL hal_board_init 经 ops->init 调用
  * @warning 驱动层禁止调用 hal_* 用户 API
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ ISR-safe；❌ 不阻塞、不引起上下文切换
  * @internal
  */
 static hal_status_t ipi_hw_init(hal_device_t *dev)
@@ -53,7 +53,7 @@ static hal_status_t ipi_hw_init(hal_device_t *dev)
  * @retval HAL_ERR_PARAM hart 越界
  * @note 由 HAL hal_ipi_send 经 ops->send 调用
  * @warning 目标 hart 须已上线且 MSIE 已使能
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ ISR-safe；❌ 不阻塞、不引起上下文切换
  * @internal
  */
 static hal_status_t ipi_hw_send(hal_device_t *dev, uint8_t hart)
@@ -77,9 +77,10 @@ static hal_status_t ipi_hw_send(hal_device_t *dev, uint8_t hart)
  * @param[in] dev  设备描述符；本驱动未使用
  * @param[in] hart 目标 hart 编号
  * @return 无
+ * @retval 无
  * @note 通常在本核 IPI ISR 中清本核 MSIP
  * @warning hart 须合法；越界写可能导致未定义行为
- * @attention ✅ ISR；❌ 不阻塞
+ * @attention ✅ ISR-safe；❌ 不阻塞、不引起上下文切换
  * @internal
  */
 static void ipi_hw_clear(hal_device_t *dev, uint8_t hart)
@@ -96,7 +97,7 @@ static void ipi_hw_clear(hal_device_t *dev, uint8_t hart)
  * @retval 无
  * @note 由 trap handle_ipi 在 riscv_handle_ipi 前调用
  * @warning hart 越界则忽略
- * @attention ✅ ISR；❌ 不阻塞
+ * @attention ✅ ISR-safe；❌ 不阻塞、不引起上下文切换
  */
 void board_ipi_clear(uint8_t hart)
 {
@@ -132,7 +133,7 @@ static hal_device_t s_ipi_dev = {
  * @retval 非 NULL 成功
  * @note 勿释放返回值；应用应使用 hal_ipi_send / hal_ipi_clear
  * @warning 驱动不得自行调用 hal_device_register
- * @attention ✅ ISR；❌ 不阻塞
+ * @attention ✅ ISR-safe；❌ 不阻塞、不引起上下文切换
  */
 hal_device_t *drv_ipi_device(void)
 {
@@ -149,9 +150,10 @@ hal_device_t *drv_ipi_device(void)
  * 5. cgrtos_isr_exit 退出 ISR 上下文。
  * @param[in] f 陷阱栈帧指针；本实现未使用
  * @return 无
+ * @retval 无
  * @note 由 startup.S / trap 向量直接调用；禁止再绕回 hal_ipi_*
  * @warning 须在中断上下文调用；不可从任务直接调用
- * @attention ✅ ISR；❌ 不阻塞
+ * @attention ✅ ISR-safe；✅ 可能引起上下文切换（tick / g_yield_pending）
  */
 void arch_handle_ipi(uint64_t *f)
 {

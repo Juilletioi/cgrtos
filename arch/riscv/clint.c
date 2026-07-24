@@ -2,8 +2,8 @@
  * @file clint.c
  * @brief Nuclei SysTimer / CLINT 定时器驱动（纯硬件层）
  * @author Cong Zhou / Juilletioi
- * @version 5.0.0
- * @date 2026-07-22
+ * @version 5.3.0
+ * @date 2026-07-24
  * @copyright CG-RTOS
  *
  * @details
@@ -16,6 +16,7 @@
 #include "hal_board.h"
 
 #ifndef CONFIG_TIMER_CLOCK_HZ
+/** @brief 缺省定时器时钟（Hz）；板级未配置时回退 1 MHz */
 #define CONFIG_TIMER_CLOCK_HZ  1000000ULL
 #endif
 
@@ -32,7 +33,7 @@ extern void cgrtos_isr_exit(void);
  * @retval >=0 有效计数
  * @note 只读 MMIO，可在任意上下文无锁调用
  * @warning 无
- * @attention ✅ ISR；❌ 不阻塞
+ * @attention ✅ ISR-safe；❌ 不阻塞、不引起上下文切换
  * @internal
  */
 static uint64_t clint_hw_mtime_read(hal_device_t *dev)
@@ -50,9 +51,10 @@ static uint64_t clint_hw_mtime_read(hal_device_t *dev)
  * @param[in] hartid 目标 hart 编号
  * @param[in] val    新的 mtimecmp 比较值
  * @return 无
+ * @retval 无
  * @note 内联函数，供 clint_schedule_next 与 ISR 路径调用
  * @warning hartid 须合法且对应已映射的 MTIMECMP
- * @attention ✅ ISR；❌ 不阻塞
+ * @attention ✅ ISR-safe；❌ 不阻塞、不引起上下文切换
  * @internal
  */
 static inline void mtimecmp_write(uint64_t hartid, uint64_t val)
@@ -69,9 +71,10 @@ static inline void mtimecmp_write(uint64_t hartid, uint64_t val)
  * 3. 若写后 mtime 已越过比较值，基于最新 mtime 重写，避免丢中断。
  * @param[in] hartid 本 hart 编号
  * @return 无
+ * @retval 无
  * @note 由 init 与 riscv_handle_timer 调用
  * @warning 依赖 CONFIG_TIMER_CLOCK_HZ 与 CONFIG_TICK_RATE_HZ 正确配置
- * @attention ✅ ISR；❌ 不阻塞
+ * @attention ✅ ISR-safe；❌ 不阻塞、不引起上下文切换
  * @internal
  */
 static void clint_schedule_next(uint64_t hartid)
@@ -99,7 +102,7 @@ static void clint_schedule_next(uint64_t hartid)
  * @retval HAL_OK 成功
  * @note 由 HAL hal_timer_init 经 ops->init 调用
  * @warning 驱动层禁止调用 hal_* 用户 API
- * @attention ❌ ISR；❌ 不阻塞
+ * @attention ❌ ISR-safe；❌ 不阻塞、不引起上下文切换
  * @internal
  */
 static hal_status_t clint_hw_init(hal_device_t *dev, uint32_t tick_hz)
@@ -134,7 +137,7 @@ static hal_device_t s_clint_dev = {
  * @retval 非 NULL 成功
  * @note 勿释放返回值；应用应使用 hal_timer_init / hal_mtime_read
  * @warning 驱动不得自行调用 hal_device_register
- * @attention ✅ ISR；❌ 不阻塞
+ * @attention ✅ ISR-safe；❌ 不阻塞、不引起上下文切换
  */
 hal_device_t *drv_timer_device(void)
 {
@@ -150,9 +153,10 @@ hal_device_t *drv_timer_device(void)
  * 4. cgrtos_isr_exit 退出 ISR 上下文。
  * @param[in] f 陷阱栈帧指针；本实现未使用
  * @return 无
+ * @retval 无
  * @note 由 startup.S / trap 向量直接调用；禁止再绕回 hal_timer_*
  * @warning 须在中断上下文调用；不可从任务直接调用
- * @attention ✅ ISR；❌ 不阻塞
+ * @attention ✅ ISR-safe；✅ 可能引起上下文切换（tick）
  */
 void arch_handle_timer(uint64_t *f)
 {

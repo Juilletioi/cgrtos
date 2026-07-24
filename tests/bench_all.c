@@ -2,8 +2,8 @@
  * @file bench_all.c
  * @brief APP=bench 入口：CG-RTOS 微基准测试套件
  * @author Cong Zhou / Juilletioi
- * @version 5.0.0
- * @date 2026-07-22
+ * @version 5.3.0
+ * @date 2026-07-24
  * @copyright CG-RTOS
  *
  * @details
@@ -24,7 +24,7 @@ static volatile int g_peer_done;
  * @retval >=0 单调递增的周期计数
  * @note 用于前后差分计算耗时
  * @warning 跨核读 mtime 时语义取决于 HAL 实现
- * @attention ✅ 任务上下文；❌ 非高精度 wall-clock
+ * @attention ✅ 任务上下文（非 ISR 限制）；❌ block/switch
  * @internal
  */
 static uint64_t cycles_now(void)
@@ -232,7 +232,7 @@ static void run_bench(void *arg)
  * @retval 0 仅异常
  * @note 不绑核；run_bench 内自行设置亲和性
  * @warning 若 task_create 失败仍 start，基准不会运行
- * @attention ❌ ISR；✅ 启动调度
+ * @attention ❌ ISR；✅ block/switch（启动调度）
  */
 int main(int hartid, void *fdt, void *end)
 {
@@ -253,7 +253,7 @@ int main(int hartid, void *fdt, void *end)
  * @retval 无
  * @note 基准主逻辑在 hart0 bench 任务
  * @warning 无
- * @attention ❌ ISR；✅ 进入调度
+ * @attention ❌ ISR；✅ block/switch（进入调度）
  */
 void secondary_main(int hartid)
 {
